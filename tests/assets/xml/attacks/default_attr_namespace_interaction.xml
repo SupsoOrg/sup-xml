@@ -1,0 +1,9 @@
+<?xml version="1.0"?>
+<!DOCTYPE root [
+  <!ATTLIST child xmlns:p CDATA "urn:default-ns">
+  <!ATTLIST child p:attr CDATA "default-value">
+]>
+<root>
+  <child/>
+  <child xmlns:p="urn:override"/>
+</root>

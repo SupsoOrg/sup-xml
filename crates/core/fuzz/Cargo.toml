@@ -1,0 +1,65 @@
+# Fuzz-target package for `sup-xml-core`.  Lives outside the workspace
+# (no entry in the workspace's `members`) so the workspace `cargo build`
+# doesn't compile it; cargo-fuzz drives it directly via its own
+# `fuzz/Cargo.toml`.
+#
+# Run with:
+#   cargo install cargo-fuzz
+#   cd crates/core && cargo +nightly fuzz run fuzz_xsd_compile
+#   cd crates/core && cargo +nightly fuzz run fuzz_xsd_validate
+#   cd crates/core && cargo +nightly fuzz run fuzz_parse_xpath
+#
+# Seed corpora live in `corpus/<target_name>/` and are used as starting
+# inputs.  The CI/release workflow can run each target for a bounded
+# duration (e.g. `cargo +nightly fuzz run fuzz_xsd_compile -- -max_total_time=300`).
+
+[package]
+name = "sup-xml-core-fuzz"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+
+[dependencies.sup-xml-core]
+path = ".."
+features = ["xsd"]
+
+[dependencies.sup-xml-tree]
+path = "../../tree"
+
+# Workspace exclusion — this crate isn't part of the parent workspace
+# (its requirements differ: nightly toolchain, libfuzzer dep).
+[workspace]
+
+[[bin]]
+name             = "fuzz_xsd_compile"
+path             = "fuzz_targets/fuzz_xsd_compile.rs"
+test             = false
+doc              = false
+bench            = false
+
+[[bin]]
+name             = "fuzz_xsd_validate"
+path             = "fuzz_targets/fuzz_xsd_validate.rs"
+test             = false
+doc              = false
+bench            = false
+
+[[bin]]
+name             = "fuzz_parse_xpath"
+path             = "fuzz_targets/fuzz_parse_xpath.rs"
+test             = false
+doc              = false
+bench            = false
+
+[[bin]]
+name             = "fuzz_xpath_eval"
+path             = "fuzz_targets/fuzz_xpath_eval.rs"
+test             = false
+doc              = false
+bench            = false

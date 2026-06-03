@@ -1,0 +1,6 @@
+<?xml version="1.0"?>
+<!DOCTYPE root [
+  <!NOTATION gif SYSTEM "image/gif">
+  <!NOTATION gif SYSTEM "image/gif2">
+]>
+<root/>

@@ -1,0 +1,85 @@
+[package]
+name = "sup-xml-compat"
+description = "C ABI compatibility shim — frozen libxml2-compatible interface"
+version.workspace = true
+edition.workspace = true
+license-file.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+# Built and distributed as a C-ABI shared object (`libsupxml2.so`/`.dylib`),
+# not as a crates.io dependency — consumers link it the way they link
+# libxml2, so it is never published to the registry.
+publish = false
+
+[lints]
+workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[features]
+# `c-abi` is on by default because every public item in this crate
+# references one of the c-abi-only struct layouts (`XmlDoc`,
+# `Attribute`, the c-abi variant of `Node`).  Without it the crate
+# isn't a "useful subset" — it just won't compile most of its API.
+# We keep it as a feature so that:
+#   1. `#[cfg(feature = "c-abi")]` gates in this crate's source mean
+#      what they say.
+#   2. Tooling that genuinely needs a lean rebuild (rare) can opt out
+#      via `--no-default-features` and get clean compile failures
+#      instead of silently-wrong pointer math.
+default = ["c-abi"]
+
+c-abi = ["sup-xml-core/c-abi", "sup-xml-tree/c-abi"]
+
+# `cdylib-exports`: emit every `extern "C"` entry point with
+# `#[no_mangle]` so the cdylib's symbol table mirrors `libxml2.dylib`
+# — `xmlReadMemory`, `xmlFree`, `xmlNodeGetContent`, etc. resolve
+# under their libxml2 names for `dlopen` / `LoadLibrary` consumers.
+#
+# OFF by default — silent symbol collision is the hazard, and any
+# binary that links *both* `sup-xml-compat` (as an rlib) and the
+# real `libxml2.dylib` would suffer real undefined behaviour:
+# our `xmlFree` static-mut global shadows the real one and a buffer
+# libxml2 malloced gets freed through our deallocator (SIGBUS,
+# observed during bench bring-up).  Benches, integration tests, and
+# Rust tooling that want to *inspect* compat without overriding
+# libxml2 leave this off and use the crate's Rust-mangled paths
+# (`sup_xml_compat::parse::xmlReadMemory` etc.).
+#
+# Ship the actual drop-in cdylib with `--features cdylib-exports`
+# (c-abi comes along by default).
+cdylib-exports = []
+
+# Internal feature: re-exports otherwise-private Rust entry points
+# (`__fuzz_*`) for use by the fuzz harness under `fuzz/`.  Never
+# enable in production builds; the `__fuzz_` prefix and `#[doc(hidden)]`
+# mark these as unstable internals.
+fuzzing = []
+
+[dependencies]
+# Forward features through to the underlying crates.  The `c-abi`
+# feature on this crate (above) is what activates them; without it
+# the shim won't compile (the byte-exact ABI types it exports don't
+# exist in the lean build).
+sup-xml-core = { path = "../core", version = "1.0.0", features = ["html", "xsd"] }
+sup-xml-tree = { path = "../tree", version = "1.0.0" }
+sup-xml-xslt = { path = "../xslt", version = "1.0.0" }
+# Used by the native EXSLT regexp family (regexp:test / replace /
+# match) in `xpath::exslt_regexp_dispatch`.  libxslt's own
+# implementation lives in libexslt and needs deeper context state
+# than our minimal parser-context bridge populates, so we
+# reimplement here against the Rust `regex` crate.
+regex = "1"
+# bumpalo: used to expose `Arc<Bump>` thread-local arena to the
+# parser/HTML-parser entry points so all docs created on this
+# thread share a single node arena.  See `dict.rs::thread_arena`.
+bumpalo = "3"
+
+[dev-dependencies]
+# Installed as the global allocator in `tests/allocator_symmetry.rs`
+# to prove the C-ABI malloc/free family stays libc-symmetric even when
+# the host process runs a non-default Rust allocator.
+mimalloc = { version = "0.1", default-features = false }

@@ -1,0 +1,37 @@
+# Fuzz-target package for `sup-xml-compat`.  Lives outside the workspace
+# (no entry in the parent's `members`) so the workspace `cargo build`
+# doesn't compile it; cargo-fuzz drives it directly via this manifest.
+#
+# Run with:
+#   cargo install cargo-fuzz
+#   cd crates/compat && cargo +nightly fuzz run fuzz_build_uri
+#
+# Seed corpus lives in `corpus/fuzz_build_uri/`.  See `FUZZING.md`
+# at the repo root for the rest of the workflow.
+
+[package]
+name = "sup-xml-compat-fuzz"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+
+[dependencies.sup-xml-compat]
+path = ".."
+features = ["fuzzing"]
+
+# This crate isn't part of the parent workspace (nightly toolchain +
+# libfuzzer dep).
+[workspace]
+
+[[bin]]
+name             = "fuzz_build_uri"
+path             = "fuzz_targets/fuzz_build_uri.rs"
+test             = false
+doc              = false
+bench            = false

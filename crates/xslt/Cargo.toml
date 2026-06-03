@@ -1,0 +1,27 @@
+[package]
+name = "sup-xml-xslt"
+description = "XSLT 1.0 transformation engine built on sup-xml's XPath core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license-file.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+default = []
+
+[dependencies]
+sup-xml-core = { path = "../core", version = "1.0.0" }
+sup-xml-tree = { path = "../tree", version = "1.0.0" }
+# Date/time arithmetic for the XSLT-added `format-number`,
+# `current-dateTime`-style functions and any time-based output
+# behaviour.  Same minimal-feature-set as `sup-xml-core` — see
+# crates/core/Cargo.toml's chrono dep for rationale.
+chrono = { version = "0.4", default-features = false, features = ["std"] }
+rustc-hash.workspace = true

@@ -1,0 +1,60 @@
+[package]
+name = "sup-xml"
+description = "Modern idiomatic Rust API for SupXML"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license-file.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+# Pull in `serde` to enable `sup_xml::de::*` — typed-struct deserialization
+# of XML directly into Rust values via Serde.  Adds a `serde` dependency;
+# disabled by default so users who only want the event/DOM API don't pay
+# the compile-time cost.
+serde = ["dep:serde"]
+# Pull in the XSD (XML Schema 1.0) validator under `sup_xml::xsd::*`.
+# Adds `rust_decimal` and `regex` via `sup-xml-core`'s `xsd` feature.
+xsd = ["sup-xml-core/xsd"]
+# Pull in `NetworkResolver` for HTTPS-fetched DTDs / entities.  Off
+# by default — pulls `ureq` as a transitive dep.  See
+# `sup_xml::NetworkResolver` for the security policy.
+network-resolver = ["sup-xml-core/network-resolver"]
+# Pull in the lenient HTML5 parser under `sup_xml::html::*`.
+# Off by default — pulls `html5ever` as a transitive dep.
+# See `sup_xml::parse_html_str` for the entry point.
+html = ["sup-xml-core/html"]
+# Pull in the XSLT 1.0 engine under `sup_xml::xslt::*`
+# (Stylesheet, Loader, Schematron, the apply_* family).
+# Off by default — adds the `sup-xml-xslt` crate as a dep.
+xslt = ["dep:sup-xml-xslt"]
+# Pull in `sup_xml::async_io::parse_async_*` — async entry points
+# that read bytes via `tokio::io::AsyncReadExt` then dispatch to
+# the (synchronous, CPU-bound) parser.  Off by default — adds
+# `tokio` as a dep.
+tokio = ["dep:tokio"]
+
+[dependencies]
+sup-xml-core = { path = "../core", version = "1.0.0" }
+sup-xml-tree = { path = "../tree", version = "1.0.0" }
+sup-xml-xslt = { path = "../xslt", version = "1.0.0", optional = true }
+serde = { version = "1", optional = true }
+tokio = { version = "1", optional = true, default-features = false, features = ["io-util"] }
+
+[dev-dependencies]
+serde = { version = "1", features = ["derive"] }
+# Used by the `tokio` feature's tests for `#[tokio::test]`.  Only
+# pulled in when running the test suite with --features tokio.
+tokio = { version = "1", features = ["macros", "rt"] }
+
+# Build docs.rs with every optional feature enabled so the gated
+# modules (xsd, xslt, html, serde de, async_io, network-resolver)
+# all appear in the published documentation.
+[package.metadata.docs.rs]
+all-features = true

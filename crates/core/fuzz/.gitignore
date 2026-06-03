@@ -1,0 +1,6 @@
+# cargo-fuzz outputs — generated per-run, never committed.
+target/
+artifacts/
+coverage/
+corpus_run/
+Cargo.lock

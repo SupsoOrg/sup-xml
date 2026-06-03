@@ -1,0 +1,109 @@
+[package]
+name = "sup-xml-core"
+description = "Safe Rust core: error types, character primitives, encoding utilities"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license-file.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+default = ["full-encodings"]
+# Pull in `encoding_rs` to support every encoding the WHATWG spec defines —
+# Shift-JIS, GB18030, EUC-KR, Big5, ISO-8859-2..16, KOI8-R, etc.  Adds ~150 KB
+# of decoding tables.  Disable with `--no-default-features` if you only need
+# Tier 1/2 (UTF-8 / ASCII / Latin-1 / Windows-1252 / UTF-16).
+full-encodings = ["dep:encoding_rs"]
+# Pull in the XSD (XML Schema 1.0) validator.  `rust_decimal` is no
+# longer gated here — it's unconditional below because the XPath 2.0
+# numeric tower needs exact xs:decimal arithmetic regardless of
+# whether the schema validator is enabled.  `bitflags` stays
+# xsd-only.
+xsd = ["dep:bitflags"]
+# Pull in `ureq` to enable the `NetworkResolver` for HTTPS-fetched
+# DTDs / entities.  Off by default — XXE / SSRF protection is the
+# default stance, and pulling in an HTTP client is not free.  Users
+# who need network DTD loading opt in with this feature; everyone
+# else gets only the filesystem / catalog / in-memory resolvers.
+network-resolver = ["dep:ureq"]
+# Pull in `html5ever` to enable the lenient HTML5 parser under
+# `sup_xml_core::html`.  Off by default — pulls a substantial dep
+# tree (html5ever, markup5ever, tendril, string_cache, phf, ...).
+html = ["dep:html5ever", "dep:markup5ever"]
+# Forwards to `sup-xml-tree/c-abi`.  When on, this crate's parser
+# performs the c-abi-specific bookkeeping (e.g. chaining namespace
+# declarations onto `node->ns_def`) that the libxml2-shape tree needs.
+# Off by default — pure-Rust consumers don't pay the cost.
+c-abi = ["sup-xml-tree/c-abi"]
+
+[dependencies]
+sup-xml-tree = { path = "../tree", version = "1.0.0" }
+# License gate: every document-parse entry point verifies a license
+# certificate once per process (cached) before producing a tree.
+sup-xml-license = { path = "../license", version = "1.0.0" }
+# Logging facade for the license-gate grace-period notice.  Routes to
+# whatever logger the host installed (env_logger, tracing-log, slog, …)
+# and is a silent no-op otherwise — a library must not write to stderr
+# unbidden.
+log = "0.4"
+# bumpalo: types appear in `parse_bytes_with_dtd_dict_arena` /
+# `parse_html_bytes_opts_with_dict_arena` signatures so C-ABI
+# consumers can pass a shared arena.  Not used internally by the
+# parser otherwise — the arena flows through `DocumentBuilder`.
+bumpalo = "3"
+memchr = "2"
+# EXSLT `regexp:test` / `regexp:replace` (XPath function family at
+# http://exslt.org/regular-expressions).  Perl-style semantics —
+# matches what libexslt/libxml2 ship, modulo backreferences in
+# replacement which we serve via `${N}` instead of `$N` if needed.
+regex = "1"
+# Calendar types + arithmetic for the EXSLT date family
+# (`xpath::exslt::date`).  Minimal feature set: `std` only — we
+# avoid `clock` because it pulls in `iana-time-zone` and OS-level
+# timezone resolution, which EXSLT doesn't need (XSD/EXSLT uses
+# numeric offsets exclusively).  "Now" comes from
+# `std::time::SystemTime` and is converted to `DateTime<Utc>`
+# manually.
+chrono = { version = "0.4", default-features = false, features = ["std"] }
+# Append-only vector with stable element references.  Powers the
+# XSLT result-tree-fragment side store in `xpath::context::DocIndex`:
+# RTF subtrees are constructed during evaluation through a `&DocIndex`,
+# but their internal `&[NodeId]` children slices must stay valid for
+# the rest of the evaluation.  `FrozenVec<Box<RtfIndex>>` lets us
+# push via `&self` while every `&RtfIndex` we hand out keeps its
+# heap address stable.  Uses unsafe internally but exposes safe APIs
+# — the same trust profile as `bumpalo` / `regex`.
+elsa = "1.10"
+encoding_rs = { version = "0.8", optional = true }
+rustc-hash.workspace = true
+# Exact xs:decimal arithmetic for the XPath 2.0 numeric tower
+# (`Numeric::Decimal`).  Unconditional because every 2.0 stylesheet
+# whose literals contain `.` parses them as xs:decimal per XPath 2.0
+# §3.1.1, and the spec mandates exact decimal arithmetic (`0.1+0.2`
+# must be `0.3`, not `0.30000000000000004`).  Re-exported from the
+# crate root so embedders can interoperate with the broader Rust
+# decimal ecosystem (sqlx, sea-orm, postgres) without version-
+# matching gymnastics.  Semver: tied to rust_decimal 1.x; bumping
+# it is a major version of this crate.
+rust_decimal = { version = "1", default-features = false }
+bitflags = { version = "2", optional = true }
+# Unicode General Category lookups for the XSD §F regex engine
+# (`xsd::regex`).  Used to materialise range tables for `\p{L}`,
+# `\p{Nd}`, etc. on first use.
+unicode-properties = { version = "0.1", default-features = false, features = ["general-category"] }
+ureq = { version = "2", optional = true, default-features = false, features = ["tls"] }
+# Pinned to an exact version on purpose — markup5ever's TreeSink trait
+# has changed shape across releases historically.  We bump deliberately
+# rather than via `cargo update`.
+html5ever = { version = "=0.39.0", optional = true }
+markup5ever = { version = "=0.39.0", optional = true }
+
+# Render every feature-gated module on docs.rs.
+[package.metadata.docs.rs]
+all-features = true

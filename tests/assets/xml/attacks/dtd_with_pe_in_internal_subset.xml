@@ -1,0 +1,6 @@
+<?xml version="1.0"?>
+<!DOCTYPE root [
+  <!ENTITY % bad "<!ELEMENT root EMPTY>">
+  <!ELEMENT %bad; some-element>
+]>
+<root/>

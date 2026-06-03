@@ -1,0 +1,37 @@
+# Miri runs the SupXML test suite under Rust's MIR interpreter to
+# detect undefined behaviour in our unsafe code.  See CONTRIBUTING.md
+# § "Unsafe policy" for the policy and rationale.
+#
+# `sup-xml-bench` is excluded because it links libxml2 via FFI; Miri
+# can't interpret native code.
+
+name: miri
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+    branches: [master, main]
+
+env:
+  CARGO_TERM_COLOR: always
+  # Stacked Borrows is the strict aliasing model Miri uses to catch
+  # provenance violations.  Defaults are fine for us — we don't need
+  # `-Zmiri-tree-borrows` (the experimental successor) yet.
+  MIRIFLAGS: "-Zmiri-strict-provenance"
+
+jobs:
+  miri:
+    name: cargo miri test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install nightly toolchain with Miri
+        run: |
+          rustup toolchain install nightly --component miri
+          rustup override set nightly
+          cargo miri setup
+
+      - name: Run Miri on the workspace
+        run: cargo miri test --workspace --exclude sup-xml-bench

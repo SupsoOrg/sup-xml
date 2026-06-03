@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<root xmlns="http://example.com/default"
+      xmlns:dc="http://purl.org/dc/elements/1.1/"
+      xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+      xsi:schemaLocation="http://example.com/default schema.xsd">
+  <dc:title>Namespace Test Document</dc:title>
+  <dc:creator>SupXML</dc:creator>
+  <item id="1">
+    <name xml:lang="en">English Name</name>
+    <name xml:lang="fr">Nom Français</name>
+  </item>
+  <item id="2">
+    <description>Uses the default namespace.</description>
+  </item>
+</root>

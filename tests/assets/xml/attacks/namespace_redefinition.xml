@@ -1,0 +1,10 @@
+<?xml version="1.0"?>
+<root xmlns:p="urn:a">
+  <p:x xmlns:p="urn:b">
+    <p:x xmlns:p="urn:c">
+      <p:x xmlns:p="urn:d">
+        <p:x xmlns:p="urn:e"/>
+      </p:x>
+    </p:x>
+  </p:x>
+</root>

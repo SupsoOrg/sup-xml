@@ -1,0 +1,424 @@
+<?xml version="1.0" encoding="ISO-8859-1"?>
+<?xml-stylesheet type="text/xsl" href="tutorial.xsl"?>
+
+<tutorial>
+  <header>
+    <title>Transitions Among Campaign Maps</title>
+    <author>Mtlhead</author>
+  </header>
+  <text>
+    <p>	This tutorial describes a specialized use of the 'Save Game and Load Game' and 'Save Game and Change Level' triggers that were originally demonstrated by Blizzard in the Orc Expansion Campaign that came with the Frozen Throne WCIII expansion, and later were released for public mapping in WCIII Patch 1.13. This tutorial assumes that you already have experience and a good understanding of the WCIII World Editor, and have some experience with advanced triggering. If you are new to WE (i.e. a "newbie"), I recommend you spend some time learning about the World Editor by making maps and reading other tutorials before trying this one. This tutorial particularly assumes that you know how to use the Campaign editor and are familiar with techniques for Game Caching. If you don't know what those are, please don't even try this yet.</p>
+    <p>	I must give credit where due and explain why this tutorial is unique. I want to thank Blizzard for releasing the save/load triggers to the community, as this adds a level of creativity above and beyond what you could do with WE before. I must give credit to Adins Bejoty, as his save/load tutorial, hosted on a similar site to this one, was the first tutorial released on the subject. However, this tutorial is different in two ways. </p>
+    <p>First, his tutorial draws directly from the Blizzard triggers in the Orc Ex. Campaign Part 1. I learned the basics of the system and created what I believe is a simpler method of doing transitions. Second, and most importantly, this tutorial shows how you can create transitions between any maps in a campaign, not just between an 'Overmap' and secondary maps. In the Orc campaign, you had a hub-and-spoke configuration that looked something like this: </p>
+    <p type="figure">images/Image02.jpg</p>
+    <p>Though this was possible in the Orc Campaign, the Blizzard designers wanted to keep the "Overmap" structure.  In my opinion, this put restrictions on travel from region to region (map to map) that don't reflect reality.</p>
+    <p>On the other hand, this tutorial demonstrates a full-mesh system, where there is no need for a central Overmap, like this;</p>
+    <p type="figure">images/Image01.jpg</p>
+    <p> In other words, you can set up the system to allow travel to any map from any map. It makes things much more interesting. Once you understand the system, it is easy enough to create any combination of fully and/or partially connected maps for your campaign creations. I highly recommend you create your first campaign by reading this tutorial and manually typing in triggers as you go along, instead of just copying the triggers out of the campaign files. That way you will have a better understanding of what is going on and then you will be able to use the system for your own creations. You can make 4-map, 5-map, or even larger campaigns with unlimited transition possibilities.</p>
+    <p>On with the show</p>
+    <p>	The first task is to open the campaign editor and create a new campaign and name it something like 'Transitions Tutorial". Then create three blank maps and name them something like 'Map1', 'Map2', and 'Map3'. Save these maps and then import them in to your campaign on the 'General' tab of the campaign editor. Don't forget to add a button for each map on the ''Loading Screen' tab also, so that the maps will all show up as 'used' in the 'General' tab. Once you have done this and saved your campaign file, close the maps in WE. From now on, you should only edit the maps by right-clicking them in the Campaign Manager 'General' tab window and selecting 'Edit Map'. This way, when you save the changes to your maps, they are saved in to the campaign file directly and you don't have to worry about re-importing maps in to the campaign file. </p>
+    <p>At this point I must pause to give warning of a particularly frustrating bug in the save/load trigger system before continuing with the tutorial.</p>
+    <p>The 43-Character Limit</p>
+    <p>	In creating this tutorial, I intended to be as clear and comprehensive as I could in providing descriptions and documentation of every aspect of the system. Note the heavy use of commenting in 'TransTutorialMap1'. One of the things I thought might help was to rename the campaign, map files and Saved Game folder with accurate descriptions. This was when I encountered one of the strangest and most perplexing bugs I have ever seen in the World Editor. I discovered that the Load Saved Game action has a limit as to how many characters it can read in the path to a saved map file. I'll try to explain this, as it was an extremely aggravating problem that took me weeks to solve. </p>
+    <p>	One of the keys to the Save/Load trigger system that Blizzard released in Patch 1.13 is where the game saves maps when you run the save-game trigger and then load another saved game. The basic path to these saves is: </p>
+    <p>C:\Program Files\WarcraftIII\save\Profile1\CustomSaves\(name of your campaign)\(custom save folder, optional)\(map name).w3z. </p>
+    <p>Your path may vary depending on the drive letter your game is installed on, and whether you installed the game in the default directory or a custom directory, but these are not really relevant to the problem. For this tutorial, you are only concerned with the part of the path that comes after the …\CustomSaves\… folder. To use the Save/Load system, your maps must be copied in to a campaign and you must run the game from the Custom Campaign screen for your maps to work. You can not test your maps by clicking the 'Test Map' button in WE. The transitions will not work if you try to test this way. In the tutorial campaign, I used a custom save folder for the maps, but this is not really necessary. The bottom line is that the combined length of </p>
+    <p>(name of your campaign)\(custom save folder, optional)\(map name) </p>
+    <p>or:</p>
+    <p>(name of your campaign)\(map name)</p>
+    <p>cannot exceed 43 characters, including the back-slashes (but not including the file extension). If it does, the game will not find the saved map and will crash to the campaign loading screen. Let me illustrate:</p>
+    <p>"Transition Tutorial\Saves\TransTutorialMap1.w3z" </p>
+    <p>is the path to the maps in the tutorial campaign (see Download at the end of this tutorial). The length of this path is 43 characters including spaces and backslashes, but not including the .w3z extension. This works, but is as long as it can be without causing problems. If I were to have used:</p>
+    <p>"Transition Tutorial\Saves\Trans Tutorial Map1.w3z"</p>
+    <p>this would be 2 characters too long because of the added spaces. I hope this explains the problem clearly enough for most people to understand. But the gist of it all is just remember to keep your campaign name and map names relatively short when using the save/load trigger system. </p>
+    <p>Back to the show...</p>
+    <p>	When creating your three maps, I recommend you use different tile sets so that you can tell them apart as your hero unit transitions (travels) among them. You can use a standard hero for simplicity, or create a custom one like I did in the tutorial campaign. If you use a custom hero, remember to copy the custom unit to your other maps or to the campaign custom data table so that your hero will be available throughout the campaign. Now, to create a full-mesh, you need a transition location that coincides with every other map in the campaign. </p>
+    <p>Since you are using three maps in this tutorial, you need two transition locations on each map. If you were to use four maps, you would need three transition locations on each map, and five maps would require four locations per map, and so on. These locations can be indicated with a cave entrance, a forest clearing, a building, or whatever suits your purposes. The idea is to indicate to the player that this is a location where something different is going to happen. I used cave entrances in the tutorial maps. </p>
+    <p>I recommend you place a hero, either standard or custom, on map 1 to use for your character. Later you can devise your own method of placing a unit triggers if you like, but pre-placing a unit is easier for now. Go ahead and decorate your maps as you see fit with terrain and doodads. It is a good idea to place some creeps to fight and some items to pick up, so that you can clearly see how the changes to you're hero are carried from map to map. </p>
+    <p>Once you are done decorating the maps and placing your hero, the last task in the terrain editor is to place two special regions near each of your transition locations. You need a 'To Map X' region and a 'From Map X' region at each location. So, on Map 1, you will have a location to transition to Map 2 that will need a 'To Map 2' region and a 'From Map 2' region nearby. You will also have a transition location for Map 3 and accompanying 'To' and 'From' regions. Make sure these regions DO NOT overlap or you will have problems. Place your 'To' regions near the target transition location (cave entrance, pub door, etc.), and your From locations a little farther away. This is so your unit can walk away from the arrival point without having to walk through the 'To' region. That would cause unlimited frustrations!</p>
+    <p>Now, on to the meat of the system!</p>
+    <p>Now for the actual triggers: leave the Initialization trigger in place. You can leave or remove the Melee Game actions as you see fit, but make sure you take out 'Melee Game - Enforce victory/defeat conditions (for all players)' in all maps. In addition to Initialization, you need to create four other triggers in all maps. Just create the triggers for now. You will add Events and Actions in a bit. In Map 1, you will need the following:</p>
+    <p>Initialization</p>
+    <p>Subsequent Starts</p>
+    <p>Go to Map 2</p>
+    <p>Go to Map 3</p>
+    <p>Load</p>
+    <p>Map 2 and Map 3 will have the same triggers, except in Map 2 use 'Go to Map 1' and 'Go to Map 3', and in Map 3 use 'Go to Map 1' and 'Go to Map 2'.</p>
+  </text>
+  <attachments>
+    <image number="1" src="images/Image01.jpg"/>
+    <image number="2" src="images/Image02.jpg"/>
+    <map number="1" name="Transitions Tutorial Maps" src="http://www.student.tue.nl/t/h.a.m.maassen/warcraft/mtlhead/transition%20tutorial.w3n"/>
+  </attachments>
+  <code on="1">
+    <variable name="CommonCache" type="Game Cache" value="-None-">
+      <p>Self-explanatory; you can use multiple caches to track different data, but it's simpler to use one cache with different Headings for different data.</p>
+    </variable>
+    <variable name="LeftFromMap" type="Integer" value="0">
+      <p>a simple integer that holds the map number you just left. This way the game knows which 'From' region to place your unit in when the next map loads.</p>
+    </variable>
+    <variable name="LoadingFrom" type="Region Array (2)" value="-None-">
+      <p>used to convert the LeftFromMap variable from an integer to a region</p>
+    </variable>
+    <variable name="Map2NewGame" type="Boolean" value="True">
+      <p>This is a special requirement of this transition system. The game needs to know always when it must change to a new level (map that hasn't been visited yet) or load a previously saved map. You need one of these for every map in your campaign except Map 1. Since you start the campaign on Map 1, you will always be loading a saved map when you come back to Map 1.</p>
+    </variable>
+    <variable name="Map3NewGame" type="Boolean" value="True">
+      <p></p>
+    </variable>
+    <trigger name="Map 1 Triggers - Initialization" number="1">
+      <events>
+        Map initialization
+      </events>
+      <conditions>
+        (None)
+      </conditions>
+      <actions>
+        Game Cache - Create a game cache from CommonCache.w3v
+        Set CommonCache = (Last created game cache)
+        Set LoadingFrom[2] = From Map 2
+        Set LoadingFrom[3] = From Map 3
+        Trigger - Turn off (This trigger)
+      </actions>
+      <comments>
+        <p>The triggers in this text have been reduced to the absolute minimum to make the maps work. You may notice a few that I added to the tutorial campaign, which are commented as to their use. Also, in case there is confusion, I commented the triggers in the attached campaign before the applicable actions, but in this text, the comments are after the actions.</p>
+        <p>-To save some space, it's easier to create the game cache right up front. </p>
+        <p>-Setting the game cache variable allows referencing the cache without using 'Last Created Cache', which could cause problems when you have multiple triggers accessing the cache.</p>
+        <p>-You must set region variables so that the cache knows where to place your Hero upon returning to this map. </p>
+        <p>-I'm not actually sure if turning off this trigger is necessary, but it seemed like a good safety check. </p>
+      </comments>
+    </trigger>
+    <trigger name="Subsequent Starts" number="2">
+      <events>
+        Game - A saved game is loaded
+      </events>
+      <conditions>
+        (None)
+      </conditions>
+      <actions>
+        Game Cache - Create a game cache from CommonCache.w3v
+        Set CommonCache = (Last created game cache)
+        Trigger - Run Load (ignoring conditions)
+      </actions>
+      <comments>
+        <p>-Recreating the game cache here is absolutely necessary for the system to work. It took me days to figure this out before it would work. </p>
+        <p>-On map 1, the cache will be loaded only after loading a saved game. I suppose you could do all the loading actions here, but I created a separate trigger to maintain commonality with the other maps, and to allow for debugging if there is a problem. </p>
+        
+      </comments>
+    </trigger>
+    <trigger name="Go to Map 2" number="3">
+      <events>
+        Unit - A unit enters To Map 2
+      </events>
+      <conditions>
+        ((Entering unit) is A Hero) Equal to True
+      </conditions>
+      <actions>
+        Set LeftFromMap = 1
+        Game Cache - Clear all labels of Units in CommonCache
+        Game Cache - Store (Entering unit) as Hero of Units in CommonCache
+        Game Cache - Store (Life of (Entering unit)) as HeroLife of Units in CommonCache
+        Game Cache - Store (Mana of (Entering unit)) as HeroMana of Units in CommonCache
+        Game Cache - Store LeftFromMap as LeftFromMap of Variables in CommonCache
+        Game Cache - Store Map2NewGame as Map2NewGame of Variables in CommonCache
+        Game Cache - Store Map3NewGame as Map3NewGame of Variables in CommonCache
+        Game Cache - Save CommonCache
+        Unit - Remove (Entering unit) from the game
+        If (All Conditions are True) then do (Then Actions) else do (Else Actions)
+          If - Conditions
+        	Map2NewGame Equal to True
+        	Then - Actions
+            Game - Save game as Saves\TransTutorialMap1.w3z and change level to
+              TransTutorialMap2.w3x (Skip scores)
+          Else - Actions
+            Game - Save game as Saves\TransTutorialMap1.w3z and load
+              Saves\TransTutorialMap2.w3z (Skip scores)
+      </actions>
+      <comments>
+        <p>-You can of course set the conditions to trigger the transition based on any criterion you choose (specific Hero, unit belongs to Player 1, etc.) but you should have something here to so that the transition won't be triggered by a wandering creep or something.</p>
+        <p>-This tells the Cache where you are leaving from so the game will know where to place your Hero in the next map.</p>
+        <p>-You have to clean out the Units category each time you transition, or you won't get the latest stats, items, etc. for your Hero in the next map. Note that we have created a variable for the game cache, but not for the category or labels. In the next steps, you should type these in by hand in the value box on the input screen. Using variables here is known to cause strange behavior. However, you can use a variable for the cache name.</p>
+        <p>-Now you have stored all relevant information in the Cache.</p>
+        <p>-The preceding variables are the key to the game knowing whether to load a new map or a saved game. These variables were given a default setting of 'True' in the variable editor. You need to use variables in the first field, but hand type values in the second field. Note you don't have to store the status of Map 1. You started here, so will always come back to a saved game.</p>
+        <p>-This last part is critical. If you haven't visited the next map, the game calls the default Map 2. If you have been to Map 2 before, the game loads the saved map from the campaign custom saves file. Note that Map 1 is being saved to a custom saved-game folder. This is not absolutely necessary, but if you experience a problem with the game crashing to the loading screen, then try adding an action in the Init trigger to delete this saved-game folder. You could also do the condition by testing whether a saved game exists, but I found the Boolean variable test to be simpler.</p>
+      </comments>
+    </trigger>
+    <trigger name="Go to Map 3" number="4">
+      <events>
+        Unit - A unit enters To Map 3
+      </events>
+      <conditions>
+        ((Entering unit) is A Hero) Equal to True
+      </conditions>
+      <actions>
+        Set LeftFromMap = 1
+        Game Cache - Clear all labels of Units in CommonCache
+        Game Cache - Store (Entering unit) as Hero of Units in CommonCache
+        Game Cache - Store (Life of (Entering unit)) as HeroLife of Units in CommonCache
+        Game Cache - Store (Mana of (Entering unit)) as HeroMana of Units in CommonCache
+        Game Cache - Store LeftFromMap as LeftFromMap of Variables in CommonCache
+        Game Cache - Store Map2NewGame as Map2NewGame of Variables in CommonCache
+        Game Cache - Store Map3NewGame as Map3NewGame of Variables in CommonCache
+        Game Cache - Save CommonCache
+        Unit - Remove (Entering unit) from the game
+        If (All Conditions are True) then do (Then Actions) else do (Else Actions)
+          If - Conditions
+            Map3NewGame Equal to True
+          Then - Actions
+            Game - Save game as Saves\TransTutorialMap1.w3z and change level to
+              TransTutorialMap3.w3x (Skip scores)
+          Else - Actions
+            Game - Save game as Saves\TransTutorialMap1.w3z and load
+              Saves\TransTutorialMap3.w3z (Skip scores)
+      </actions>
+      <comments>
+        <p>-This one is the same as the previous trigger, except its for Map 3. Please see the comments in 'Go to Map 2' above, but note the differences that apply to map 3 below. </p>
+      </comments>
+    </trigger>
+    <trigger name="Load" number="4">
+      <events>
+        (None)
+      </events>
+      <conditions>
+        (None)
+      </conditions>
+      <actions>
+        Game Cache - Reload all game cache data from disk
+        Set LeftFromMap = (Load LeftFromMap of Variables from CommonCache)
+        Set Map2NewGame = (Load Map2NewGame of Variables from CommonCache)
+        Set Map3NewGame = (Load Map3NewGame of Variables from CommonCache)
+        Game Cache - Restore Hero of Units from CommonCache for Player 1 (Red)
+          at (Center of LoadingFrom[LeftFromMap]) facing (Center of (Playable map area))
+        Unit - Set life of (Last restored unit) to (Load HeroLife of Units from CommonCache)
+        Unit - Set mana of (Last restored unit) to (Load HeroMana of Units from CommonCache)
+      </actions>
+      <comments>
+        <p>-Here the game gets the latest data.</p>
+        <p>-This variable tells the game where to place the entering unit(s). They should appear at the transition location associated with the map you just left.</p>
+        <p>-You must keep track of the status of every map except the one you are entering. Therefore, in Map 1 you need to keep track of every other map in your campaign. This is again so that the game will know which maps have been visited so far.</p>
+        <p>- Your hero appears at the cave exit (or whatever) all ready for the next quest. --------</p>
+      </comments>
+    </trigger>
+    <trigger name="Map 2 Triggers - Initialization" number="5">
+      <events>
+        Map initialization
+      </events>
+      <conditions>
+        (None)
+      </conditions>
+      <actions>
+        Game Cache - Create a game cache from CommonCache.w3v
+        Set CommonCache = (Last created game cache)
+        Set LoadingFrom[1] = From Map 1
+        Set LoadingFrom[3] = From Map 3
+        Set Map2NewGame = False
+        Trigger - Turn off (This trigger)
+        Trigger - Run Load  (ignoring conditions)
+      </actions>
+      <comments>
+        <p>-You must set region variables so that the cache knows where to place your Hero upon returning to this map. Note that you are setting region variables relevant only to the other maps in the campaign. There is of course no need to set a variable for LoadingFromMap2 when your are already on Map 2.</p>
+        <p>-Here is one key factor. Now that you have entered Map 2 once, you set Map2NewGame to False. This way, the game will load from the soon-to-be saved Map when transitioning back here from any other map from now on. </p>
+        <p>-Since you will always be entering this map from another map, you have to load the cache.</p>
+      </comments>
+    </trigger>
+    <trigger name="Subsequent Starts" number="6">
+      <events>
+        Game - A saved game is loaded
+      </events>
+      <conditions>
+        (None)
+      </conditions>
+      <actions>
+        Game Cache - Create a game cache from CommonCache.w3v
+        Set CommonCache = (Last created game cache)
+        Trigger - Run Load  (ignoring conditions)
+      </actions>
+      <comments>
+      </comments>
+    </trigger>
+    <trigger name="Go to Map 1" number="7">
+      <events>
+        Unit - A unit enters To Map 1
+      </events>
+      <conditions>
+        ((Entering unit) is A Hero) Equal to True
+      </conditions>
+      <actions>
+        Set LeftFromMap = 2
+        Game Cache - Clear all labels of Units in CommonCache
+        Game Cache - Store (Entering unit) as Hero of Units in CommonCache
+        Game Cache - Store (Life of (Entering unit)) as HeroLife of Units in CommonCache
+        Game Cache - Store (Mana of (Entering unit)) as HeroMana of Units in CommonCache
+        Game Cache - Store LeftFromMap as LeftFromMap of Variables in CommonCache
+        Game Cache - Store Map2NewGame as Map2NewGame of Variables in CommonCache
+        Game Cache - Save CommonCache
+        Unit - Remove (Entering unit) from the game
+        Game - Save game as Saves\TransTutorialMap2.w3z and load Saves\TransTutorialMap1.w3z
+          (Skip scores)
+      </actions>
+      <comments>
+        <p>-One difference from Map 1. Map 1 will always be loaded as a saved game when going back there. Therefore, there is no reason to test for Map 1 status. You just go there using the action above.</p>
+      </comments>
+    </trigger>
+    <trigger name="Go to Map 3" number="8">
+      <events>
+        Unit - A unit enters To Map 3
+      </events>
+      <conditions>
+        ((Entering unit) is A Hero) Equal to True
+      </conditions>
+      <actions>
+        Set LeftFromMap = 2
+        Game Cache - Clear all labels of Units in CommonCache
+        Game Cache - Store (Entering unit) as Hero of Units in CommonCache
+        Game Cache - Store (Life of (Entering unit)) as HeroLife of Units in CommonCache
+        Game Cache - Store (Mana of (Entering unit)) as HeroMana of Units in CommonCache
+        Game Cache - Store LeftFromMap as LeftFromMap of Variables in CommonCache
+        Game Cache - Store Map2NewGame as Map2NewGame of Variables in CommonCache
+        Game Cache - Save CommonCache
+        Unit - Remove (Entering unit) from the game
+        If (All Conditions are True) then do (Then Actions) else do (Else Actions)
+        	If - Conditions
+        	  Map3NewGame Equal to True
+        	Then - Actions
+            Game - Save game as Saves\TransTutorialMap2.w3z and change level to
+              TransTutorialMap3.w3x (Skip scores)
+        	Else - Actions
+            Game - Save game as Saves\TransTutorialMap2.w3z and load Saves\TransTutorialMap3.w3z
+              (Skip scores)
+      </actions>
+      <comments>
+      </comments>
+    </trigger>
+    <trigger name="Load" number="9">
+      <events>
+        (None)
+      </events>
+      <conditions>
+        (None)
+      </conditions>
+      <actions>
+        Game Cache - Reload all game cache data from disk
+        Set LeftFromMap = (Load LeftFromMap of Variables from CommonCache)
+        Set Map3NewGame = (Load Map3NewGame of Variables from CommonCache)
+        Game Cache - Restore Hero of Units from CommonCache for Player 1 (Red) at
+          (Center of LoadingFrom[LeftFromMap]) facing (Center of (Playable map area))
+        Unit - Set life of (Last restored unit) to (Load HeroLife of Units from CommonCache)
+        Unit - Set mana of (Last restored unit) to (Load HeroMana of Units from CommonCache)
+      </actions>
+      <comments>
+      </comments>
+    </trigger>
+    <trigger name="Map 3 Triggers - Initialization" number="10">
+      <events>
+        Map initialization
+      </events>
+      <conditions>
+        (None)
+      </conditions>
+      <actions>
+        Game Cache - Create a game cache from CommonCache.w3v
+        Set CommonCache = (Last created game cache)
+        Set LoadingFrom[1] = From Map 1
+        Set LoadingFrom[2] = From Map 2
+        Set Map3NewGame = False
+        Trigger - Turn off (This trigger)
+        Trigger - Run Load  (ignoring conditions)
+      </actions>
+      <comments>
+        <p>Map 3 triggers are virtually identical to Map 2. I left them in here so that you can compare them with Map 2 to note the minor differences.</p>
+      </comments>
+    </trigger>
+    <trigger name="Subsequent Starts" number="11">
+      <events>
+        Game - A saved game is loaded
+      </events>
+      <conditions>
+        (None)
+      </conditions>
+      <actions>
+        Game Cache - Create a game cache from CommonCache.w3v
+        Set CommonCache = (Last created game cache)
+        Trigger - Run Load  (ignoring conditions)
+      </actions>
+      <comments>
+      </comments>
+    </trigger>
+    <trigger name="Go to Map 1" number="12">
+      <events>
+        Unit - A unit enters To Map 1
+      </events>
+      <conditions>
+        ((Entering unit) is A Hero) Equal to True
+      </conditions>
+      <actions>
+        Set LeftFromMap = 3
+        Game Cache - Clear all labels of Units in CommonCache
+        Game Cache - Store (Entering unit) as Hero of Units in CommonCache
+        Game Cache - Store (Life of (Entering unit)) as HeroLife of Units in CommonCache
+        Game Cache - Store (Mana of (Entering unit)) as HeroMana of Units in CommonCache
+        Game Cache - Store LeftFromMap as LeftFromMap of Variables in CommonCache
+        Game Cache - Store Map3NewGame as Map3NewGame of Variables in CommonCache
+        Game Cache - Save CommonCache
+        Unit - Remove (Entering unit) from the game
+        Game - Save game as Saves\TransTutorialMap3.w3z and load Saves\TransTutorialMap1.w3z
+          (Skip scores)
+      </actions>
+      <comments>
+      </comments>
+    </trigger>
+    <trigger name="Go to Map 2" number="13">
+      <events>
+        Unit - A unit enters To Map 2
+      </events>
+      <conditions>
+        ((Entering unit) is A Hero) Equal to True
+      </conditions>
+      <actions>
+        Set LeftFromMap = 3
+        Game Cache - Clear all labels of Units in CommonCache
+        Game Cache - Store (Entering unit) as Hero of Units in CommonCache
+        Game Cache - Store (Life of (Entering unit)) as HeroLife of Units in CommonCache
+        Game Cache - Store (Mana of (Entering unit)) as HeroMana of Units in CommonCache
+        Game Cache - Store LeftFromMap as LeftFromMap of Variables in CommonCache
+        Game Cache - Store Map3NewGame as Map3NewGame of Variables in CommonCache
+        Game Cache - Save CommonCache
+        Unit - Remove (Entering unit) from the game
+        If (All Conditions are True) then do (Then Actions) else do (Else Actions)
+        	If - Conditions
+        	  Map2NewGame Equal to True
+        	Then - Actions
+            Game - Save game as Saves\TransTutorialMap3.w3z and change level to
+              TransTutorialMap2.w3x (Skip scores)
+        	Else - Actions
+            Game - Save game as Saves\TransTutorialMap3.w3z and load Saves\TransTutorialMap2.w3z
+              (Skip scores)
+      </actions>
+      <comments>
+      </comments>
+    </trigger>
+    <trigger name="Load" number="14">
+      <events>
+        (None)
+      </events>
+      <conditions>
+        (None)
+      </conditions>
+      <actions>
+        Game Cache - Reload all game cache data from disk
+        Set LeftFromMap = (Load LeftFromMap of Variables from CommonCache)
+        Set Map2NewGame = (Load Map2NewGame of Variables from CommonCache)
+        Game Cache - Restore Hero of Units from CommonCache for Player 1 (Red) at (Center of
+        LoadingFrom[LeftFromMap]) facing (Center of (Playable map area))
+        Unit - Set life of (Last restored unit) to (Load HeroLife of Units from CommonCache)
+        Unit - Set mana of (Last restored unit) to (Load HeroMana of Units from CommonCache)
+      </actions>
+      <comments>
+      </comments>
+    </trigger>
+  </code>
+  <footer>
+    <comment>That's it. This completes the triggers to make a 3-map campaign in which you have total freedom to travel to any map from any map. Good Luck and Good Mapping!</comment>
+    <email name="Mtlhead"><![CDATA[http://maps.worldofwar.net/users?name=Mtlhead]]></email>
+  </footer>
+</tutorial>

@@ -1,0 +1,41 @@
+[package]
+name = "sup-xml-license"
+description = "Offline Ed25519 license-token verification for sup-xml"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license-file.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+default = []
+
+[dependencies]
+# Pre-quantum half of the hybrid signature.  Well-vetted, fast,
+# tiny.  `rand_core` feature enables `SigningKey::generate`, used in
+# the keypair-generation example and in tests.
+ed25519-dalek = { version = "2", default-features = false, features = ["std", "rand_core"] }
+# Post-quantum half: ML-DSA-44 (FIPS 204, formerly Dilithium).  Pure
+# Rust, no FFI / no C toolchain.  Default features pull in
+# `getrandom` for key generation and `pkcs8` which we don't use; we
+# keep them on so the example builds with the same feature set the
+# crate ships with by default.
+ml-dsa = "0.1"
+# Token segment encoding (`URL_SAFE_NO_PAD`).
+base64 = { version = "0.22", default-features = false, features = ["std"] }
+serde = { version = "1", default-features = false, features = ["std", "derive"] }
+serde_json = { version = "1", default-features = false, features = ["std"] }
+# RFC 3339 parsing for `order.expires_at`.  Same minimal-feature-set
+# as the rest of the workspace (see crates/xslt/Cargo.toml).
+chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
+
+[dev-dependencies]
+# `OsRng` for the keypair-generation example and for tests that need
+# fresh keys.  Not in the verification path.
+rand = "0.8"

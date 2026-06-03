@@ -1,0 +1,37 @@
+# Cargo aliases — invoke as `cargo <alias>` from anywhere in the
+# workspace.  Used to keep "the canonical way to test/build the
+# whole thing" in one place so CI, contributors, and AI agents
+# don't drift on flag combinations.
+
+# Parsing requires a valid license certificate (see crates/license).
+# Point every workspace `cargo` invocation — tests, benches, examples,
+# doctests — at a committed, production-key-signed certificate so the
+# suite can parse.  This is workspace-local config; it is NOT shipped to
+# downstream consumers, so installed / published builds still require a
+# real license.  (The fixture expires 2030-01-01; replace it before then.)
+[env]
+SUPSO_LICENSE = { value = "crates/license/tests/fixtures/valid_certificate.cert", relative = true }
+
+[alias]
+# `cargo test-all` — runs every test in the workspace with every
+# optional feature enabled.  Covers xsd, xslt, html, serde, tokio,
+# network-resolver, full-encodings, c-abi — and any future feature
+# added to any workspace member, automatically.  This is the
+# single command to run after any non-trivial change to ensure no
+# regressions before opening a PR.
+test-all = ["test", "--workspace", "--all-features"]
+
+# `cargo check-all` — type-check the entire workspace under every
+# feature.  Faster than `test-all` for a "does this still compile"
+# pass; doesn't run tests.
+check-all = ["check", "--workspace", "--all-features"]
+
+# `cargo stress-threads` — hammer the multithreading contract tests.
+# Runs the `sup-xml` `threading` suite in release mode and includes the
+# `#[ignore]`d heavy variants, which use far higher thread/iteration
+# counts than the always-on tests to give a race detector — or a flaky
+# concurrency bug — many more chances to fire.  Soak longer by scaling
+# the iteration count: `SUPSO_THREAD_STRESS=20 cargo stress-threads`.
+# For actual data-race detection, layer a sanitizer on top, e.g.
+# `RUSTFLAGS=-Zsanitizer=thread cargo +nightly stress-threads`.
+stress-threads = ["test", "-p", "sup-xml", "--release", "--test", "threading", "--", "--include-ignored"]

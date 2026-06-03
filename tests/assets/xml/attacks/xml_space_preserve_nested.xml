@@ -1,0 +1,6 @@
+<?xml version="1.0"?>
+<root xml:space="preserve">
+  <child xml:space="default">
+    <grand xml:space="preserve">   keep   <inner>   keep   </inner>   </grand>
+  </child>
+</root>

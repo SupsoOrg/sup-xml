@@ -1,0 +1,32 @@
+---
+import Default from '@astrojs/starlight/components/SiteTitle.astro';
+---
+
+<div class="site-title-wrapper sl-flex">
+	<Default {...Astro.props}><slot /></Default>
+	<a class="byline" href="https://supso.org/">by Supported Source</a>
+</div>
+
+<style>
+	.site-title-wrapper {
+		align-items: center;
+		gap: 0.75rem;
+	}
+	.byline {
+		color: var(--sl-color-gray-3);
+		font-size: var(--sl-text-sm);
+		text-decoration: none;
+		white-space: nowrap;
+		position: relative;
+		top: 2px;
+	}
+	.byline:hover {
+		color: var(--sl-color-text-accent);
+		text-decoration: underline;
+	}
+	@media (max-width: 50rem) {
+		.byline {
+			display: none;
+		}
+	}
+</style>

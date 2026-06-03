@@ -1,0 +1,311 @@
+[package]
+name        = "sup-xml-bench"
+version.workspace = true
+edition.workspace = true
+publish     = false
+
+[lints]
+workspace = true
+
+# Libraries under test
+[dev-dependencies]
+sup-xml      = { path = "../api", features = ["xsd", "html", "xslt"] }
+sup-xml-core = { path = "../core", features = ["html", "xsd"] }
+xml-rs        = "0.8"
+quick-xml     = "0.37"
+roxmltree     = "0.20"
+anyxml        = "0.12"
+memchr        = "2"
+libc          = "0.2"
+criterion = { version = "0.5", features = ["html_reports"] }
+# html5ever competitor for the HTML bench — pinned to match what
+# sup-xml-core/html depends on so we don't pull two copies.
+html5ever     = "=0.39.0"
+markup5ever   = "=0.39.0"
+tendril       = "0.4"
+# Used by profile_swiss_prot_mimalloc to swap the global allocator and
+# see whether allocator *quality* (vs *quantity*) is a lever.
+mimalloc      = { version = "0.1", default-features = false }
+
+# build.rs uses pkg-config to locate libxml2 and pugixml, and `cc` to
+# compile the small C++ shim that exposes pugixml's C++ API to Rust FFI.
+[build-dependencies]
+pkg-config = "0.3"
+cc         = "1"
+
+[[bench]]
+name    = "parse"
+harness = false
+
+# Fast dev-loop bench — runs each parser × fixture combination N=2 times by
+# default (env: SUPXML_MINI_ITERS), no warmup, prints a plain MB/s table.
+# Bypasses criterion's 10-sample floor so the whole sweep finishes in under
+# a minute for quick iteration.
+[[bench]]
+name    = "mini"
+harness = false
+
+# Pairwise head-to-head bench — for each competitor library, prints a focused
+# table with three columns: sup-xml configured to match that library's
+# safety/validation contract, the competitor itself, and sup-xml at its
+# (safer) defaults.  Each table is preceded by a paragraph explaining what
+# we believe the competitor does and which `ParseOptions` we set to match.
+[[bench]]
+name    = "head_to_head"
+harness = false
+
+# XSD validator: sup_xml::xsd vs libxml2's xmlSchemaValidateDoc.  Compile-
+# time + per-validation throughput across small / medium / large fixtures.
+[[bench]]
+name    = "xsd"
+harness = false
+
+# W3C XML Schema Test Suite cross-implementation conformance runner.
+# Walks every .testSet manifest under tests/assets/xsts/ and reports
+# per-contributor pass rates for sup-xml and libxml2, plus inter-
+# implementation agreement.  Generates the XSD-conformance table for
+# COMPARISON.md.
+[[bench]]
+name    = "xsts_compliance"
+harness = false
+
+# XSD 1.1 additions-only runner: walks the saxon/ibm/oracle/wg testSets
+# from the W3C xsdtests repo (vendored at tests/assets/xsts-1.1/) and
+# reports per-contributor pass rates.  Establishes the starting
+# baseline for incremental 1.1 implementation work.
+[[bench]]
+name    = "xsts11_compliance"
+harness = false
+
+# XPath 1.0 cross-implementation conformance runner.  Hand-curated
+# corpus covering all 13 axes, node tests, predicates, operators,
+# and the full XPath 1.0 function library.  Both sup-xml and libxml2
+# are XPath 1.0-only, so this is a fair head-to-head.
+[[bench]]
+name    = "xpath_compliance"
+harness = false
+
+# Scale companion to `xpath_compliance`: runs libxml2's own vendored
+# XPath test corpus (tests/assets/xpath-libxml2-corpus/, MIT) through
+# both backends and reports per-file agreement.  Measures "do we
+# match the C reference implementation on its own home turf."
+[[bench]]
+name    = "xpath_libxml2_corpus"
+harness = false
+
+# Compile-time breakdown for one schema (HR), stripping facets one at a
+# time so the dominant cost is visible.  Used to chase compile-time
+# regressions; see comments in the file for what each variant isolates.
+[[bench]]
+name    = "profile_xsd_compile"
+harness = false
+
+# XSD §F regex engine microbench — measures per-match throughput on
+# the linear fast path vs the Pike VM, so regressions in either
+# dispatch route surface immediately.
+[[bench]]
+name    = "xsd_regex"
+harness = false
+
+# Diagnostic micro-bench for the one fixture (1831893.xml) where
+# XmlBytesReader currently lags quick-xml.  Counts events and times
+# subsets — useful for figuring out where the per-element overhead
+# is concentrated.
+[[bench]]
+name    = "profile_1831893"
+harness = false
+
+# Sampling-profiler target: parses swiss_prot.xml (our slowest fixture)
+# in a tight loop so `samply record` can characterise the hot path.
+[[bench]]
+name    = "profile_swiss_prot"
+harness = false
+
+# Sampling-profiler target for gazali_maqasid_ar.xml — a 599 KB Arabic
+# fixture currently at ~14 MB/s DOM (vs libxml2's ~140 MB/s), to
+# characterise the regression that hits non-ASCII / repeated-name docs.
+[[bench]]
+name    = "profile_gazali"
+harness = false
+
+# Sampling-profiler target for the in-place path — the one
+# competing with pugixml.  Same fixture and loop shape as
+# profile_swiss_prot, but calls parse_bytes_in_place instead of
+# parse_bytes_unchecked.
+[[bench]]
+name    = "profile_in_place"
+harness = false
+
+# Arena XPath vs legacy XPath — context-build cost + per-query throughput.
+[[bench]]
+name    = "profile_arena_xpath"
+harness = false
+
+# Sampling-profiler target for the arena DOM path in isolation — used to
+# attribute remaining allocator overhead now that bumpalo has absorbed the
+# legacy per-node mallocs.
+[[bench]]
+name    = "profile_arena_only"
+harness = false
+
+# Same as profile_swiss_prot but with mimalloc as the global allocator.
+# Tests whether allocator *quality* (vs *quantity*) is a perf lever for
+# the legacy DOM path.
+[[bench]]
+name    = "profile_swiss_prot_mimalloc"
+harness = false
+
+# Diagnostic: side-by-side event counts from sup-xml + quick-xml on
+# the same input.  Used to verify whether quick-xml emits whitespace
+# text events by default.
+[[bench]]
+name    = "event_counts"
+harness = false
+
+# Diagnostic: feeds well-formed and deliberately ill-formed XML to
+# both parsers and reports who accepts vs rejects.  Used to test
+# whether quick-xml's tighter text-event throughput comes from
+# skipping XML 1.0 § 2.4 / § 4.1 validations.
+[[bench]]
+name    = "text_validation_check"
+harness = false
+
+# Diagnostic: probes anyxml on each real-world fixture and reports
+# whether it accepted / rejected / produced warnings.  Sanity check
+# for the head-to-head perf bench, where suspiciously high MB/s
+# numbers may indicate a fast-failure rather than a fast parse.
+[[bench]]
+name    = "anyxml_fixture_check"
+harness = false
+
+# W3C XML Conformance Test Suite (XMLTS) runner.  Walks every
+# `not-wf/**/*.xml` file under `tests/assets/xmlts/` and tallies
+# per-parser pass/fail counts.  Each `not-wf` file is engineered to
+# trip one specific XML 1.0 well-formedness rule; conforming
+# parsers must reject every one.
+[[bench]]
+name    = "xmlts_compliance"
+harness = false
+
+# Diagnostic: probe what quick-xml's `Attributes` iterator actually
+# validates with `with_checks: true` (its default).  Demonstrates
+# that 5 of 7 common attribute-WFC violations are silently accepted
+# even with full iteration.  Cited in COMPARISON.md.
+[[bench]]
+name    = "qxml_attr_validation_check"
+harness = false
+
+# Streaming bench: sup-xml's `StreamParser` (subtree-at-a-time, each
+# emit is its own bumpalo arena `Document`) vs quick-xml's raw event
+# loop.  Workload is "iterate every `<Entry>` in swiss_prot.xml" — a
+# realistic streaming pattern (Wikipedia/Atom/Medline-shaped dumps).
+[[bench]]
+name    = "stream"
+harness = false
+
+# Streaming head-to-head against libxml2's `xmlReader` (xmlTextReader)
+# API — the canonical C streaming pull parser.  Drives sup-xml's
+# `XmlByteStreamReader` and libxml2's reader to EOF over the same
+# fixtures (both file-backed and in-memory) and reports MB/s plus
+# peak RSS.  This is the apples-to-apples streaming comparison for
+# inputs bigger than RAM.
+[[bench]]
+name    = "stream_libxml2"
+harness = false
+
+# Three-way: parse_bytes (strict) vs parse_bytes_in_place vs pugixml,
+# on swiss_prot.xml + a synthetic entity-heavy fixture.  Single-file
+# bench focused on the in-place speedup vs the libxml2-style strict
+# path and the external C++ baseline.
+[[bench]]
+name    = "in_place_check"
+harness = false
+
+# Ceiling probe — what does the existing architecture deliver with all
+# skip_* flags maxed?
+[[bench]]
+name    = "skips_max"
+harness = false
+
+# Three-way: parse_bytes_in_place (DOM build) vs sup-xml SAX vs expat SAX.
+# expat is a SAX-only parser (no tree); the apples-to-apples comparison
+# is the middle column (sup-xml SAX consuming events with no DOM
+# build).  The DOM column then shows the cost of building a tree on
+# top of the same scanner.
+[[bench]]
+name    = "in_place_vs_expat"
+harness = false
+
+# Diagnostic: compare recovery behaviour of sup-xml's
+# `recovery_mode: true` against libxml2's XML_PARSE_RECOVER
+# on a curated set of malformed inputs.  Used to verify that
+# sup-xml's recovery decisions match libxml2's where it matters.
+[[bench]]
+name    = "recovery_check"
+harness = false
+
+# Diagnostic: side-by-side error-message comparison between sup-xml
+# and libxml2 on a curated set of broken documents.  Produces the
+# "what does each parser say when this breaks?" table — line/column
+# precision, machine-readable code, message specificity.  Use to
+# spot regressions in error reporting and to identify cases where
+# we lag (or lead) libxml2's diagnostics.
+[[bench]]
+name    = "diagnostic_quality"
+harness = false
+
+# Audit: drives each XML_PARSE_* flag a C caller might pass through
+# both libxml2 and sup-xml's compat translator on the same probe doc,
+# and reports per-flag whether the translator honours, ignores, or
+# diverges from libxml2.  The translator-coverage gauge for the
+# `crates/compat` cdylib's option-bitmask surface.
+[[bench]]
+name    = "options_audit"
+harness = false
+
+# Audit: diffs crates/compat/src/symbols.txt against the actual
+# exported symbols of the system libxml2 dylib.  Catches "drop-in"
+# claims that would fail at consumer-side dlopen time because the
+# symbol a downstream library reaches for doesn't exist on our side.
+[[bench]]
+name    = "symbol_audit"
+harness = false
+
+# Diagnostic: walk the libxml2 tree XML_PARSE_RECOVER produces for
+# each Phase 3 ambiguous case (bare & in text, ]]> in text,
+# malformed XML decl).  Used as the SPEC for our matching
+# implementation — we want to know exactly what libxml2's
+# recovered text content / root element / child structure looks
+# like so sup-xml can produce the same.
+[[bench]]
+name    = "libxml2_recovery_inspector"
+harness = false
+
+# HTML parsing throughput: sup_xml::parse_html_str (which uses
+# html5ever under the hood) vs raw html5ever vs libxml2's
+# htmlReadMemory.  Reads fixtures from tests/assets/html/ — fetch
+# them first with `tests/assets/html/fetch.sh`.
+[[bench]]
+name    = "html_parse"
+harness = false
+
+# EXSLT str:tokenize / regexp:match head-to-head: sup-xml's XSLT
+# engine vs libxslt + libexslt.  Runs a tokenize-heavy stylesheet
+# at several input sizes and prints a plain throughput table.
+[[bench]]
+name    = "exslt_head_to_head"
+harness = false
+
+# Tight inner loop for samply on the XSD validator's hot path.
+# Used to find the per-element machinery cost that pushes us behind
+# libxml2 on element-loop-heavy fixtures (customer rows, hr).
+[[bench]]
+name    = "profile_xsd_validate_customer"
+harness = false
+
+# Same shape as profile_xsd_validate_customer but on the HR schema —
+# tests element-loop machinery in the presence of namespace-qualified
+# elements, patterned attributes, enumerations, and decimal facets.
+[[bench]]
+name    = "profile_xsd_validate_hr"
+harness = false

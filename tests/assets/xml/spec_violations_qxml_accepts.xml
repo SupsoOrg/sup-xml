@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Test fixture: XML that the spec REQUIRES parsers to reject, but
+  quick-xml 0.37 accepts silently in its default raw event mode.
+
+  See `crates/bench/benches/text_validation_check.rs` for the table
+  of which spec rules each row violates and which parser catches it.
+
+  Each <case> below has its own spec violation in text content, all
+  of which are forbidden by XML 1.0:
+
+    1. `]]>` literal in text content       — XML 1.0 § 2.4 [CharData]
+    2. bare `&` in text content            — XML 1.0 § 4.1 [Reference]
+    3. bare `<` in text content            — XML 1.0 § 2.4 [CharData]
+
+  Per the spec, a conforming non-validating processor MUST treat each
+  of these as a fatal error.  Run with the `text_validation_check`
+  bench to see the side-by-side parser verdicts.
+-->
+<spec-violations>
+
+  <!-- Violation 1: literal ]]> in text content (XML 1.0 § 2.4).
+       The string ]]> may only appear as the closing delimiter of
+       a CDATA section; appearing in text content is a well-formedness
+       error. -->
+  <case kind="cdata-close-in-text">some text]]> more text</case>
+
+  <!-- Violation 2: bare & in text content (XML 1.0 § 4.1).
+       Every `&` in text MUST start an entity or character reference.
+       A bare `&` followed by whitespace is forbidden. -->
+  <case kind="bare-ampersand">tom &amp; jerry vs tom &amp; jerry &amp; spike vs raw: tom & jerry</case>
+
+  <!-- Violation 3: bare < in text content (XML 1.0 § 2.4).
+       The dispatch byte `<` must always begin a markup construct.
+       Using it as plain text data is forbidden — the spec requires
+       `&lt;` instead. -->
+  <case kind="bare-lt">if 1 < 2 then ok</case>
+
+</spec-violations>

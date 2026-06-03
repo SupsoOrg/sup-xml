@@ -1,0 +1,1 @@
+/a/b[@id="x" and position()>1]

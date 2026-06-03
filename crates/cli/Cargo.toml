@@ -1,0 +1,27 @@
+[package]
+name = "sup-xml-cli"
+description = "Command-line tool for SupXML: lint, format, xpath, validate, repair, c14n, diff"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license-file.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories = ["command-line-utilities", "text-processing"]
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "sup-xml"
+path = "src/main.rs"
+
+[dependencies]
+# HTML parsing is enabled in the CLI by default — if you build the
+# CLI you almost certainly want `sup-xml --html` to work.  Drop the
+# "html" feature here and turn off the CLI's --html / --html-out flags
+# if you need a leaner binary.
+sup-xml = { path = "../api", version = "1.0.0", features = ["xsd", "html", "network-resolver", "xslt"] }
+sup-xml-license = { path = "../license", version = "1.0.0" }
+clap = { version = "4", features = ["derive"] }

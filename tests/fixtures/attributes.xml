@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Tests attribute parsing edge cases -->
+<root>
+  <!-- bare attribute values -->
+  <element a="1" b="2" c="3"/>
+  <!-- quoted values with special characters -->
+  <element escaped="&lt;tag&gt; &amp; &quot;quoted&quot; &apos;apos&apos;"/>
+  <!-- empty attribute -->
+  <element empty=""/>
+  <!-- many attributes -->
+  <element a1="v1" a2="v2" a3="v3" a4="v4" a5="v5"
+           a6="v6" a7="v7" a8="v8" a9="v9" a10="v10"/>
+  <!-- mixed content -->
+  <p class="intro" style="color:red">Hello <em>world</em>!</p>
+</root>

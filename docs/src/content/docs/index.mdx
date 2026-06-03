@@ -1,0 +1,143 @@
+---
+title: SupXML
+description: A memory-safe, fast, spec-compliant XML library for Rust, with drop-in replacement for libxml2.
+---
+
+import { Card, CardGrid, LinkButton } from '@astrojs/starlight/components';
+
+{/*
+  Astro v5's `import.meta.env.BASE_URL` returns the configured `base`
+  verbatim (set in `astro.config.mjs` without a trailing slash).  We
+  append a trailing slash inline so `${baseUrl}getting-started/`
+  lands on `/projects/sup-xml/docs/getting-started/` and not the
+  joined-without-separator form that 404s.  Declared in JSX
+  expression scope rather than as a module-level `export const`
+  because Starlight's MDX renderer evaluates module-level exports
+  in a separate scope that the JSX body can't see.
+*/}
+
+<div class="home-hero">
+  <h1 class="home-title">SupXML</h1>
+  <p class="home-tagline">A memory-safe, fast, spec-compliant XML library for Rust, with a drop-in C ABI replacement for libxml2.</p>
+  <div class="home-actions">
+    <LinkButton href={`${import.meta.env.BASE_URL.replace(/\/?$/, '/')}getting-started/`} icon="right-arrow">Get started</LinkButton>
+    <LinkButton href={`${import.meta.env.BASE_URL.replace(/\/?$/, '/')}why/`} icon="open-book" variant="secondary">Why SupXML</LinkButton>
+    <LinkButton href="https://github.com/SupsoOrg/sup-xml" icon="external" variant="minimal">GitHub</LinkButton>
+  </div>
+</div>
+
+## Why SupXML
+
+<CardGrid>
+  <Card title="Memory-safe" icon="approve-check">
+    Pure Rust, memory-safe by construction. Roughly 70% of CVEs come
+    from memory-safety bugs, a whole class that Rust rules out at
+    compile time, so they can't happen in SupXML.
+  </Card>
+  <Card title="Fast and Efficient" icon="rocket">
+    **~2× faster than libxml2** on full-validation DOM parse
+    (median across 21 fixtures), and **~2.4× faster** on the W3C
+    XSD 1.0 test suite. Bumpalo-backed arena DOM.<br />
+    <a href={`${import.meta.env.BASE_URL.replace(/\/?$/, '/')}reference/performance/`}>Full bench numbers →</a>
+  </Card>
+  <Card title="Spec-compliant" icon="document">
+    **Zero failures** on the W3C XML Conformance Test Suite: all 2274
+    deterministic cases pass; the other 21 of 2295 are
+    implementation-defined by the spec. **98.9% schema / 98.8%
+    instance** on the W3C XSD 1.0 suite (libxml2: 92.9% / 98.3%).<br />
+    <a href={`${import.meta.env.BASE_URL.replace(/\/?$/, '/')}reference/conformance/`}>Cross-parser comparison →</a>
+  </Card>
+  <Card title="Stream big files" icon="random">
+    `XmlByteStreamReader` pulls from any `io::Read` through a rolling
+    buffer, processing files larger than memory in bounded RAM. The
+    in-memory `XmlBytesReader` is a zero-copy SAX reader, median
+    **~1.04× faster than quick-xml** at the matched-contract comparison.
+  </Card>
+  <Card title="Drop-in for libxml2" icon="random">
+    Byte-compatible C ABI matches `libsupxml2.so`. Once a
+    consumer *dynamically* links libxml2, swapping the load command points
+    it at SupXML.<br />
+    <a href={`${import.meta.env.BASE_URL.replace(/\/?$/, '/')}guides/migrating-from-libxml2/#binding-install-steps`}>Per-binding setup →</a>
+  </Card>
+  <Card title="Full-featured" icon="setting">
+    XPath 1.0 + 2.0, XSD 1.0 / 1.1, XSLT 1.0 + 2.0 (3.0 partial),
+    Schematron, Canonical XML / Exc-C14N, HTML5, EXSLT, recovery
+    mode... all in one library.
+  </Card>
+</CardGrid>
+
+## W3C XML Conformance Test Suite
+
+The W3C XML Conformance Test Suite (revision `xmlts20130923`) is the
+canonical test catalog for XML 1.0 parsers. It defines **2295** tests
+across submissions from James Clark, Sun, IBM, OASIS, and others.
+2274 of them have a deterministic expected outcome (well-formed /
+not-well-formed / invalid) and **SupXML matches every one with zero
+failures**. The remaining 21 are tagged `error` in
+the catalog itself, meaning XML 1.0 explicitly leaves their handling
+implementation-defined, both accepting and rejecting them satisfies
+the spec, so whatever SupXML does is conformant by definition.
+<a href={`${import.meta.env.BASE_URL.replace(/\/?$/, '/')}reference/conformance/`}>Full breakdown →</a>
+
+### How parsers compare on malformed input
+
+For a like-for-like comparison across parsers we use the catalog's
+**not-wf** corpus, files engineered to violate one specific XML 1.0
+well-formedness rule, so a conforming parser must reject them. (We
+focus on not-wf because xml-rs and quick-xml don't load external DTDs,
+making fair scoring on the valid/invalid corpora difficult.) Score =
+percentage correctly rejected:
+
+| Corpus | Files | SupXML | libxml2 | xml-rs | quick-xml |
+| --- | --: | --: | --: | --: | --: |
+| xmltest (James Clark) | 200 | **99.0%** | 97.0% | 58.5% | 10.0% |
+| Sun Microsystems | 57 | **100%** | 98.2% | 33.3% | 8.8% |
+| IBM (incl. XML 1.1) | 890 | **94.5%** | 59.6% | 42.7% | 5.2% |
+| **All vendors** | **1147** | **95.6%** | **68.0%** | **45.0%** | **6.2%** |
+
+This table walks every `.xml` file on disk under a `not-wf/` directory,
+which is a superset of what the official catalog scores (it also
+includes files the catalog marks `error` or scopes to a specific XML 1.0
+edition). That's why SupXML reads clean on the catalog (**2274/2274**
+deterministic) but **94.5% on IBM** here because the bench is asking a
+broader question, and counts implementation-defined fixtures against
+the parser even though the catalog allows either outcome.
+
+quick-xml's score is low because it doesn't check well-formedness at all.
+It's a fast tokenizer but unsafe to use in practice.
+SupXML beats libxml2 by ~27 points overall.
+
+## Quick example
+
+```rust
+use sup_xml::{parse_str, ParseOptions, XPathContext};
+
+let opts = ParseOptions { namespace_aware: true, ..Default::default() };
+let doc = parse_str(
+    "<catalog><book id='b1'/><book id='b2'/></catalog>",
+    &opts,
+)?;
+
+let ctx = XPathContext::new(&doc);
+assert_eq!(ctx.eval_count("/catalog/book")?, 2);
+```
+
+```toml
+[dependencies]
+sup-xml = { version = "*", features = ["xsd", "xslt", "html"] }
+```
+
+## Feature matrix
+
+| Feature | Cargo feature | Entry point |
+|---------|---------------|-------------|
+| XML 1.0 parse / serialize | (default) | `parse_str`, `parse_bytes`, `serialize_to_string` |
+| XPath 1.0 (default) + XPath 2.0 (opt-in) | (default) | `XPathContext`, `XPathOptions { xpath_2_0: true }` |
+| HTML5 parse | `html` | `parse_html_str` |
+| XSD 1.0 / 1.1 validation | `xsd` | `sup_xml::xsd::Schema` |
+| XSLT 1.0 + 2.0 (3.0 partial) | `xslt` | `sup_xml::xslt::Stylesheet` |
+| Schematron validation | `xslt` | `sup_xml::xslt::schematron::Schematron` |
+| Canonical XML / Exc-C14N | (default) | `canonicalize_to_bytes` |
+| Typed-struct deserialize | `serde` | `sup_xml::de::*` |
+| HTTPS-fetched DTDs / entities | `network-resolver` | `NetworkResolver` |
+| Async I/O entry points | `tokio` | `sup_xml::async_io::parse_async` |

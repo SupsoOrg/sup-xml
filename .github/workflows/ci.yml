@@ -1,0 +1,49 @@
+# Cross-platform CI: builds and runs the SupXML test suite on
+# Linux, macOS, and Windows so platform-specific regressions (e.g.
+# `cfg(unix)` paths in entity_resolver.rs) can't sneak through.
+#
+# `sup-xml-bench` is excluded because it links libxml2 + pugixml via
+# FFI through pkg-config, which isn't reliably available on Windows
+# runners (and would need vcpkg / a downloaded build to even attempt).
+# The bench crate isn't load-bearing for correctness — it's perf
+# comparison only — so dropping it from CI keeps the matrix simple.
+
+name: ci
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+    branches: [master, main]
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: "-D warnings"
+
+jobs:
+  test:
+    name: cargo test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      # Don't cancel other platforms when one fails — we want to see
+      # the full matrix outcome, not a Linux-only view of a Windows bug.
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install stable Rust
+        run: rustup toolchain install stable --profile minimal
+
+      # `--all-features` matches the local `cargo test-all` alias so
+      # `c-abi` (the libxml2/libxslt ABI shims in `compat`) and the
+      # other optional features (`xsd`, `xslt`, `html`, `serde`,
+      # `tokio`, `network-resolver`, `full-encodings`) get compiled
+      # under `-D warnings` too — otherwise feature-gated code can
+      # accumulate warnings the CI gate never sees.
+      - name: cargo build
+        run: cargo build --workspace --exclude sup-xml-bench --all-features --verbose
+
+      - name: cargo test
+        run: cargo test --workspace --exclude sup-xml-bench --all-features --verbose

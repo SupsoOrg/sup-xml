@@ -1,0 +1,27 @@
+# Known intentional divergences from the lxml/libxml2 test suite.
+#
+# Tests listed here fail against our shim because we DELIBERATELY behave
+# differently from libxml2 — almost always because libxml2's behaviour
+# predates a modern spec and ours follows it.  These are NOT bugs to fix;
+# the triage tooling (dump_failures.py) buckets them as DIVERGE so the
+# real-failure count stays honest.
+#
+# Format (tab-separated):  <module>.<test_method>\t<category>\t<rationale>
+# Lines starting with '#' and blank lines are ignored.
+#
+# Add an entry only when our behaviour is demonstrably the more correct /
+# modern one and the test asserts the legacy libxml2 behaviour.  When in
+# doubt, treat it as a real failure and fix it instead.
+
+test_htmlparser.test_module_parse_html_error	html5-parser	Our HTML parser is html5ever, which follows the HTML5 parsing algorithm: `<html></body>` is recovered with no error. libxml2's pre-HTML5 parser flags it, so recover=False raises. We are spec-correct; we do not surface a parse error here.
+test_htmlparser.test_module_parse_html_norecover	html5-parser	Same as test_module_parse_html_error: the HTML5 algorithm recovers the broken input without a fatal error, so recover=False does not raise. libxml2's legacy parser does.
+test_htmlparser.test_module_HTML_broken	html5-parser	An unmatched `</p>` end tag: HTML5 (§"an end tag whose tag name is p") inserts an empty `<p>` element, so we emit `<p></p>`. libxml2 silently drops the stray tag. Our tree matches the HTML5 spec.
+test_htmlparser.test_default_parser_HTML_broken	html5-parser	Same unmatched-`</p>` recovery difference as test_module_HTML_broken; html5ever follows the HTML5 spec, libxml2 does not.
+test_htmlparser.test_xhtml_as_html_as_xml	html5-parser	The HTML5 tree-construction algorithm always inserts `<head>` and `<body>`, so `<html xmlns="…"></html>` parses to `<html xmlns="…"><head/><body/></html>`. libxml2's parser leaves the empty `<html/>` empty. We preserve the xmlns correctly (the lxml-1965070 behaviour the test targets); only the spec-mandated head/body insertion differs.
+test_htmlparser.test_html_parser_target_tag	html5-parser	html5ever inserts an empty `<head>` for `<html><body>…` (HTML5 "before head" insertion mode); libxml2 does not. The SAX event stream is otherwise identical — the test's expected sequence simply lacks the spec-mandated head start/end events.
+test_htmlparser.test_html_parser_target_doctype_empty	html5-parser	Same head-insertion divergence as test_html_parser_target_tag; the doctype callback itself fires correctly (name/public/system).
+test_htmlparser.test_html_parser_target_doctype_html	html5-parser	Same head-insertion divergence as test_html_parser_target_tag; the doctype callback fires correctly.
+test_htmlparser.test_html_parser_target_doctype_html_full	html5-parser	Same head-insertion divergence as test_html_parser_target_tag; the doctype callback fires correctly.
+test_htmlparser.test_html_feed_parser	html5-parser	The test asserts `root[0]` is the `<body>`; html5ever inserts an empty `<head>` first (HTML5 spec), so `root[0]` is the head. Element/name handling is otherwise correct.
+test_htmlparser.test_html_feed_parser_chunky	html5-parser	Same head-insertion divergence as test_html_feed_parser, fed in single-byte chunks.
+test_htmlparser.test_html_iterparse_broken_no_recover	html5-parser	recover=False over broken HTML: the HTML5 algorithm recovers without a fatal error, so iterating does not raise. libxml2's legacy parser raises XMLSyntaxError. Same spec divergence as test_module_parse_html_norecover.

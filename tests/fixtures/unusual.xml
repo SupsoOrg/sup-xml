@@ -1,0 +1,77 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Unusual but fully valid XML — every node here must parse and roundtrip. -->
+<unusual>
+
+  <!-- Bidirectional text: RTL mark (U+200F) and LTR mark (U+200E) -->
+  <bidi>Hello&#x200F;&#x200E;World</bidi>
+
+  <!-- Zero-width non-joiner and joiner -->
+  <zwj>a&#x200C;b&#x200D;c</zwj>
+
+  <!-- Mathematical Bold Capital A–C (supplementary plane, Plane 1) -->
+  <math>&#x1D400;&#x1D401;&#x1D402;</math>
+
+  <!-- CJK Extension B (Plane 2) -->
+  <cjk-ext-b>&#x20000;&#x20001;&#x20002;</cjk-ext-b>
+
+  <!-- Private Use Area (BMP and Plane 15) -->
+  <pua>&#xE000;&#xF8FF;&#xF0000;&#xFFFFD;</pua>
+
+  <!-- Combining diacritics stacked on same base -->
+  <combining>e&#x0301;&#x0302;&#x0303;</combining>
+
+  <!-- Valid whitespace control chars: TAB, LF, CR -->
+  <controls tab="&#x9;" lf="&#xA;" cr="&#xD;">&#x9;content&#xD;&#xA;</controls>
+
+  <!-- Emoji with zero-width joiners (ZWJ sequences) -->
+  <emoji>🦀 🌍 👨&#x200D;💻</emoji>
+
+  <!-- Greek and Cyrillic scripts -->
+  <scripts>αβγδεζ АБВГДЕЖ</scripts>
+
+  <!-- Attribute value escaping: all five predefined entities -->
+  <escaped
+    amp="&amp;"
+    lt="&lt;"
+    gt="&gt;"
+    quot="&quot;"
+    apos="&apos;"
+    mixed="&lt;tag attr=&quot;v&quot;/&gt; &amp; done"
+  />
+
+  <!-- Single-character element names -->
+  <a><b><c>d</c></b></a>
+
+  <!-- Element names with hyphens, dots, digits after start -->
+  <my-element-2.0>content</my-element-2.0>
+
+  <!-- Namespace-style colon in name (Phase 2: stored as flat name) -->
+  <ns:element>value</ns:element>
+
+  <!-- Long attribute values -->
+  <long-attr value="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"/>
+
+  <!-- Many attributes -->
+  <many-attrs a1="1" a2="2" a3="3" a4="4" a5="5" a6="6" a7="7" a8="8" a9="9"
+              a10="10" a11="11" a12="12" a13="13" a14="14" a15="15" a16="16"
+              a17="17" a18="18" a19="19" a20="20"/>
+
+  <!-- Empty CDATA section -->
+  <empty-cdata><![CDATA[]]></empty-cdata>
+
+  <!-- CDATA containing ]] (only ]]> ends the section) -->
+  <cdata-tricky><![CDATA[a]]b]]>after</cdata-tricky>
+
+  <!-- PI with no data -->
+  <?solo-pi?>
+
+  <!-- Deeply nested (5 levels) with Unicode at the leaf -->
+  <d1><d2><d3><d4><d5>𝄞 𝄢 𝅘𝅥𝅮</d5></d4></d3></d2></d1>
+
+  <!-- CDATA next to text content -->
+  <mixed>before<![CDATA[<raw>]]>after</mixed>
+
+  <!-- U+10FFFF — highest valid Unicode scalar -->
+  <maxchar>&#x10FFFF;</maxchar>
+
+</unusual>

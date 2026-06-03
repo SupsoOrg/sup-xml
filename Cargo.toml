@@ -1,0 +1,88 @@
+[workspace]
+members = [
+    "crates/core",
+    "crates/tree",
+    "crates/api",
+    "crates/compat",
+    "crates/bench",
+    "crates/cli",
+    "crates/xslt",
+    "crates/license",
+]
+resolver = "2"
+
+# Dedicated profile for `samply` / flamegraph runs.  Same code-gen
+# as release, but keeps DWARF debug info and skips the binary
+# stripping that release does by default — without those, samply
+# on macOS lands every sample under `<no symbol 0x…>`.
+#
+# Build with `cargo build --profile=profiling …`; binaries land in
+# `target/profiling/`.
+# Line-tables-only debug info for dev/test builds.  Panic backtraces
+# and `RUST_BACKTRACE` still resolve to `file:line`; what's dropped is
+# the heavy per-variable/per-type DWARF that only interactive step
+# debugging (lldb/gdb local inspection) needs.  Keeps `target/debug`
+# — which is dominated by debuginfo across the workspace's many test,
+# bench, and example binaries — to a fraction of its full-DWARF size.
+# Use `--profile=profiling` (below) when you need full symbols.
+[profile.dev]
+debug = "line-tables-only"
+
+# Dedicated profile for `samply` / flamegraph runs.  Same code-gen
+# as release, but keeps DWARF debug info and skips the binary
+# stripping that release does by default — without those, samply
+# on macOS lands every sample under `<no symbol 0x…>`.
+#
+# Build with `cargo build --profile=profiling …`; binaries land in
+# `target/profiling/`.
+[profile.profiling]
+inherits = "release"
+debug    = "full"
+strip    = "none"
+
+[workspace.package]
+version = "1.0.0"
+edition = "2024"
+rust-version = "1.85"
+license-file = "LICENSE"
+repository = "https://github.com/SupsoOrg/sup-xml"
+homepage = "https://supso.org/projects/sup-xml"
+keywords = ["xml", "libxml2", "xpath", "xslt", "parser"]
+categories = ["parser-implementations", "text-processing"]
+
+[workspace.dependencies]
+# Internal parser/interning hash maps and sets — we trust our own keys
+# (XML names we just parsed), so we can swap std SipHash for the much
+# faster non-DoS-resistant FxHash that rustc itself uses internally.
+rustc-hash = "2"
+
+# Workspace-wide lint policy.  Each crate opts in with `[lints]
+# workspace = true` (see crates/*/Cargo.toml).  We deny dead code as a
+# hard error so unused items can't accumulate — every `pub(crate)`
+# helper, every method, every field has to be reachable from some
+# caller or test.  If something is genuinely test-only, gate it with
+# `#[cfg(test)]` (the honest signal), not `#[allow(dead_code)]`.
+[workspace.lints.rust]
+dead_code = "deny"
+# `kani` is set by the Kani verifier (`cargo kani`) to compile the
+# proof harnesses under `#[cfg(kani)]`.  Register it here so a plain
+# `cargo build` / `cargo test` doesn't warn about an unknown cfg.
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(kani)'] }
+
+# Clippy rules.  Curated set focused on patterns we've actively
+# discussed as anti-idioms in CLAUDE.md.
+[workspace.lints.clippy]
+# Nested `if let` / `match` patterns that could be flattened into a
+# single chain (e.g. `if let Some(x) = a { if let Some(y) = x.b() {…}}`
+# → `a.and_then(|x| x.b()).map(|y| …)`).  See CLAUDE.md "Prefer
+# combinators over nested if let / match".
+collapsible_match = "deny"
+# `match opt { Some(x) => Some(f(x)), None => None }` → `opt.map(f)`.
+manual_map = "deny"
+# `match opt { Some(x) if pred(x) => Some(x), _ => None }` →
+# `opt.filter(pred)`.
+manual_filter = "deny"
+# `if let Some(x) = opt { … } else { default }` → `unwrap_or` /
+# `map_or` / `unwrap_or_default`.
+manual_unwrap_or = "deny"
+manual_unwrap_or_default = "deny"

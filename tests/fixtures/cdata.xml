@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<root>
+  <!-- CDATA sections -->
+  <script><![CDATA[
+    if (a < b && b > c) {
+      return "<result/>";
+    }
+  ]]></script>
+  <mixed>Text before <![CDATA[<not-a-tag>]]> text after.</mixed>
+  <!-- processing instructions -->
+  <?xml-stylesheet type="text/xsl" href="transform.xsl"?>
+  <data><?custom-pi some data here?></data>
+  <!-- comment inside element -->
+  <section>
+    <!-- this is a comment -->
+    visible text
+  </section>
+</root>

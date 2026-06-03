@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Tests full Unicode: CJK, emoji, RTL text, combining characters -->
+<root>
+  <cjk>日本語テスト — 中文测试 — 한국어 테스트</cjk>
+  <arabic dir="rtl">مرحباً بالعالم</arabic>
+  <emoji>Hello 🌍! Rust 🦀 + XML 📄</emoji>
+  <!-- combining characters -->
+  <combining>e&#x0301; (e + combining acute = é)</combining>
+  <!-- surrogate-pair codepoints expressed as numeric refs -->
+  <math>&#x1D400; (Mathematical Bold Capital A)</math>
+  <!-- null byte must be rejected by a conformant parser -->
+</root>

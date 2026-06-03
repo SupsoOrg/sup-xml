@@ -1,0 +1,161 @@
+:root {
+  --sl-color-accent-low: #1a2a4a;
+  --sl-color-accent: #2f5fbf;
+  --sl-color-accent-high: #b8cbed;
+  --sl-color-white: #ffffff;
+  --sl-color-gray-1: #eef0f4;
+  --sl-color-gray-2: #c0c5d0;
+  --sl-color-gray-3: #8a92a3;
+  --sl-color-gray-4: #545c6e;
+  --sl-color-gray-5: #353c4c;
+  --sl-color-gray-6: #242935;
+  --sl-color-black: #181b22;
+}
+
+:root[data-theme='light'] {
+  --sl-color-accent-low: #d0dcf2;
+  --sl-color-accent: #1f4ea3;
+  --sl-color-accent-high: #0d2557;
+}
+
+site-search button[data-open-modal] {
+  max-width: 32rem;
+  width: 100%;
+}
+
+/* Starlight's default right-aligns the content column against the TOC
+   (--sl-content-margin-inline: auto 0), which leaves a large empty gap on
+   the right edge of wide viewports. Center the content within the main
+   pane and shift the "On this page" panel to the right edge of its
+   container so the two columns sit balanced on the page. */
+@media (min-width: 72rem) {
+  [data-has-sidebar][data-has-toc] .main-pane {
+    --sl-content-margin-inline: auto;
+  }
+  .right-sidebar-panel > .sl-container {
+    margin-inline-start: auto;
+  }
+}
+
+/* Bottom-of-page next/prev pagination. Starlight's default uses
+   auto-fit so a lone "Next" link (no previous page) stretches across
+   the full column. Pin the grid to two columns when there's only one
+   link so it stays half-width and right-aligned. */
+.pagination-links:has(> a:only-child) {
+  grid-template-columns: 1fr 1fr;
+}
+.pagination-links > a:only-child[rel="next"] {
+  grid-column: 2;
+}
+.pagination-links > a:only-child[rel="prev"] {
+  grid-column: 1;
+}
+@media (max-width: 50rem) {
+  .pagination-links:has(> a:only-child) {
+    grid-template-columns: 1fr;
+  }
+  .pagination-links > a:only-child[rel="next"],
+  .pagination-links > a:only-child[rel="prev"] {
+    grid-column: auto;
+  }
+}
+
+/* Hide the auto-rendered Starlight page title on the homepage,
+   since we render a custom centered hero inside the content. */
+main:has(.home-hero) .content-panel:first-of-type:not(:has(.home-hero)) {
+  display: none;
+}
+
+.home-hero {
+  text-align: center;
+  margin: 2rem auto 3rem;
+  max-width: 48rem;
+}
+
+.home-title {
+  font-size: clamp(3rem, 2rem + 4vw, 5rem);
+  font-weight: 800;
+  line-height: 1.05;
+  letter-spacing: -0.03em;
+  margin: 0 0 1.25rem;
+  background: linear-gradient(
+    135deg,
+    var(--sl-color-text-accent) 0%,
+    var(--sl-color-accent-high) 100%
+  );
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+  color: transparent;
+}
+
+.home-tagline {
+  font-size: clamp(1.25rem, 1.00rem + 1.2vw, 1.7rem);
+  line-height: 1.4;
+  color: var(--sl-color-gray-2);
+  max-width: 44rem;
+  margin: 0 auto 2rem;
+  font-weight: 400;
+}
+
+.home-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem 1rem;
+  justify-content: center;
+  align-items: center;
+}
+
+
+.benchmark-bar {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  margin: 0.4rem 0;
+  font-variant-numeric: tabular-nums;
+}
+
+.benchmark-bar .label {
+  width: 9rem;
+  font-weight: 500;
+}
+
+.benchmark-bar .bar {
+  height: 1.4rem;
+  background: var(--sl-color-accent);
+  border-radius: 3px;
+  transition: width 0.6s ease;
+}
+
+.benchmark-bar.muted .bar {
+  background: var(--sl-color-gray-4);
+}
+
+.benchmark-bar .value {
+  font-size: 0.9em;
+  color: var(--sl-color-gray-3);
+}
+
+/* Mobile-friendly wide tables.  Starlight's default table rendering
+   overflows the viewport on narrow screens (phones) when a table
+   has 4+ columns.  Wrap each table in a horizontally-scrollable
+   container so on a phone the table scrolls within its column
+   instead of pushing the rest of the page sideways.  Desktop
+   layouts are unaffected — the scroll container only kicks in
+   when the table is wider than its parent. */
+.sl-markdown-content table {
+  display: block;
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+  max-width: 100%;
+}
+
+/* Restore native table layout once there's enough room.  Cuts in
+   above the tablet breakpoint so phones get the scroll affordance
+   and laptops get the regular grid. */
+@media (min-width: 50rem) {
+  .sl-markdown-content table {
+    display: table;
+    overflow-x: visible;
+  }
+}

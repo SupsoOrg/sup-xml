@@ -1,0 +1,8 @@
+<?xml version="1.0"?>
+<root xml:base="http://a.example/">
+  <child xml:base="http://b.example/">
+    <grand xml:base="../c/">
+      <leaf xml:base=""/>
+    </grand>
+  </child>
+</root>

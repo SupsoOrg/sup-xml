@@ -1,0 +1,39 @@
+/target
+.idea
+.claude
+.gstack
+/thoughts
+rustc-ice-*.txt
+.DS_Store
+# W3C conformance suites — large, document-licensed, not redistributable
+# inside this repo.  Each has its own fetcher script alongside the
+# gitignored directory.  Run the script to populate locally; CI runs
+# them on demand.  Gitignore syntax doesn't support trailing `#`
+# comments on a pattern line, so the fetch-script hints live below.
+# XSD 1.0          — tests/assets/xsts/fetch.sh
+# XSD 1.1          — tests/assets/xsts-1.1/fetch.sh
+# XSLT 3.0         — tests/assets/xslt30-test/fetch.sh
+# XPath/XQuery 3.1 — tests/assets/qt3tests/fetch.sh
+# (XPath 1.0 libxml2 corpus is small enough to vendor in-tree; see
+#  tests/assets/xpath-libxml2-corpus/fetch.sh for refresh.)
+/tests/assets/xsts/xmlschema2006-11-06/
+/tests/assets/xsts-1.1/saxonData/
+/tests/assets/xsts-1.1/saxonMeta/
+/tests/assets/xsts-1.1/ibmData/
+/tests/assets/xsts-1.1/ibmMeta/
+/tests/assets/xsts-1.1/oracleData/
+/tests/assets/xsts-1.1/oracleMeta/
+/tests/assets/xsts-1.1/wgData/
+/tests/assets/xsts-1.1/wgMeta/
+/tests/assets/xsts-1.1/common/
+/tests/assets/xsts-1.1/extra-suite.xml
+/tests/assets/xsts-1.1/XSD1_1TestCategories.xml
+/tests/assets/xsts-1.1/XSD1_1TestCategories.xhtml
+/tests/assets/xsts-1.1/00COPYRIGHT
+/tests/assets/xslt30-test/
+/tests/assets/qt3tests/
+/.supso/
+
+# Python bytecode caches
+__pycache__/
+*.pyc

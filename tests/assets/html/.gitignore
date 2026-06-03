@@ -1,0 +1,7 @@
+# Real-world HTML fixtures fetched by ./fetch.sh — gitignored to avoid
+# checking copyrighted news/site content into the repo.  Re-fetch with:
+#
+#   tests/assets/html/fetch.sh
+#
+# See SOURCES.md for the URL list and licenses.
+*.html

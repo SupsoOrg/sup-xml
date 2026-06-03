@@ -1,0 +1,24 @@
+[package]
+name = "sup-xml-tree"
+description = "Idiomatic Rust tree types and string dictionary"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license-file.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+default = []
+# Switches `Node` / `Attribute` / `Namespace` from the lean storage
+# layout to libxml2's byte-exact public layout (`_xmlNode` / `_xmlAttr`
+# / `_xmlNs`).  Enables the `libsupxml2.so` C ABI shim.
+c-abi = []
+
+[dependencies]
+bumpalo = { version = "3", features = ["collections"] }

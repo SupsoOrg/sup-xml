@@ -1,0 +1,1 @@
+ceiling(//book/@price) - floor(//book/@price)
