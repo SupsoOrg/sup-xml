@@ -3,33 +3,54 @@
 A memory-safe, fast, spec-compliant XML library written in Rust, with
 a drop-in ABI replacement for libxml2.
 
-- **Memory-safe** — pure Rust; the `unsafe` surface is a small,
+- **Memory-safe** SupXML is pure Rust where the `unsafe` surface is a small,
   audited core, enforced by `#![forbid(unsafe_code)]` on every
   other module and exercised under [Miri](https://github.com/rust-lang/miri)
   in CI.  See [`CONTRIBUTING.md`](CONTRIBUTING.md) § "Unsafe policy".
-- **Spec-compliant** — full XML 1.0 well-formedness checks on
-  every parse.  Scores **255 / 257** on the W3C XML Conformance
+- **Spec-compliant** SupXML scores **255 / 257** on the W3C XML Conformance
   Test Suite, ahead of libxml2's 250 / 257.  See
   [`COMPARISON.md`](COMPARISON.md) for the side-by-side comparison
   against libxml2, roxmltree, xml-rs, and quick-xml.
-- **Fast** — competitive with libxml2 and ~1.04× faster than
+- **Fast** SupXML is ~2x as fast as libxml2 and ~1.04× faster than
   quick-xml on matched-contract head-to-head bytes events.  See
   [`COMPARISON.md`](COMPARISON.md) § "Performance".
 - **Recovers gracefully from malformed input** when you want it to
-  — opt-in `recovery_mode: true` mode matches libxml2's
-  `XML_PARSE_RECOVER` on 12 of 13 common malformed-input scenarios
-  and preserves user data in three cases where libxml2 silently
-  corrupts the text.  See [`COMPARISON.md`](COMPARISON.md) §
-  "Error-recovery mode".
+  with an optional `recovery_mode: true` mode, just like libxml2's
+  `XML_PARSE_RECOVER`.  See [`COMPARISON.md`](COMPARISON.md) for more info.
+- **Drop-in replacement** for libxml2 with a C ABI shim.
 
-> **License:** SupXML is **source-available**, not open-source. The source
-> is public, but *running it requires a license certificate* — parsing
-> fails without one. Certificates are free for individuals (hobbyist) and
-> for a 30-day company evaluation; commercial use is paid. Get yours at
-> [supso.org/projects/sup-xml](https://supso.org/projects/sup-xml). See
-> [License](#license) below.
+## Documentation
 
-## At a glance
+- To view the main documentation page, visit
+  [supso.org/projects/sup-xml/docs](https://supso.org/projects/sup-xml/docs).
+- To read the programming-level documentation, visit
+  [docs.rs/sup_xml](https://docs.rs/sup_xml/latest/sup_xml/).
+- [`COMPARISON.md`](COMPARISON.md) — feature, compliance, and
+  performance comparison vs other XML parsers
+- [`CONTRIBUTING.md`](CONTRIBUTING.md) — code policy, unsafe rules,
+  Miri instructions
+
+## License
+
+SupXML is **source-available** software, released through
+[Supported Source](https://supso.org/). The source is public on GitHub,
+but **a license certificate is required to use it** — without a valid
+certificate, document parsing returns a fatal error.
+
+| Use | License |
+|-----|---------|
+| Company, government, or organization | Paid commercial license |
+| Evaluating before you decide | Free 30-day evaluation license |
+| Individual, non-monetized project | Free, renewable one-year hobbyist license |
+
+Get a certificate at
+[supso.org/projects/sup-xml](https://supso.org/projects/sup-xml) and place
+it where SupXML looks for it (`SUPSO_LICENSE`, `~/.supso/license_certificates/`,
+or `./.supso/license_certificates/`). Full terms are in [`LICENSE`](LICENSE);
+the model is explained in the [licensing docs](https://supso.org/projects/sup-xml/docs)
+and the [Supported Source FAQ](https://supso.org/faq).
+
+## Feature table
 
 | Feature | Cargo feature | Entry point |
 |---------|---------------|-------------|
@@ -43,15 +64,6 @@ a drop-in ABI replacement for libxml2.
 | Typed-struct deserialize | `serde` | `sup_xml::de::*` |
 | HTTPS-fetched DTDs / entities | `network-resolver` | [`NetworkResolver`] |
 | Async I/O entry points (tokio) | `tokio` | `sup_xml::async_io::parse_async` |
-
-```toml
-[dependencies]
-sup-xml = { version = "*", features = ["xsd", "xslt", "html"] }
-```
-
-The CLI bundles every feature: `cargo install --path crates/cli`
-gives you a `sup-xml` binary with `lint`, `format`, `xpath`,
-`xslt`, `validate`, `repair`, `stats`, `c14n` subcommands.
 
 ## Quick start
 
@@ -114,128 +126,24 @@ From the shell:
 sup-xml validate --schema schema.xsd instance.xml
 ```
 
-### Validate with Schematron  (feature `xslt`)
+## Guides
 
-```rust
-use sup_xml::xslt::schematron::Schematron;
+The examples above cover the common cases. Each capability has a full
+guide on [supso.org](https://supso.org/projects/sup-xml/docs) covering
+the options, edge cases, and reference detail:
 
-let sch = Schematron::compile_str(r#"
-    <sch:schema xmlns:sch="http://purl.oclc.org/dsdl/schematron">
-      <sch:pattern>
-        <sch:rule context="book">
-          <sch:assert test="@isbn">every book must have an ISBN</sch:assert>
-        </sch:rule>
-      </sch:pattern>
-    </sch:schema>"#)?;
-
-let report = sch.validate_str("<book/>")?;
-assert!(!report.findings.is_empty());
-```
-
-### Canonicalize for XML-DSig / SAML
-
-```rust
-use sup_xml::{parse_str, canonicalize_to_bytes, CanonicalizeOptions, C14nMode};
-
-let doc  = parse_str("<r b='2' a='1'/>", &Default::default())?;
-let opts = CanonicalizeOptions { mode: C14nMode::Inclusive_1_0, ..Default::default() };
-let c14n = canonicalize_to_bytes(&doc, &opts)?;
-```
-
-## Recovering from malformed XML
-
-For trusted-but-buggy input (third-party RSS / Atom feeds, legacy
-data migration, diagnostic UIs), opt into recovery mode:
-
-```rust
-use sup_xml::{XmlBytesReader, ParseOptions, BytesEvent};
-
-let xml = b"<r>tom & jerry<unclosed>";   // bare & + missing end tag
-
-let opts = ParseOptions { recovery_mode: true, ..Default::default() };
-let mut reader = XmlBytesReader::from_bytes(xml).unwrap()
-    .with_options(opts);
-
-loop {
-    match reader.next().unwrap() {
-        BytesEvent::Eof => break,
-        _ => {}
-    }
-}
-
-// Inspect what was wrong — errors are listed in the order they
-// were encountered.  Strict-mode callers see these via the first
-// returned `Err` instead.
-for err in reader.recovered_errors() {
-    eprintln!("recovered: {}", err.message);
-}
-```
-
-The default — `recovery_mode: false` — fails fast on the
-first non-trivial error, which is the right behaviour for trusted
-internal data.
-
-## Character encodings
-
-The parser auto-detects the input's encoding and transcodes to
-UTF-8 before parsing — matching libxml2 and the XML 1.0 spec's
-requirement (§ 4.3.3) that processors accept both UTF-8 and
-UTF-16:
-
-```rust
-use sup_xml::parse_bytes;
-
-let doc = parse_bytes(latin1_or_utf16_or_gb2312_bytes)?;
-```
-
-Detection follows XML 1.0 Appendix F — BOM, then the four-byte
-autodetect signatures for UTF-32 / UTF-16 / EBCDIC, then the
-`<?xml encoding="..."?>` declaration.  UTF-8 input stays
-zero-copy; non-UTF-8 input pays one allocation for the decoded
-buffer.
-
-To require UTF-8 input — useful when inputs are guaranteed UTF-8
-and you want to reject anything else as part of a security
-posture — set `auto_transcode: false`:
-
-```rust
-use sup_xml::{parse_bytes_opts, ParseOptions};
-
-let opts = ParseOptions { auto_transcode: false, ..Default::default() };
-let doc  = parse_bytes_opts(must_be_utf8_bytes, &opts)?;
-```
-
-### Supported character encodings
-
-**Built-in, hand-tuned, no external dependency:**
-
-- UTF-8, US-ASCII — zero-copy passthrough
-- ISO-8859-1 (Latin-1), Windows-1252 — SWAR-accelerated
-- UTF-16 LE / BE — BOM-aware, surrogate-pair validated
-- UTF-32 LE / BE — BOM-aware, scalar-validated (also accepts
-  `UCS-4LE` / `UCS-4BE` aliases)
-- EBCDIC variants — table-driven, byte-for-byte audited:
-  - **IBM037** (CCSID 37) — US/Canada Latin, classic mainframe default
-  - **IBM500** (CCSID 500) — International EBCDIC (IBM037 +
-    rearranged `[`, `]`, `!`, `^`, `|`, `¬`, `¢`)
-  - **IBM1047** (CCSID 1047) — Open Systems / z/OS Unix Services
-    Latin-1 (IBM500 + LF/NEL line-ending swap)
-  - **IBM1140** (CCSID 1140) — IBM037 with the Euro sign update
-    (byte 0x9F → `€`)
-
-**Via [`encoding_rs`](https://crates.io/crates/encoding_rs), default
-`full-encodings` feature:**
-
-The full WHATWG Encoding set — Shift_JIS, EUC-JP, ISO-2022-JP,
-GB2312, GBK, GB18030, Big5, EUC-KR, ISO-8859-2…16,
-Windows-1250…1258, KOI8-R, KOI8-U, IBM866, macintosh,
-x-mac-cyrillic, TIS-620 (via `windows-874`), and others.  Disable
-the feature to drop the dependency and accept a clean error on
-these inputs.
-
-### UTF-7 is a deliberately unsupported character encoding
-
-- **UTF-7** — for security reasons, UTF-7 is not supported
+- [Parsing & serialization](https://supso.org/projects/sup-xml/docs/guides/parsing/)
+- [XPath 1.0](https://supso.org/projects/sup-xml/docs/guides/xpath/)
+- [XSLT 1.0 transforms](https://supso.org/projects/sup-xml/docs/guides/xslt/)
+- [XSD validation](https://supso.org/projects/sup-xml/docs/guides/xsd/)
+- [Schematron](https://supso.org/projects/sup-xml/docs/guides/schematron/) — rule-based validation for the constraints XSD can't express
+- [Canonical XML / Exc-C14N](https://supso.org/projects/sup-xml/docs/guides/canonical/) — for XML-DSig, SAML, eIDAS / XAdES, WS-Security
+- [Recovery mode](https://supso.org/projects/sup-xml/docs/guides/recovery/) — parsing malformed feeds and legacy data without losing content
+- [Character encodings](https://supso.org/projects/sup-xml/docs/guides/encodings/) — auto-detection plus UTF-8/16/32, Latin-1, EBCDIC, and the full WHATWG set
+- [HTML5 parsing](https://supso.org/projects/sup-xml/docs/guides/html/)
+- [Typed-struct deserialize (serde)](https://supso.org/projects/sup-xml/docs/guides/serde/)
+- [Async I/O (tokio)](https://supso.org/projects/sup-xml/docs/guides/async/)
+- [Migrating from libxml2](https://supso.org/projects/sup-xml/docs/guides/migrating-from-libxml2/)
 
 ## Requirements
 
@@ -271,34 +179,3 @@ crates/
   bench/    # head-to-head benches vs libxml2, roxmltree, xml-rs, quick-xml
   compat/   # libxml2 C-ABI compatibility shim
 ```
-
-## Documentation
-
-- To view the main documentation page, visit
-  [supso.org/projects/sup-xml/docs](https://supso.org/projects/sup-xml/docs).
-- To read the programming-level documentation, visit
-  [docs.rs/sup_xml](https://docs.rs/sup_xml/latest/sup_xml/).
-- [`COMPARISON.md`](COMPARISON.md) — feature, compliance, and
-  performance comparison vs other XML parsers
-- [`CONTRIBUTING.md`](CONTRIBUTING.md) — code policy, unsafe rules,
-  Miri instructions
-
-## License
-
-SupXML is **source-available** software, released through
-[Supported Source](https://supso.org/). The source is public on GitHub,
-but **a license certificate is required to use it** — without a valid
-certificate, document parsing returns a fatal error.
-
-| Use | License |
-|-----|---------|
-| Company, government, or organization | Paid commercial license |
-| Evaluating before you decide | Free 30-day evaluation license |
-| Individual, non-monetized project | Free, renewable one-year hobbyist license |
-
-Get a certificate at
-[supso.org/projects/sup-xml](https://supso.org/projects/sup-xml) and place
-it where SupXML looks for it (`SUPSO_LICENSE`, `~/.supso/license_certificates/`,
-or `./.supso/license_certificates/`). Full terms are in [`LICENSE`](LICENSE);
-the model is explained in the [licensing docs](https://supso.org/projects/sup-xml/docs)
-and the [Supported Source FAQ](https://supso.org/faq).
