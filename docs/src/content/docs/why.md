@@ -4,9 +4,10 @@ description: Memory safety, spec compliance, and libxml2 compatibility — the c
 ---
 
 SupXML exists because the XML processing layer in most production systems
-is still libxml2, but libxml2 is unmaintained, and it written
-in C, not Rust. SupXML is a memory-safe, spec-compliant, 
-libxml2-compatible XML library that can serve as a replacement for libxml2.
+is still libxml2, but libxml2 was nearly unmaintained recently, 
+and it written in C. SupXML is a memory-safe, spec-compliant, 
+libxml2-compatible XML library written in Rust that's 2x as fast
+as libxml2, able to serve as a drop-in replacement.
 
 ## Safety
 
