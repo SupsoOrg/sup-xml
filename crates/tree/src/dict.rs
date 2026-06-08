@@ -61,6 +61,7 @@
 #![allow(unsafe_code)] // see module docs
 
 use std::collections::{HashMap, HashSet};
+use std::ptr::NonNull;
 use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -99,8 +100,18 @@ pub struct Dict {
 }
 
 struct DictInner {
-    /// Key: input bytes (no NUL).  Value: NUL-terminated canonical.
-    table: HashMap<Vec<u8>, Box<[u8]>>,
+    /// Key: input bytes (no NUL).  Value: a `Box::into_raw` pointer to
+    /// the NUL-terminated canonical buffer.
+    ///
+    /// The buffer is stored as a raw pointer rather than a live
+    /// `Box<[u8]>` so the stable `*const u8` returned by `intern` keeps
+    /// valid provenance for the dict's whole lifetime.  Moving a `Box`
+    /// re-asserts unique ownership over its pointee, and the map moves
+    /// every value on each resize — with live boxes that would
+    /// invalidate every interned pointer handed out before the resize.
+    /// Raw-pointer values are `Copy`, so moving them re-tags nothing.
+    /// Reclaimed in [`DictInner`]'s `Drop`.
+    table: HashMap<Vec<u8>, NonNull<[u8]>>,
     /// Side set keyed by canonical pointer address for O(1) `owns`.
     owned: HashSet<usize>,
     /// Origin document arenas retained on behalf of a cross-thread node
@@ -113,6 +124,19 @@ struct DictInner {
     /// Deduped by arena pointer; empty until the first cross-thread
     /// graft.
     retained_arenas: Vec<Arc<Bump>>,
+}
+
+impl Drop for DictInner {
+    /// Reclaim every canonical buffer leaked via `Box::into_raw` in
+    /// [`Dict::intern`].  Runs once, when the dict's last reference drops.
+    fn drop(&mut self) {
+        for &canonical in self.table.values() {
+            // SAFETY: each value is a `Box::into_raw(Box<[u8]>)` produced
+            // in `intern`, owned solely by this table, and freed exactly
+            // once — here.
+            unsafe { drop(Box::from_raw(canonical.as_ptr())); }
+        }
+    }
 }
 
 impl Dict {
@@ -164,7 +188,7 @@ impl Dict {
             // whole lifetime, so the chain stays live while `self` does.
             let d = unsafe { &*cur };
             let hit = d.inner.lock().expect("Dict mutex poisoned")
-                .table.get(input).map(|c| c.as_ptr());
+                .table.get(input).map(|&c| Self::canonical_ptr(c));
             if let Some(p) = hit { return p; }
             cur = d.parent;
         }
@@ -239,17 +263,31 @@ impl Dict {
             return ancestor;
         }
         let mut inner = self.inner.lock().expect("Dict mutex poisoned");
-        if let Some(canonical) = inner.table.get(input) {
-            return canonical.as_ptr();
+        if let Some(&canonical) = inner.table.get(input) {
+            return Self::canonical_ptr(canonical);
         }
         let mut buf = Vec::with_capacity(input.len() + 1);
         buf.extend_from_slice(input);
         buf.push(0);
-        let canonical: Box<[u8]> = buf.into_boxed_slice();
-        let ptr = canonical.as_ptr();
+        // Leak the buffer to a raw pointer so the returned `*const u8`
+        // keeps allocation provenance across the map resizes that move
+        // the stored value.  Reclaimed in `DictInner::drop`.
+        // SAFETY: `Box::into_raw` never returns null.
+        let canonical = unsafe {
+            NonNull::new_unchecked(Box::into_raw(buf.into_boxed_slice()))
+        };
+        let ptr = Self::canonical_ptr(canonical);
         inner.owned.insert(ptr as usize);
         inner.table.insert(input.to_vec(), canonical);
         ptr
+    }
+
+    /// The stable, read-only interned pointer for a stored canonical
+    /// buffer: a thin pointer to its first byte carrying the buffer's
+    /// allocation provenance.
+    #[inline]
+    fn canonical_ptr(canonical: NonNull<[u8]>) -> *const u8 {
+        canonical.cast::<u8>().as_ptr()
     }
 
     /// `&str`-keyed convenience over [`Self::intern`].
@@ -264,7 +302,7 @@ impl Dict {
             .lock().expect("Dict mutex poisoned")
             .table
             .get(input)
-            .map(|c| c.as_ptr());
+            .map(|&c| Self::canonical_ptr(c));
         match local {
             Some(p) => p,
             None => self.ancestor_lookup(input),
