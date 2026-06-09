@@ -57,7 +57,7 @@
 //! [`License::validate_certificate`] locates and verifies one without
 //! the caller having to know where it lives: it searches, in order,
 //!
-//! 1. an explicit path (the `SUPSO_LICENSE` environment variable, or
+//! 1. an explicit path (the `SUPSO_LICENSE_PATH` environment variable, or
 //!    the `explicit` argument to [`validate_certificate_at`]),
 //! 2. `$HOME/.supso/license_certificates/`,
 //! 3. `./.supso/license_certificates/` (relative to the current
@@ -407,14 +407,14 @@ impl License {
     /// Locate a license certificate on disk and verify it against the
     /// baked-in trusted keys using the current system clock.
     ///
-    /// Honours the `SUPSO_LICENSE` environment variable as an explicit
+    /// Honours the `SUPSO_LICENSE_PATH` environment variable as an explicit
     /// path; otherwise searches the default `.supso/license_certificates/`
     /// directories (see the module docs).  Returns the verified
     /// [`LicenseCertificate`] — the [`License`] plus the path it was
     /// read from — or a [`CertificateError`] describing why none was
     /// accepted.
     pub fn validate_certificate() -> Result<LicenseCertificate, CertificateError> {
-        let explicit = std::env::var_os("SUPSO_LICENSE").map(PathBuf::from);
+        let explicit = std::env::var_os("SUPSO_LICENSE_PATH").map(PathBuf::from);
         validate_certificate_at(explicit.as_deref(), Utc::now())
     }
 }

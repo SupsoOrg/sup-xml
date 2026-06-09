@@ -63,10 +63,10 @@ export DYLD_LIBRARY_PATH="/tmp/sxs${DYLD_LIBRARY_PATH:+:$DYLD_LIBRARY_PATH}"
 # sup-xml's parse gate locates a license certificate relative to $HOME or
 # the current directory by default.  Each test file runs from $PKG_DIR (so
 # `import lxml` resolves the redirected package), which has no `.supso/`,
-# so point SUPSO_LICENSE at the repo's certificate explicitly — otherwise
+# so point SUPSO_LICENSE_PATH at the repo's certificate explicitly — otherwise
 # every parse in every test fails the gate and reports as an error
 # unrelated to the ABI.
-export SUPSO_LICENSE="${SUPSO_LICENSE:-$REPO/.supso/license_certificates}"
+export SUPSO_LICENSE_PATH="${SUPSO_LICENSE_PATH:-$REPO/.supso/license_certificates}"
 
 # Optional positional args restrict the run to specific modules (by base
 # name, with or without the `test_` prefix), e.g. `run_lxml_suite.sh

@@ -1,6 +1,6 @@
 """Enumerate every failure/error in lxml's upstream suite against the shim.
 
-Run via run_dump.sh (which sets PYTHONPATH/DYLD/SUPSO_LICENSE).  Prints one
+Run via run_dump.sh (which sets PYTHONPATH/DYLD/SUPSO_LICENSE_PATH).  Prints one
 line per failing test: `MODULE TESTNAME KIND | last-traceback-line`, then a
 tally grouped by the trailing exception line so the biggest buckets are
 obvious.

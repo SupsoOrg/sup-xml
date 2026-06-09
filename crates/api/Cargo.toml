@@ -1,6 +1,7 @@
 [package]
 name = "sup-xml"
 description = "Modern idiomatic Rust API for SupXML"
+readme = "README.md"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

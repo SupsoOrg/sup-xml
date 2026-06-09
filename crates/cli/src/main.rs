@@ -240,7 +240,7 @@ enum Cmd {
     /// certificate and print who it's issued to and when it expires.
     ///
     /// With no `--path`, searches the default
-    /// `.supso/license_certificates/` locations (and the `SUPSO_LICENSE`
+    /// `.supso/license_certificates/` locations (and the `SUPSO_LICENSE_PATH`
     /// environment variable).
     ///
     /// Exit: 0 = a valid license was found; 1 = none found or the
@@ -517,7 +517,7 @@ fn main() -> ExitCode {
             eprintln!("  {reason}");
             eprintln!(
                 "  add a license certificate under .supso/license_certificates/ \
-                 (or set SUPSO_LICENSE), then run `sup-xml license` to check it."
+                 (or set SUPSO_LICENSE_PATH), then run `sup-xml license` to check it."
             );
             EXIT_ERROR
         }
@@ -552,7 +552,7 @@ fn dispatch(cli: &Cli) -> Result<(), CliError> {
 
 /// Gate for all non-`license` commands: a valid (or grace-period)
 /// license certificate must be present in one of the default locations
-/// (or via `SUPSO_LICENSE`).  See [`sup_xml_license::License::validate_certificate`].
+/// (or via `SUPSO_LICENSE_PATH`).  See [`sup_xml_license::License::validate_certificate`].
 fn require_license() -> Result<(), CliError> {
     let cert = sup_xml_license::License::validate_certificate()
         .map_err(|e| CliError::Unlicensed(e.to_string()))?;

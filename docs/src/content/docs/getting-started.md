@@ -20,6 +20,21 @@ whichever fits where you're starting from:
 
 All paths share the same engine underneath. Let's get you running.
 
+:::note[A license certificate is required]
+SupXML is **source-available** software released through
+[Supported Source](https://supso.org/): the source is public and the crates
+install normally, but **document parsing requires a valid license
+certificate**. Without one, parse entry points return a fatal error (a
+short grace period applies after an existing certificate expires).
+
+Grab a certificate — **free** for individuals and non-monetized projects,
+free 30-day evaluation for organizations, at
+[supso.org/projects/sup-xml](https://supso.org/projects/sup-xml), then drop it
+in a folder you create: `~/.supso/license_certificates/` (or a project-local
+`./.supso/license_certificates/`). See the
+[licensing docs](https://supso.org/projects/sup-xml/docs) for the full model.
+:::
+
 ---
 
 ## Using the Rust library

@@ -45,8 +45,8 @@ certificate, document parsing returns a fatal error.
 
 Get a certificate at
 [supso.org/projects/sup-xml](https://supso.org/projects/sup-xml) and place
-it where SupXML looks for it (`SUPSO_LICENSE`, `~/.supso/license_certificates/`,
-or `./.supso/license_certificates/`). Full terms are in [`LICENSE`](LICENSE);
+it where SupXML looks for it (`~/.supso/license_certificates/`, or a
+project-local `./.supso/license_certificates/`). Full terms are in [`LICENSE`](LICENSE);
 the model is explained in the [licensing docs](https://supso.org/projects/sup-xml/docs)
 and the [Supported Source FAQ](https://supso.org/faq).
 

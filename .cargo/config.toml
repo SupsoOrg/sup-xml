@@ -10,7 +10,7 @@
 # downstream consumers, so installed / published builds still require a
 # real license.  (The fixture expires 2030-01-01; replace it before then.)
 [env]
-SUPSO_LICENSE = { value = "crates/license/tests/fixtures/valid_certificate.cert", relative = true }
+SUPSO_LICENSE_PATH = { value = "crates/license/tests/fixtures/valid_certificate.cert", relative = true }
 
 [alias]
 # `cargo test-all` — runs every test in the workspace with every

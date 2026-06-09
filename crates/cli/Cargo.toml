@@ -1,6 +1,7 @@
 [package]
 name = "sup-xml-cli"
 description = "Command-line tool for SupXML: lint, format, xpath, validate, repair, c14n, diff"
+readme = "README.md"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

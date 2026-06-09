@@ -11,7 +11,7 @@
 //! otherwise the first document parse triggers the check.
 //!
 //! The certificate is located the same way [`sup_xml_license::License::validate_certificate`]
-//! describes: the `SUPSO_LICENSE` environment variable, then
+//! describes: the `SUPSO_LICENSE_PATH` environment variable, then
 //! `$HOME/.supso/license_certificates/`, then `./.supso/license_certificates/`.
 
 use crate::error::{ErrorDomain, ErrorLevel, Result, XmlError};

@@ -24,7 +24,7 @@ const SAMPLE_MALFORMED: &str = "<r>tom & jerry<unclosed>";
 
 /// A committed, production-key-signed license certificate (org "Acme
 /// Corp", expires 2030-01-01).  Every gated command needs a valid
-/// license, so the default command builder points `SUPSO_LICENSE` at it.
+/// license, so the default command builder points `SUPSO_LICENSE_PATH` at it.
 ///
 /// NOTE: this certificate expires 2030-01-01; these tests will start
 /// failing after that date until the fixture is replaced with a
@@ -35,18 +35,18 @@ fn license_fixture() -> PathBuf {
 
 fn bin() -> Command {
     let mut c = Command::new(env!("CARGO_BIN_EXE_sup-xml"));
-    c.env("SUPSO_LICENSE", license_fixture());
+    c.env("SUPSO_LICENSE_PATH", license_fixture());
     c
 }
 
-/// A command builder with no license reachable: `SUPSO_LICENSE` unset,
+/// A command builder with no license reachable: `SUPSO_LICENSE_PATH` unset,
 /// and `HOME` plus the working directory pointed at an empty scratch dir
 /// so the default `.supso/license_certificates/` search finds nothing.
 fn bin_unlicensed() -> Command {
     let empty = tmp("no-license-home");
     fs::create_dir_all(&empty).unwrap();
     let mut c = Command::new(env!("CARGO_BIN_EXE_sup-xml"));
-    c.env_remove("SUPSO_LICENSE");
+    c.env_remove("SUPSO_LICENSE_PATH");
     c.env("HOME", &empty);
     c.env("USERPROFILE", &empty);
     c.current_dir(&empty);

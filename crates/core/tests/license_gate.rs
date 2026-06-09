@@ -11,7 +11,7 @@ use sup_xml_core::{ParseOptions, parse_str};
 #[test]
 fn parsing_without_a_license_is_rejected() {
     // Neutralise every place the gate looks for a certificate BEFORE the
-    // first parse initializes the cached verdict: `SUPSO_LICENSE` (set
+    // first parse initializes the cached verdict: `SUPSO_LICENSE_PATH` (set
     // workspace-wide via .cargo/config.toml), and HOME / USERPROFILE /
     // cwd so the default `.supso/license_certificates/` search finds
     // nothing.  Safe: single test, single-threaded, no parse has run yet.
@@ -19,7 +19,7 @@ fn parsing_without_a_license_is_rejected() {
         std::env::temp_dir().join(format!("supso-unlicensed-{}", std::process::id()));
     std::fs::create_dir_all(&empty).unwrap();
     unsafe {
-        std::env::remove_var("SUPSO_LICENSE");
+        std::env::remove_var("SUPSO_LICENSE_PATH");
         std::env::set_var("HOME", &empty);
         std::env::set_var("USERPROFILE", &empty);
     }
