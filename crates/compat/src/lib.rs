@@ -111,6 +111,7 @@ pub mod attr;
 pub mod c14n;
 pub mod charclass;
 pub mod dict;
+mod dynsym;
 pub mod dtd;
 pub mod dtddecl;
 pub mod encoding;

@@ -372,13 +372,7 @@ pub unsafe fn xsltCheckRead(
     type Fn = unsafe extern "C" fn(*mut c_void, *mut c_void, *const c_char) -> c_int;
     static FN: OnceLock<Option<Fn>> = OnceLock::new();
     let cached = FN.get_or_init(|| {
-        unsafe extern "C" {
-            fn dlsym(handle: *mut c_void, sym: *const c_char) -> *mut c_void;
-        }
-        // RTLD_DEFAULT = -2 on macOS; search every loaded image.
-        let rtld_default: *mut c_void = -2isize as usize as *mut c_void;
-        let name = b"xsltCheckRead\0".as_ptr() as *const c_char;
-        let p = unsafe { dlsym(rtld_default, name) };
+        let p = crate::dynsym::lookup(c"xsltCheckRead".as_ptr());
         if p.is_null() { None } else { Some(unsafe { std::mem::transmute::<*mut c_void, Fn>(p) }) }
     });
     match cached {

@@ -654,12 +654,7 @@ fn load_document_impl(
         use std::sync::OnceLock;
         static FN: OnceLock<Option<LoadDocFn>> = OnceLock::new();
         let cached = FN.get_or_init(|| {
-            unsafe extern "C" {
-                fn dlsym(handle: *mut c_void, sym: *const c_char) -> *mut c_void;
-            }
-            let rtld_default: *mut c_void = -2isize as usize as *mut c_void;
-            let name = b"xsltLoadDocument\0".as_ptr() as *const c_char;
-            let p = unsafe { dlsym(rtld_default, name) };
+            let p = crate::dynsym::lookup(c"xsltLoadDocument".as_ptr());
             if p.is_null() { None } else { Some(unsafe { std::mem::transmute::<*mut c_void, LoadDocFn>(p) }) }
         });
         if let Some(f) = cached {
