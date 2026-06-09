@@ -131,6 +131,7 @@ pub mod parse;
 pub mod parsectx;
 pub mod pushincr;
 pub mod pushparse;
+mod rawfd;
 pub mod reader;
 pub mod relaxng;
 pub mod save;

@@ -8,6 +8,7 @@
 //! allocation; the `content` and `use` slots on the public struct
 //! are eagerly synced after every write.
 
+use std::io::Write;
 use std::os::raw::{c_char, c_int, c_uint, c_void};
 use std::ptr;
 
@@ -591,19 +592,20 @@ pub unsafe extern "C" fn xmlOutputBufferClose(out: *mut xmlOutputBuffer) -> c_in
         // path_cs dropped here.
     } else if is_fd_backed && !src_buf.is_null() {
         // fd-backed: context holds the raw fd as a sentinel-tagged
-        // integer.  Write the accumulated bytes via libc::write.
+        // integer.  Borrow it as a File (without taking ownership) and
+        // write the accumulated bytes.
         let fd = o.context as isize as c_int;
         let buf = unsafe { &*src_buf };
         if !buf.content.is_null() && buf.use_ > 0 {
-            unsafe extern "C" {
-                fn write(fd: c_int, buf: *const c_void, n: usize) -> isize;
-            }
-            // SAFETY: caller asserted fd is open when they handed it
-            // to xmlOutputBufferCreateFd; write() handles errors via
-            // its return value (we ignore them per libxml2's contract
-            // of "log + continue").
-            unsafe {
-                let _ = write(fd, buf.content as *const c_void, buf.use_ as usize);
+            if let Some(mut f) = crate::rawfd::borrow_fd(fd) {
+                // SAFETY: content/use_ describe a valid byte range owned
+                // by the buffer for this call.
+                let bytes = unsafe {
+                    std::slice::from_raw_parts(buf.content as *const u8, buf.use_ as usize)
+                };
+                // Errors are ignored per libxml2's "log + continue"
+                // output-callback contract.
+                let _ = f.write_all(bytes);
             }
         }
     } else if is_stdio_backed && !o.context.is_null() && !src_buf.is_null() {

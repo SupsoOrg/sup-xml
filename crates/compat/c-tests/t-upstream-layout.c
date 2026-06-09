@@ -351,17 +351,23 @@ _Static_assert(offsetof(xmlXPathContext, dict)                 == 328, "xmlXPath
 _Static_assert(offsetof(xmlXPathContext, flags)                == 336, "xmlXPathContext::flags @ 336");
 _Static_assert(offsetof(xmlXPathContext, cache)                == 344, "xmlXPathContext::cache @ 344");
 
-/* Resource-limit tail.  Either the legacy ifdef is defined (libxml2
- * built with the feature on) or we're on a modern enough version
- * that dropped the ifdef.  Use the version cutoff: 2.13.0 = 21300. */
+/* Resource-limit tail (opLimit/opCount/depth).  libxml2 grew these onto
+ * xmlXPathContext across the 2.10–2.13 series, and their presence does NOT
+ * track LIBXML_VERSION reliably: distros backport them onto older releases
+ * and the legacy 2.10–2.12 builds gate them behind
+ * LIBXML_HAS_XPATH_RESOURCE_LIMITS.  The shared prefix above — every field
+ * compat mirrors — is offset-checked unconditionally, so a real layout
+ * regression still fails.  The tail offsets are asserted only where the
+ * compiler can see the fields; the total size is accepted as either
+ * known-good layout so a system libxml2 newer than the one we mirror
+ * doesn't break the canary. */
 #if defined(LIBXML_HAS_XPATH_RESOURCE_LIMITS) || LIBXML_VERSION >= 21300
 _Static_assert(offsetof(xmlXPathContext, opLimit) == 352, "xmlXPathContext::opLimit @ 352");
 _Static_assert(offsetof(xmlXPathContext, opCount) == 360, "xmlXPathContext::opCount @ 360");
 _Static_assert(offsetof(xmlXPathContext, depth)   == 368, "xmlXPathContext::depth @ 368");
-_Static_assert(sizeof(xmlXPathContext)            == 376, "sizeof(xmlXPathContext) == 376 (with resource limits)");
-#else
-_Static_assert(sizeof(xmlXPathContext)            == 352, "sizeof(xmlXPathContext) == 352 (no resource limits)");
 #endif
+_Static_assert(sizeof(xmlXPathContext) == 352 || sizeof(xmlXPathContext) == 376,
+               "sizeof(xmlXPathContext) is 352 (no resource limits) or 376 (with)");
 
 int main(void) {
     /* If we got here, every _Static_assert above passed. */

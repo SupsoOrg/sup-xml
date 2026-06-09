@@ -28,8 +28,6 @@ use std::cell::RefCell;
 use std::ffi::CString;
 use std::io::Read;
 use std::os::raw::{c_char, c_int, c_void};
-use std::os::unix::io::FromRawFd;
-use std::mem::ManuallyDrop;
 use std::ptr;
 
 use sup_xml_core::options::ParseOptions;
@@ -205,10 +203,11 @@ pub unsafe extern "C" fn xmlReaderForFd(
     encoding:  *const c_char,
     options:   c_int,
 ) -> *mut xmlTextReader {
-    if fd < 0 { return ptr::null_mut(); }
-    // SAFETY: caller asserts fd is a valid readable descriptor.
-    // ManuallyDrop prevents File::drop from closing it on scope exit.
-    let mut f = ManuallyDrop::new(unsafe { std::fs::File::from_raw_fd(fd) });
+    // borrow_fd returns None on a negative/closed fd and never closes the
+    // descriptor — it outlives the reader per libxml2's contract.
+    let Some(mut f) = crate::rawfd::borrow_fd(fd) else {
+        return ptr::null_mut();
+    };
     let mut buf = Vec::new();
     if f.read_to_end(&mut buf).is_err() {
         return ptr::null_mut();

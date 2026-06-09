@@ -219,12 +219,9 @@ pub unsafe extern "C" fn xmlReadMemory(
 /// read error.
 pub(crate) fn slurp_fd(fd: c_int) -> Option<Vec<u8>> {
     use std::io::Read;
-    use std::os::unix::io::FromRawFd;
-    if fd < 0 {
-        return None;
-    }
-    // ManuallyDrop so dropping the File doesn't close the caller's fd.
-    let mut f = std::mem::ManuallyDrop::new(unsafe { std::fs::File::from_raw_fd(fd) });
+    // borrow_fd returns None on a negative/closed fd and never closes the
+    // descriptor — the caller retains ownership.
+    let mut f = crate::rawfd::borrow_fd(fd)?;
     let mut buf = Vec::new();
     f.read_to_end(&mut buf).ok()?;
     Some(buf)

@@ -31,7 +31,6 @@ use std::ffi::CStr;
 use std::fs::File;
 use std::io::Write;
 use std::mem::ManuallyDrop;
-use std::os::fd::FromRawFd;
 use std::os::raw::{c_char, c_int, c_long, c_void};
 use std::ptr;
 
@@ -160,9 +159,11 @@ pub unsafe extern "C" fn xmlSaveToFd(
     _encoding: *const c_char,
     options:   c_int,
 ) -> *mut XmlSaveCtxt {
-    // SAFETY: caller asserts fd is open + writable for our lifetime.
-    // ManuallyDrop prevents the implicit `close()` when Sink::Fd drops.
-    let f = ManuallyDrop::new(unsafe { File::from_raw_fd(fd) });
+    // borrow_fd returns None on a closed fd; the wrapper keeps the
+    // caller's descriptor open (no `close()`) when Sink::Fd drops.
+    let Some(f) = crate::rawfd::borrow_fd(fd) else {
+        return ptr::null_mut();
+    };
     Box::into_raw(Box::new(XmlSaveCtxt {
         sink:    Sink::Fd(f),
         opts:    opts_from_bits(options),
