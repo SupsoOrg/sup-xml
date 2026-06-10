@@ -16,6 +16,12 @@
 //!
 //! macOS and Linux only.  Windows isn't in scope for the v0.1 ABI shim.
 
+// The harness shells out to a Unix `cc` with GNU linker flags, links the
+// cdylib by its `lib*.so` / `.dylib` name, and `#include`s real libxml2
+// headers — none of which apply on an MSVC Windows runner.  Compile the
+// whole harness out there rather than fail looking for a `.so`/`.dylib`.
+#![cfg(unix)]
+
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::OnceLock;

@@ -133,6 +133,21 @@ enum Outcome {
 
 /// Parse `bytes` under a wall-clock timeout, catching panics.
 fn parse_guarded(bytes: &'static [u8], opts: ParseOptions) -> Outcome {
+    // Miri's interpreter is orders of magnitude slower than native, so the
+    // wall-clock DoS budget is meaningless under it (and the worker thread +
+    // channel add heavy interpretation overhead).  Run the parse inline:
+    // Miri still checks the parser's unsafe code for UB on adversarial
+    // input, and a genuine hang regression is caught by the native run,
+    // which keeps the timeout below.
+    if cfg!(miri) {
+        return match std::panic::catch_unwind(AssertUnwindSafe(|| {
+            parse_bytes(bytes, &opts).map(|_doc| ()).map_err(|e| e.to_string())
+        })) {
+            Ok(Ok(())) => Outcome::Ok,
+            Ok(Err(msg)) => Outcome::Err(msg),
+            Err(_) => Outcome::Panicked,
+        };
+    }
     let (tx, rx) = mpsc::channel();
     thread::spawn(move || {
         let res = std::panic::catch_unwind(AssertUnwindSafe(|| {
