@@ -6573,6 +6573,18 @@ fn parse_name_test_token(context_node: &Node, tok: &str) -> Result<QName, XsltEr
             if !uri.is_empty() { break; }
             cur = n.parent.get();
         }
+        if uri.is_empty() {
+            if prefix == "xml" {
+                uri = "http://www.w3.org/XML/1998/namespace".to_string();
+            } else {
+                // XSLT 2.0 §5.1 — a `prefix:*` NameTest whose prefix is not
+                // declared in scope is a static error.
+                return Err(XsltError::InvalidStylesheet(format!(
+                    "undeclared namespace prefix '{prefix}' in NameTest \
+                     '{tok}' (XTSE0280)"
+                )));
+            }
+        }
         return Ok(QName {
             prefix: Some(prefix.to_string()),
             local:  "*".into(), uri,
