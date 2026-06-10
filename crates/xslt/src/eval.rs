@@ -503,6 +503,11 @@ fn simple_type_castable(
     st: &std::sync::Arc<sup_xml_core::xsd::SimpleType>, value: &str, source_kind: Option<&str>,
 ) -> bool {
     let Some(kind) = source_kind else { return st.validate(value).is_ok(); };
+    // String / untyped sources cast to any type whose lexical validates
+    // (including list and union targets), with no cast-table restriction.
+    if matches!(kind, "string" | "untypedAtomic" | "anyAtomicType" | "normalizedString" | "token") {
+        return st.validate(value).is_ok();
+    }
     let src = sup_xml_core::xsd::BuiltinType::from_name(kind)
         .unwrap_or(sup_xml_core::xsd::BuiltinType::String);
     castable_typed(st, value, src)

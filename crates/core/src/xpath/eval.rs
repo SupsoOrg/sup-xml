@@ -1631,12 +1631,16 @@ pub fn eval_expr<I: DocIndexLike>(expr: &Expr, ctx: &EvalCtx<'_>, idx: &I) -> Re
             if let crate::xpath::ast::ItemType::Atomic(name) = &st.item {
                 if let Some((prefix, local)) = name.split_once(':') {
                     if let Some(uri) = resolve_prefix_or_implicit(ctx.bindings, prefix) {
-                        // An empty sequence is castable only to an optional
-                        // target type (`T?`), never a required single one.
-                        if sequence_len(&v) == 0 {
-                            return Ok(Value::Boolean(matches!(st.occurrence,
+                        // `castable as` requires a single atomic operand: an
+                        // empty sequence is castable only to an optional
+                        // target (`T?`), and a sequence of two or more items
+                        // is never castable to a single type.
+                        match sequence_len(&v) {
+                            0 => return Ok(Value::Boolean(matches!(st.occurrence,
                                 crate::xpath::ast::Occurrence::Optional
-                                | crate::xpath::ast::Occurrence::ZeroOrMore)));
+                                | crate::xpath::ast::Occurrence::ZeroOrMore))),
+                            1 => {}
+                            _ => return Ok(Value::Boolean(false)),
                         }
                         // The atomic type a typed source carries drives the
                         // XSD cast-compatibility check; an untyped / string /
