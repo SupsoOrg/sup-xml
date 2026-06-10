@@ -983,6 +983,28 @@ impl Parser {
             };
             return Ok(ItemType::Function(Some(Box::new(FunctionSig { params, ret }))));
         }
+        // XPath 3.1 §2.5.4.4/5 map and array tests: `map(*)` / `map(K, V)`
+        // and `array(*)` / `array(T)`.  Matched as "any map" / "any array";
+        // the key/value/member types are parsed and discarded.
+        if self.xpath_2_0
+            && matches!(self.peek(), Token::Name(n) if n == "map" || n == "array")
+            && self.peek2() == &Token::LParen
+        {
+            let is_map = matches!(self.peek(), Token::Name(n) if n == "map");
+            self.consume(); // map / array
+            self.consume(); // (
+            if self.peek() == &Token::Star {
+                self.consume();
+            } else {
+                self.parse_sequence_type()?;
+                while self.peek() == &Token::Comma {
+                    self.consume();
+                    self.parse_sequence_type()?;
+                }
+            }
+            self.expect(&Token::RParen)?;
+            return Ok(if is_map { ItemType::Map } else { ItemType::Array });
+        }
         // KindTest forms — `node()`, `element()`, etc. — recognise via
         // the lookahead `name (` pattern.
         if let Token::Name(name) = self.peek().clone() {

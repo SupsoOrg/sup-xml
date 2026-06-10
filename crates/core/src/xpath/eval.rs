@@ -1547,6 +1547,29 @@ pub fn eval_expr<I: DocIndexLike>(expr: &Expr, ctx: &EvalCtx<'_>, idx: &I) -> Re
         }
         Expr::DynamicCall { func, args } => {
             let f = eval_expr(func, ctx, idx)?;
+            // XPath 3.1 §3.1.5 — maps and arrays are function items:
+            // `$map(key)` looks the key up (empty sequence if absent);
+            // `$array(n)` indexes the array (1-based).
+            if args.len() == 1 && !matches!(args[0], Expr::Placeholder) {
+                match &f {
+                    Value::Map(m) => {
+                        let key = first_atomic_key(&eval_expr(&args[0], ctx, idx)?, idx);
+                        return Ok(m.iter().find(|(k, _)| map_key_eq(k, &key, idx))
+                            .map(|(_, v)| v.clone())
+                            .unwrap_or(Value::NodeSet(Vec::new())));
+                    }
+                    Value::Array(a) => {
+                        let n = value_to_number(&eval_expr(&args[0], ctx, idx)?, idx) as i64;
+                        if n < 1 || n as usize > a.len() {
+                            return Err(xpath_err(format!(
+                                "array index {n} is out of bounds (FOAY0001)"))
+                                .with_xpath_code("FOAY0001"));
+                        }
+                        return Ok(a[(n - 1) as usize].clone());
+                    }
+                    _ => {}
+                }
+            }
             let fi = match &f {
                 Value::Function(fi) => (**fi).clone(),
                 _ => return Err(xpath_err(
@@ -8494,6 +8517,19 @@ fn value_matches_sequence_type<I: DocIndexLike>(
                 value_matches_sequence_type(item, st, idx)),
             _ => false,
         },
+        // `map(*)` / `array(*)` — any map / any array item.
+        ItemType::Map => match v {
+            Value::Map(_) => true,
+            Value::Sequence(items) => items.iter().all(|item|
+                value_matches_sequence_type(item, st, idx)),
+            _ => false,
+        },
+        ItemType::Array => match v {
+            Value::Array(_) => true,
+            Value::Sequence(items) => items.iter().all(|item|
+                value_matches_sequence_type(item, st, idx)),
+            _ => false,
+        },
         // `empty-sequence()` — no individual item matches; a non-empty
         // value reaches here only after the count==0 short-circuit
         // above declined it, so it is not the empty sequence.
@@ -8535,6 +8571,8 @@ fn item_type_subtype_of(a: &ItemType, b: &ItemType) -> bool {
         (ItemType::Function(_), ItemType::Function(None)) => true,
         (ItemType::Function(Some(sa)), ItemType::Function(Some(sb))) =>
             function_sig_subtype_of(sa, sb),
+        (ItemType::Map, ItemType::Map) => true,
+        (ItemType::Array, ItemType::Array) => true,
         _ => false,
     }
 }

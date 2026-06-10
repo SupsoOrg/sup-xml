@@ -349,6 +349,12 @@ pub enum ItemType {
     /// function item); `Some` carries a specific `function(T1, …, Tn) as R`
     /// signature, matched by function subtyping.
     Function(Option<Box<FunctionSig>>),
+    /// Map test (XPath 3.1 §2.5.4.4) — `map(*)` or `map(K, V)`.  Matched as
+    /// "any map"; the key/value types are parsed but not modelled.
+    Map,
+    /// Array test (XPath 3.1 §2.5.4.5) — `array(*)` or `array(T)`.  Matched
+    /// as "any array"; the member type is parsed but not modelled.
+    Array,
     /// `empty-sequence()` — matches only the empty sequence.  As an
     /// item test it matches no individual item; the empty case is
     /// admitted by the cardinality check alone.
