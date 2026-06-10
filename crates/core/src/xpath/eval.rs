@@ -9986,7 +9986,7 @@ fn key_number(v: &Value) -> Option<f64> {
 /// XPath 3.1 §17.1 map-key equality: numeric keys compare numerically
 /// (`1` = `1.0`), with `NaN` equal to itself; otherwise compare by
 /// string value (covering string / untyped / anyURI / boolean keys).
-fn map_key_eq<I: DocIndexLike>(a: &Value, b: &Value, idx: &I) -> bool {
+pub fn map_key_eq<I: DocIndexLike>(a: &Value, b: &Value, idx: &I) -> bool {
     match (key_number(a), key_number(b)) {
         (Some(x), Some(y)) => (x.is_nan() && y.is_nan()) || x == y,
         (None, None)       => value_to_string(a, idx) == value_to_string(b, idx),
@@ -9997,7 +9997,7 @@ fn map_key_eq<I: DocIndexLike>(a: &Value, b: &Value, idx: &I) -> bool {
 /// Reduce a value to the single atomic value usable as a map key
 /// (XPTY0004 if not a singleton atomic; lenient — first item, nodes
 /// contribute their string value).
-fn first_atomic_key<I: DocIndexLike>(v: &Value, idx: &I) -> Value {
+pub fn first_atomic_key<I: DocIndexLike>(v: &Value, idx: &I) -> Value {
     match v {
         Value::NodeSet(ns) => Value::String(
             ns.first().map(|&id| idx.string_value(id)).unwrap_or_default()),

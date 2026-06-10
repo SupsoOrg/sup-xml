@@ -1072,6 +1072,8 @@ fn instr_kind_name(i: &crate::ast::Instr) -> &'static str {
     use crate::ast::Instr;
     match i {
         Instr::Sequence { .. }            => "xsl:sequence",
+        Instr::Map { .. }                 => "xsl:map",
+        Instr::MapEntry { .. }            => "xsl:map-entry",
         Instr::Variable(_)                => "xsl:variable",
         Instr::If { .. }                  => "xsl:if",
         Instr::Choose { .. }              => "xsl:choose",
@@ -4767,6 +4769,58 @@ fn eval_instr(
                 copy_value_into(state, &v, true)?;
             }
         }
+        Instr::MapEntry { key, select, body } => {
+            // XSLT 3.0 §17.4 — contribute a single-entry map to the
+            // enclosing xsl:map's collection.
+            let k = state.xpath_eval(key, ctx_node, pos, size)?;
+            let key_val = sup_xml_core::xpath::eval::first_atomic_key(&k, state.idx);
+            let val = match select {
+                Some(sel) => state.xpath_eval(sel, ctx_node, pos, size)?,
+                None => {
+                    state.sequence_sinks.push(Vec::new());
+                    let r = eval_body(state, body, ctx_node, pos, size);
+                    let mut items = state.sequence_sinks.pop().unwrap_or_default();
+                    r?;
+                    if items.len() == 1 { items.pop().unwrap() }
+                    else { Value::Sequence(items) }
+                }
+            };
+            let entry = Value::Map(Box::new(vec![(key_val, val)]));
+            if state.sequence_sink_active() {
+                state.push_to_sequence_sink(entry);
+            } else {
+                copy_value_into(state, &entry, true)?;
+            }
+        }
+        Instr::Map { body } => {
+            // XSLT 3.0 §17.4 — evaluate the body (a set of maps, typically
+            // xsl:map-entry instructions) and merge into a single map;
+            // a later entry for a duplicate key replaces an earlier one.
+            state.sequence_sinks.push(Vec::new());
+            let r = eval_body(state, body, ctx_node, pos, size);
+            let collected = state.sequence_sinks.pop().unwrap_or_default();
+            r?;
+            let mut entries: Vec<(Value, Value)> = Vec::new();
+            for v in collected {
+                if let Value::Map(m) = v {
+                    for (k, val) in *m {
+                        if let Some(slot) = entries.iter_mut().find(|(ek, _)|
+                            sup_xml_core::xpath::eval::map_key_eq(ek, &k, state.idx))
+                        {
+                            slot.1 = val;
+                        } else {
+                            entries.push((k, val));
+                        }
+                    }
+                }
+            }
+            let map = Value::Map(Box::new(entries));
+            if state.sequence_sink_active() {
+                state.push_to_sequence_sink(map);
+            } else {
+                copy_value_into(state, &map, true)?;
+            }
+        }
         Instr::Unsupported { name, fallback } => {
             // XSLT 1.0 §15: when the unknown instruction has
             // `xsl:fallback` children, run them as if they replaced
@@ -4833,6 +4887,7 @@ fn body_uses_sequence_or_call(body: &[Instr]) -> bool {
     for i in body {
         if matches!(i,
             Instr::Sequence { .. }
+            | Instr::Map { .. } | Instr::MapEntry { .. }
             | Instr::CallTemplate { .. }
             | Instr::ApplyTemplates { .. })
         {
@@ -5773,6 +5828,18 @@ fn as_is_sequence_typed(t: &str) -> bool {
     // superset and any other interpretation would be a regression
     // for callers who genuinely want a multi-item value.
     s.ends_with('*') || s.ends_with('+')
+        // Non-node item types (maps, arrays, function items) can never be
+        // result-tree fragments — their body value must be captured as an
+        // item, not stringified into an RTF.
+        || as_is_nonnode_item_type(s)
+}
+
+/// True iff `as` declares a non-node item type (a map, array, or function
+/// item).  Such a body value is captured directly from the sequence sink,
+/// never built into a result-tree fragment.
+fn as_is_nonnode_item_type(t: &str) -> bool {
+    let s = t.trim();
+    s.starts_with("map(") || s.starts_with("array(") || s.starts_with("function(")
 }
 
 /// True iff `as` declares an `attribute()` kind test (at any
@@ -6352,6 +6419,23 @@ fn evaluate_with_params(
             // sequence targets (`as="xs:anyURI+"` etc.) still go
             // through the stringify+cast path: the LRE / value-of
             // contributions are atomised, not bound as nodes.
+            // Body producing a non-node item (map / array / function
+            // item) — capture the item via the sequence sink rather than
+            // building a result-tree fragment.
+            if p.as_type.as_deref().map(as_is_nonnode_item_type).unwrap_or(false) {
+                state.sequence_sinks.push(Vec::new());
+                let res = eval_body(state, &p.body, ctx_node, pos, size);
+                let captured = state.sequence_sinks.pop().unwrap_or_default();
+                res?;
+                let v = if captured.len() == 1 {
+                    captured.into_iter().next().unwrap()
+                } else {
+                    Value::Sequence(captured)
+                };
+                if p.tunnel { state.tunnel_pool.insert(qname_key(&p.name), v); }
+                else        { out.push((p.name.clone(), v, None)); }
+                continue;
+            }
             let want_no_merge = p.as_type.as_deref()
                 .map(|t| as_is_sequence_typed(t) && !as_target_is_atomic(t))
                 .unwrap_or(false);

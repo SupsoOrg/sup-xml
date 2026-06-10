@@ -426,6 +426,14 @@ pub enum Instr {
     /// dynamic `xsl:value-of` / `xsl:copy-of` blend (atomic values
     /// become text, node-set values are deep-copied).
     Sequence { select: Expr },
+    /// `xsl:map` (XSLT 3.0 §17.4) — evaluates its sequence-constructor
+    /// body, which must yield a set of maps, and merges them into a single
+    /// map.  In practice the body is a series of `xsl:map-entry`s.
+    Map { body: Vec<Instr> },
+    /// `xsl:map-entry` (XSLT 3.0 §17.4) — contributes a single-entry map
+    /// `{ key : value }` to the enclosing `xsl:map`.  The value is the
+    /// `select` expression or, absent that, the sequence-constructor body.
+    MapEntry { key: Expr, select: Option<Expr>, body: Vec<Instr> },
     /// `xsl:for-each-group` (XSLT 2.0 §14) — partitions the `select`
     /// node-set into groups by one of the four grouping criteria
     /// (`group-by`, `group-adjacent`, `group-starting-with`,

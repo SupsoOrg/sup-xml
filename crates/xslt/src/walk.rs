@@ -555,6 +555,14 @@ fn scan_instr<F: FnMut(&Expr)>(instr: &Instr, scan: &mut F) {
             if let Some(e) = &v.select { scan(e); }
             for child in &v.body { scan_instr(child, scan); }
         }
+        Map { body } => {
+            for child in body { scan_instr(child, scan); }
+        }
+        MapEntry { key, select, body } => {
+            scan(key);
+            if let Some(e) = select { scan(e); }
+            for child in body { scan_instr(child, scan); }
+        }
         ApplyTemplates { select, sort, with_params, .. } => {
             if let Some(e) = select { scan(e); }
             for s in sort {
@@ -794,6 +802,12 @@ fn walk_instr(i: &Instr, out: &mut Vec<String>) {
             walk_instrs(body, out);
         }
         Instr::LiteralText { .. } => {}
+        Instr::Map { body } => walk_instrs(body, out),
+        Instr::MapEntry { key, select, body } => {
+            walk_expr(key, out);
+            if let Some(e) = select { walk_expr(e, out); }
+            walk_instrs(body, out);
+        }
         Instr::ApplyTemplates { select, sort, with_params, .. } => {
             if let Some(e) = select { walk_expr(e, out); }
             for s in sort { collect_sort(s, out); }

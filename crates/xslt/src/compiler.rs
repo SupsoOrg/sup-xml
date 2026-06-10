@@ -1800,7 +1800,7 @@ const INSTRUCTION_NAMES_TOP_LEVEL_FORBIDDEN: &[&str] = &[
     "element", "attribute", "comment", "processing-instruction",
     "number", "message", "fallback", "next-match",
     "analyze-string", "perform-sort", "document", "result-document",
-    "sequence", "for-each-group", "namespace",
+    "sequence", "for-each-group", "namespace", "map", "map-entry",
 ];
 
 /// XSLT-namespace top-level elements the spec defines (1.0 + 2.0 +
@@ -3912,6 +3912,17 @@ fn compile_instr_into(node: &Node, out: &mut Vec<Instr>) -> Result<(), XsltError
             }
             Instr::Sequence { select: parse_xpath_at(node, sel).map_err(XsltError::from)? }
         }
+        "map"            => Instr::Map { body: compile_body(node)? },
+        "map-entry"      => {
+            let key = require_attr(node, "key", "xsl:map-entry")?;
+            let key = parse_xpath_at(node, key).map_err(XsltError::from)?;
+            let select = match read_attribute(node, "select") {
+                Some(s) => Some(parse_xpath_at(node, &s).map_err(XsltError::from)?),
+                None => None,
+            };
+            let body = if select.is_some() { Vec::new() } else { compile_body(node)? };
+            Instr::MapEntry { key, select, body }
+        }
         "for-each-group" => compile_for_each_group(node)?,
         "source-document" | "stream" => compile_source_document(node)?,
         "fork"           => Instr::Fork { body: compile_body(node)? },
@@ -5997,6 +6008,8 @@ fn check_iterate(
             Fork { body } => check_iterate(body, None)?,
             WherePopulated { body } => check_iterate(body, None)?,
             OnEmpty { body } | OnNonEmpty { body } => check_iterate(body, None)?,
+            Map { body } => check_iterate(body, None)?,
+            MapEntry { body, .. } => check_iterate(body, None)?,
             AnalyzeString { matching, non_matching, .. } => {
                 check_iterate(matching, None)?;
                 check_iterate(non_matching, None)?;
@@ -6126,6 +6139,7 @@ where F: Fn(&[QName]) -> Result<(), XsltError>,
             Fork { body } => walk_attr_set_refs(body, check)?,
             WherePopulated { body } => walk_attr_set_refs(body, check)?,
             OnEmpty { body } | OnNonEmpty { body } => walk_attr_set_refs(body, check)?,
+            Map { body } | MapEntry { body, .. } => walk_attr_set_refs(body, check)?,
             AnalyzeString { matching, non_matching, .. } => {
                 walk_attr_set_refs(matching, check)?;
                 walk_attr_set_refs(non_matching, check)?;
