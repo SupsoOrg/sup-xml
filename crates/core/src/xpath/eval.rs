@@ -3099,6 +3099,19 @@ fn round_decimal_half_to_pos_inf(d: rust_decimal::Decimal, precision: i32) -> ru
     }
 }
 
+/// Round a decimal to `precision` fractional digits with banker's rounding
+/// (ties to the nearest even digit) — the rule `fn:round-half-to-even`
+/// uses.  Exact decimal arithmetic.
+fn round_decimal_half_to_even(d: rust_decimal::Decimal, precision: i32) -> rust_decimal::Decimal {
+    use rust_decimal::{Decimal, RoundingStrategy};
+    if precision >= 0 {
+        d.round_dp_with_strategy((precision as u32).min(28), RoundingStrategy::MidpointNearestEven)
+    } else {
+        let shift = Decimal::from(10i64.pow(((-precision) as u32).min(18)));
+        (d / shift).round_dp_with_strategy(0, RoundingStrategy::MidpointNearestEven) * shift
+    }
+}
+
 /// True iff `v` is, or contains, a function item.
 fn value_seq_has_function(v: &Value) -> bool {
     match v {
@@ -7689,31 +7702,43 @@ fn eval_function<I: DocIndexLike>(name: &str, args: &[Expr], ctx: &EvalCtx<'_>, 
                     "round-half-to-even() takes 1 or 2 arguments (got {})", args.len()
                 )));
             }
-            let n = value_to_number(&arg!(0), idx);
+            let a = arg!(0);
             let precision = if args.len() == 2 {
                 value_to_number(&arg!(1), idx) as i32
             } else { 0 };
-            let scale = 10f64.powi(precision);
-            let scaled = n * scale;
-            // Round half to even (banker's rounding).  The
-            // `f64::round` half-away-from-zero rule doesn't match;
-            // when the absolute fractional part is exactly 0.5 we
-            // pick the neighbour whose integer part is even.
-            let rounded = if scaled.fract().abs() == 0.5 {
-                let floor = scaled.floor();
-                if (floor as i64) % 2 == 0 { floor } else { floor + 1.0 }
-            } else {
-                scaled.round()
-            };
-            let result = rounded / scale;
-            // XPath 2.0 §6.4.5 — round-half-to-even on a zero
-            // value returns positive zero; without this an input
-            // like `round-half-to-even(-3.0, -2)` produces -0.0
-            // (signed zero from the negative-scale roundtrip),
-            // which serialises as "-0" and disagrees with the
-            // spec's "0".
-            let result = if result == 0.0 { 0.0 } else { result };
-            Ok(Value::Number(Numeric::Double(result)))
+            // Exact banker's rounding for decimal / integer inputs;
+            // double / float inputs round in f64.
+            match &a {
+                Value::Number(Numeric::Decimal(d)) =>
+                    Ok(Value::Number(Numeric::Decimal(round_decimal_half_to_even(*d, precision)))),
+                Value::Number(Numeric::Integer(i)) => {
+                    use rust_decimal::prelude::ToPrimitive;
+                    let d = round_decimal_half_to_even(rust_decimal::Decimal::from(*i), precision);
+                    Ok(Value::Number(match d.to_i64() {
+                        Some(v) => Numeric::Integer(v),
+                        None    => Numeric::Decimal(d),
+                    }))
+                }
+                _ => {
+                    let n = value_to_number(&a, idx);
+                    let scale = 10f64.powi(precision);
+                    let scaled = n * scale;
+                    // Half-to-even: at an exact 0.5 fraction pick the
+                    // neighbour with an even integer part (f64::round
+                    // rounds half away from zero, which doesn't match).
+                    let rounded = if scaled.fract().abs() == 0.5 {
+                        let floor = scaled.floor();
+                        if (floor as i64) % 2 == 0 { floor } else { floor + 1.0 }
+                    } else {
+                        scaled.round()
+                    };
+                    let result = rounded / scale;
+                    // F&O §4.5.4 — a zero result is positive zero (avoid the
+                    // "-0" a negative-scale roundtrip would produce).
+                    let result = if result == 0.0 { 0.0 } else { result };
+                    Ok(preserve_numeric_kind(&a, result))
+                }
+            }
         }
         // XPath 2.0 §15.5.6 collection — we never have a collection;
         // return empty for any URI so collection-driven tests don't
