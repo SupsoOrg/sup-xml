@@ -159,6 +159,7 @@ fn static_ctx_for_version(version: &str) -> StaticContext {
         .and_then(|s| s.parse::<u32>().ok());
     StaticContext {
         xpath_2_0: matches!(major, Some(n) if n >= 2),
+        xpath_3_0: matches!(major, Some(n) if n >= 3),
         libxml2_compatible: false,
         // The native engine threads no fixed current() node yet;
         // `current()` falls back to the live context node.
@@ -5227,8 +5228,10 @@ fn node_matches_kind_test<I: sup_xml_core::xpath::DocIndexLike>(
         // atomization separately (this function is only consulted
         // for kind tests).
         ItemType::Atomic(_) => false,
-        // A node is never a function item, nor the empty sequence.
-        ItemType::Function(_) | ItemType::EmptySequence => false,
+        // A node is never a function / map / array item, nor the empty
+        // sequence.
+        ItemType::Function(_) | ItemType::Map | ItemType::Array
+        | ItemType::EmptySequence => false,
     }
 }
 
@@ -5309,7 +5312,7 @@ fn result_node_matches_item(
         // level, and atomic/function/empty-sequence types aren't enforced
         // here.
         ItemType::Document | ItemType::Atomic(_) | ItemType::Function(_)
-        | ItemType::EmptySequence => false,
+        | ItemType::Map | ItemType::Array | ItemType::EmptySequence => false,
     }
 }
 

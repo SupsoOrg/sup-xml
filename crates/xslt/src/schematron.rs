@@ -865,6 +865,7 @@ struct SchBindings<'a> {
 fn sch_static_ctx(bindings: &SchBindings<'_>) -> StaticContext {
     StaticContext {
         xpath_2_0: bindings.xpath_version_2_or_later(),
+        xpath_3_0: false,
         libxml2_compatible: false, current_node: None,
     }
 }

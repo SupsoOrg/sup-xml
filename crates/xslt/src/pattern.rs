@@ -100,6 +100,7 @@ pub fn matches<I: DocIndexLike>(
     // Walk node, parent(node), parent(parent(node))…
     let sc = StaticContext {
         xpath_2_0: bindings.xpath_version_2_or_later(),
+        xpath_3_0: false,
         libxml2_compatible: false, current_node: None,
     };
     let mut cur = Some(node);

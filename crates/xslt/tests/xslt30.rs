@@ -2480,6 +2480,7 @@ fn evaluate_assertion(output: &str, xpath: &str) -> Result<bool, sup_xml_core::e
     validate_prefixes(&expr, &bindings)?;
     let static_ctx = StaticContext {
         xpath_2_0: bindings.xpath_version_2_or_later(),
+        xpath_3_0: false,
         libxml2_compatible: false,
         current_node: None,
     };

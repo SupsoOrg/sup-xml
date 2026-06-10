@@ -874,6 +874,10 @@ pub struct StaticContext {
     /// XPath 2.0+ host — selects xs:integer/decimal literal typing and
     /// the F&O scientific double→string form.
     pub xpath_2_0: bool,
+    /// XPath 3.0+ host — gates 3.0-only function signatures (e.g. the
+    /// 2-argument `fn:round($arg, $precision)` form) that are a static
+    /// error in a 2.0 context.
+    pub xpath_3_0: bool,
     /// libxml2-compat mode — where the spec and libxml2 historically
     /// diverge (`number('-')`, large-magnitude number formatting, …).
     pub libxml2_compatible: bool,
@@ -900,7 +904,7 @@ pub struct StaticContext {
 impl Default for StaticContext {
     /// Strict XPath 1.0 — the conservative default for a bare context.
     fn default() -> Self {
-        StaticContext { xpath_2_0: false, libxml2_compatible: false, current_node: None }
+        StaticContext { xpath_2_0: false, xpath_3_0: false, libxml2_compatible: false, current_node: None }
     }
 }
 
@@ -915,6 +919,7 @@ impl StaticContext {
 /// host config (raw [`EvalCtx::root`], the default `value_to_string`).
 pub static DEFAULT_STATIC_CTX: StaticContext = StaticContext {
     xpath_2_0: false,
+    xpath_3_0: false,
     libxml2_compatible: false,
     current_node: None,
 };
@@ -1087,6 +1092,7 @@ pub fn eval_to_bool<I: DocIndexLike>(
 ) -> Result<bool> {
     let static_ctx = StaticContext {
         xpath_2_0: bindings.xpath_version_2_or_later(),
+        xpath_3_0: false,
         libxml2_compatible: false,
         current_node: Some(context_node),
     };
@@ -2480,6 +2486,7 @@ pub fn eval_step_on_nodes_cur<I: DocIndexLike>(
     // returns skip the sort (atomics have no doc position).
     let sc = StaticContext {
         xpath_2_0: bindings.xpath_version_2_or_later(),
+        xpath_3_0: false,
         libxml2_compatible: compat,
         current_node,
     };
@@ -2576,6 +2583,7 @@ pub fn apply_predicates_cur<I: DocIndexLike>(
 ) -> Result<Vec<NodeId>> {
     let sc = StaticContext {
         xpath_2_0: bindings.xpath_version_2_or_later(),
+        xpath_3_0: false,
         libxml2_compatible: compat,
         current_node,
     };
@@ -3073,6 +3081,22 @@ pub fn value_to_number_with<I: DocIndexLike>(
 /// operations the spec defines only for nodes and atomic values.
 fn value_is_function(v: &Value) -> bool {
     matches!(v, Value::Function(_))
+}
+
+/// Round a decimal to `precision` fractional digits, ties going toward
+/// +∞ (the rule `fn:round` uses).  Negative precision rounds to powers of
+/// ten left of the decimal point.  Exact — no f64 round-trip — so
+/// `round(1.25, 1)` is `1.3`, not its f64 neighbour.
+fn round_decimal_half_to_pos_inf(d: rust_decimal::Decimal, precision: i32) -> rust_decimal::Decimal {
+    use rust_decimal::Decimal;
+    let half = Decimal::new(5, 1); // 0.5
+    if precision >= 0 {
+        let shift = Decimal::from(10i64.pow((precision as u32).min(18)));
+        (d * shift + half).floor() / shift
+    } else {
+        let shift = Decimal::from(10i64.pow(((-precision) as u32).min(18)));
+        (d / shift + half).floor() * shift
+    }
 }
 
 /// True iff `v` is, or contains, a function item.
@@ -6596,7 +6620,17 @@ fn eval_function<I: DocIndexLike>(name: &str, args: &[Expr], ctx: &EvalCtx<'_>, 
             Ok(preserve_numeric_kind(&a, value_to_number(&a, idx).ceil()))
         }
         "round" => {
-            check_args!(1);
+            // 1-arg `fn:round($arg)`; the 2-arg `fn:round($arg, $precision)`
+            // form is XPath 3.0 — in a 2.0 host the extra argument is a
+            // static error (XPST0017).
+            if args.is_empty() || args.len() > 2 {
+                return Err(xpath_err("round() requires 1 or 2 argument(s)"));
+            }
+            if args.len() == 2 && !ctx.static_ctx.xpath_3_0 {
+                return Err(xpath_err(
+                    "round(): the 2-argument form requires XPath 3.0 (XPST0017)")
+                    .with_xpath_code("XPST0017"));
+            }
             let a = arg!(0);
             // XPath 2.0 §3.5.5 / XPTY0004 — fn:round's argument is
             // `xs:numeric?`; an xs:string (literal-sourced) doesn't
@@ -6611,18 +6645,38 @@ fn eval_function<I: DocIndexLike>(name: &str, args: &[Expr], ctx: &EvalCtx<'_>, 
                     }
                 }
             }
-            let n = value_to_number(&a, idx);
-            // XPath 1.0 § 4.4: ties round toward +∞, NOT away from
-            // zero.  `(n + 0.5).floor()` implements this for the bulk
-            // of the domain; the spec carves out an explicit sign-
-            // preserving zero case: every value in `[-0.5, 0]`
-            // (including -0 itself) must round to -0.  Use
-            // `is_sign_negative` because `-0.0 < 0.0` is false under
-            // IEEE 754 — a plain `n < 0.0` check would miss -0.  NaN
-            // and ±∞ pass through `.floor()` unchanged.
-            let r = if n.is_sign_negative() && n >= -0.5 { -0.0 }
-                    else                                 { (n + 0.5).floor() };
-            Ok(preserve_numeric_kind(&a, r))
+            let precision = if args.len() == 2 {
+                value_to_number(&arg!(1), idx) as i32
+            } else { 0 };
+            // Ties round toward +∞, at the chosen number of decimal
+            // places.  Decimal / integer inputs round in exact decimal
+            // arithmetic (so `round(1.25, 1)` is `1.3`, not the f64
+            // neighbour); double / float inputs round in f64.
+            use rust_decimal::prelude::ToPrimitive;
+            match &a {
+                Value::Number(Numeric::Decimal(d)) =>
+                    Ok(Value::Number(Numeric::Decimal(round_decimal_half_to_pos_inf(*d, precision)))),
+                Value::Number(Numeric::Integer(i)) => {
+                    let d = round_decimal_half_to_pos_inf(rust_decimal::Decimal::from(*i), precision);
+                    Ok(Value::Number(match d.to_i64() {
+                        Some(v) => Numeric::Integer(v),
+                        None    => Numeric::Decimal(d),
+                    }))
+                }
+                _ => {
+                    let n = value_to_number(&a, idx);
+                    let r = if !n.is_finite() {
+                        n
+                    } else {
+                        let scale = 10f64.powi(precision);
+                        let scaled = n * scale;
+                        let rs = if scaled.is_sign_negative() && scaled >= -0.5 { -0.0 }
+                                 else { (scaled + 0.5).floor() };
+                        rs / scale
+                    };
+                    Ok(preserve_numeric_kind(&a, r))
+                }
+            }
         }
 
         // ── XSLT extension: document(URI[, base-node-set]) ──────────────────

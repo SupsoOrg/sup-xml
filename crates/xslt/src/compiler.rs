@@ -1214,6 +1214,7 @@ fn evaluate_use_when_at(
     let idx = StaticEmptyIndex;
     let static_ctx = StaticContext {
         xpath_2_0: bindings.xpath_version_2_or_later(),
+        xpath_3_0: false,
         libxml2_compatible: false, current_node: None,
     };
     let ctx = EvalCtx {
@@ -1253,6 +1254,7 @@ fn eval_static_expr_ast(expr: &Expr, host: Option<&Node>) -> Result<sup_xml_core
     let idx = StaticEmptyIndex;
     let static_ctx = StaticContext {
         xpath_2_0: bindings.xpath_version_2_or_later(),
+        xpath_3_0: false,
         libxml2_compatible: false, current_node: None,
     };
     let ctx = EvalCtx {

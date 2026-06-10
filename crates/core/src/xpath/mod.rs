@@ -240,6 +240,7 @@ impl<'doc> XPathContext<'doc> {
         eval::refresh_stable_now();
         let static_ctx = eval::StaticContext {
             xpath_2_0: self.options.xpath_2_0,
+            xpath_3_0: false,
             libxml2_compatible: self.options.libxml2_compatible,
             // `current()` returns this node regardless of how deep into
             // steps/predicates evaluation descends.
