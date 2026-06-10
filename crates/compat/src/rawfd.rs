@@ -35,13 +35,23 @@ pub(crate) fn borrow_fd(fd: c_int) -> Option<ManuallyDrop<File>> {
 #[cfg(windows)]
 pub(crate) fn borrow_fd(fd: c_int) -> Option<ManuallyDrop<File>> {
     use std::os::windows::io::{FromRawHandle, RawHandle};
+    // A negative fd is libxml2's "no descriptor" sentinel (e.g. `xmlReadFd`
+    // is documented to reject it).  It must be screened out *before*
+    // `_get_osfhandle`: the CRT validates the descriptor index and, for an
+    // out-of-range one, invokes the invalid-parameter handler — which
+    // fail-fasts the whole process (`0xC0000409`) rather than returning an
+    // error.  (Wine's CRT is lenient and merely returns -1, which is why
+    // this only bites on a real MSVC runtime.)
+    if fd < 0 {
+        return None;
+    }
     // A Windows `File` adopts a Win32 HANDLE, not the CRT `int` descriptor
     // libxml2 callers pass; translate one to the other through the CRT.
     unsafe extern "C" {
         fn _get_osfhandle(fd: c_int) -> isize;
     }
-    // SAFETY: `_get_osfhandle` is a pure CRT table lookup with no
-    // preconditions; it reports a bad descriptor through its return value.
+    // SAFETY: `fd` is non-negative; `_get_osfhandle` then reports a closed
+    // or unassigned descriptor through its return value.
     let handle = unsafe { _get_osfhandle(fd) };
     // -1 (INVALID_HANDLE_VALUE) and -2 (no stream associated) mean the
     // descriptor has no usable handle.
