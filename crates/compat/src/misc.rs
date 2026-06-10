@@ -734,6 +734,9 @@ mod tests {
     fn init_cleanup_quartet_is_noop_and_safe_to_call_repeatedly() {
         // None of these should crash; all are documented no-ops in our
         // build, and calling them twice in a row is fine.
+        // xmlCleanupInputCallbacks mutates the process-global input-callback
+        // registry, so serialize with the other registry-touching tests.
+        let _g = crate::input_callbacks::REGISTRY_TEST_LOCK.lock().unwrap();
         unsafe {
             xmlCheckVersion(0);
             xmlCheckVersion(20913);

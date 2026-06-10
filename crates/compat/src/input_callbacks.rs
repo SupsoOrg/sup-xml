@@ -220,15 +220,24 @@ unsafe fn drive_handler(
     result
 }
 
+/// Serializes every unit test in the crate that mutates the process-global
+/// input-callback registry: this module's resolver tests and the
+/// `xmlCleanupInputCallbacks` call in `misc`'s init/cleanup test.  The
+/// registry is process-wide, so without one shared lock those tests race —
+/// a concurrent `clear()` between a resolver test's `register` and `resolve`
+/// would wipe the handler it just installed.
+#[cfg(test)]
+pub(crate) static REGISTRY_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::ffi::CStr;
     use std::sync::atomic::{AtomicU32, Ordering};
 
-    // The registry is process-global, so registry-touching tests run
-    // serially and clear() around themselves.
-    static TEST_LOCK: Mutex<()> = Mutex::new(());
+    // All registry-touching tests across the crate serialize on the one
+    // shared REGISTRY_TEST_LOCK and clear() around themselves.
+    use super::REGISTRY_TEST_LOCK as TEST_LOCK;
 
     static MATCH_CALLS: AtomicU32 = AtomicU32::new(0);
     static OPEN_CALLS:  AtomicU32 = AtomicU32::new(0);
