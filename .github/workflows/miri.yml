@@ -15,18 +15,25 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
-  # Stacked Borrows is the strict aliasing model Miri uses to catch
-  # provenance violations.  Defaults are fine for us — we don't need
-  # `-Zmiri-tree-borrows` (the experimental successor) yet.
+  # Miri's default Stacked Borrows aliasing model — the actual UB detector —
+  # stays on with no flag; that's what catches our unsafe code's aliasing
+  # and provenance violations.  (We don't need the experimental
+  # `-Zmiri-tree-borrows` successor yet.)
   #
-  # `-Zmiri-disable-isolation` lets real clock / filesystem syscalls pass
-  # through to the host.  The license gate runs on the first parse
-  # (`ensure_licensed`) and needs both — `chrono::Utc::now()` to check
-  # certificate expiry, plus a `.supso/` directory search — neither of
-  # which Miri permits under its default isolation.  Disabling isolation
-  # does not weaken UB detection (Miri's actual purpose); it only allows
-  # those host syscalls.
-  MIRIFLAGS: "-Zmiri-strict-provenance -Zmiri-disable-isolation"
+  # `-Zmiri-permissive-provenance` (rather than the stricter
+  # `-Zmiri-strict-provenance`): a transitive dependency (`tendril`, via
+  # `html5ever`) does integer-to-pointer casts for tagged pointers — legal
+  # but discouraged.  Strict mode hard-errors on them and aborts the
+  # HTML-parsing tests on dependency code we don't control; permissive mode
+  # accepts them and silences the per-cast warning, while Stacked Borrows
+  # still detects real UB in our own unsafe code.
+  #
+  # `-Zmiri-disable-isolation` lets real clock / filesystem syscalls reach
+  # the host.  The license gate runs on the first parse (`ensure_licensed`)
+  # and needs both — `chrono::Utc::now()` for certificate expiry and a
+  # `.supso/` directory search — neither permitted under Miri's default
+  # isolation.  It does not weaken UB detection; it only allows those calls.
+  MIRIFLAGS: "-Zmiri-disable-isolation -Zmiri-permissive-provenance"
 
 jobs:
   miri:

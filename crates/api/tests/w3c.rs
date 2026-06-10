@@ -91,8 +91,15 @@ impl EntityResolver for FixtureResolver {
 // ── catalog location ──────────────────────────────────────────────────────────
 
 fn w3c_root() -> PathBuf {
+    // Canonicalise eagerly: this collapses the `../..` and normalises the
+    // separators, so paths joined onto the root — and the resolver's
+    // `starts_with` security check — compare cleanly on every OS.  Left in
+    // its raw `..` / mixed-separator form, path canonicalisation of the
+    // joined fixture paths fails on Windows.
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../tests/w3c")
+        .canonicalize()
+        .expect("tests/w3c assets directory must exist")
 }
 
 // ── XML 1.0 sub-catalogs to load ──────────────────────────────────────────────

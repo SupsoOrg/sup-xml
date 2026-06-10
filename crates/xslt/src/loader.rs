@@ -191,7 +191,16 @@ impl Loader for FilesystemLoader {
 
     fn resolve(&self, href: &str, base: Option<&str>) -> Result<String, XsltError> {
         let path = self.resolve_path(href, base);
-        Ok(path.to_string_lossy().into_owned())
+        let resolved = path.to_string_lossy().into_owned();
+        // The result is handed back as a URI base for nested imports, so it
+        // must be '/'-separated like the hrefs callers pass.  `PathBuf`
+        // renders with `\` on Windows; normalise it.  (`load` uses the
+        // native `PathBuf` directly for the filesystem read, where the
+        // separator doesn't matter.)  Only on Windows, since `\` is a legal
+        // filename byte on Unix.
+        #[cfg(windows)]
+        let resolved = resolved.replace('\\', "/");
+        Ok(resolved)
     }
 
     /// Cached parse for repeated lookups of the same on-disk file.

@@ -6218,13 +6218,17 @@ pub fn resolve_uri(system_id: &str, base: Option<&str>) -> String {
         Some(rest) => ("file://", rest),
         None       => ("",         base),
     };
-    let parent = std::path::Path::new(base_path).parent()
-        .unwrap_or_else(|| std::path::Path::new(""));
-    let joined = parent.join(system_id);
-    // Display gives a `/`-separated string on Unix; on Windows it
-    // would use `\` — acceptable for now since the resolvers operate
-    // on `Path` and don't mind the separator.
-    format!("{scheme}{}", joined.display())
+    // A URI is always '/'-separated regardless of host OS, so join as
+    // strings rather than through `std::path` (whose separator is `\` on
+    // Windows — that corrupts the URI and breaks the resolver's fixture /
+    // canonicalisation lookups).  Take the base's directory (everything up
+    // to and including its last '/') and append the relative system id;
+    // any `..` segments are left for the resolver to canonicalise.
+    let parent = match base_path.rfind('/') {
+        Some(i) => &base_path[..=i],
+        None     => "",
+    };
+    format!("{scheme}{parent}{system_id}")
 }
 
 fn read_external_entity_bytes(
