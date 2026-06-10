@@ -46,4 +46,4 @@ jobs:
         run: cargo build --workspace --exclude sup-xml-bench --all-features --verbose
 
       - name: cargo test
-        run: cargo test --workspace --exclude sup-xml-bench --all-features --verbose
+        run: cargo test --workspace --exclude sup-xml-bench --all-features -- --test-threads=1 --nocapture
