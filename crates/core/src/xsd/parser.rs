@@ -341,6 +341,12 @@ impl Builder {
         // content model.
         merge_extension_chains(&mut self.types)?;
 
+        // Resolve `UNRESOLVED:` placeholders inside union member lists and
+        // list item types to their real (forward-referenced) simple types.
+        // Without this, a union member defined later in the schema keeps
+        // its String-defaulted placeholder and the union over-accepts.
+        resolve_simple_member_placeholders(&mut self.types);
+
         // Inline anonymous complex types attached to top-level
         // element decls (e.g. `<xs:element name="Foo"><xs:complexType>
         // <xs:complexContent><xs:extension base="Bar">…`) need the
@@ -4426,6 +4432,44 @@ impl<'a, 'b, R: SchemaResolver> Parser<'a, 'b, R> {
 /// Anonymous complex types inlined inside element decls are not
 /// merged — they can't be referenced by name, so the typical
 /// `Base`/`Derived` named-type pattern is unaffected.
+/// Replace `UNRESOLVED:` placeholder member / item types inside union and
+/// list simple types with the real type from the type map.  Iterated to a
+/// small fixpoint so chains of unions-of-unions resolve fully.
+fn resolve_simple_member_placeholders(types: &mut std::collections::HashMap<QName, TypeRef>) {
+    use super::types::Variety;
+    let resolve = |m: &Arc<super::types::SimpleType>,
+                   snap: &std::collections::HashMap<QName, TypeRef>|
+        -> Arc<super::types::SimpleType> {
+        if let Some(qn) = resolve_typeref_to_qname(&TypeRef::Simple(m.clone())) {
+            if let Some(TypeRef::Simple(real)) = snap.get(&qn) {
+                return real.clone();
+            }
+        }
+        m.clone()
+    };
+    for _ in 0..8 {
+        let snapshot = types.clone();
+        let mut changed = false;
+        for tr in types.values_mut() {
+            let TypeRef::Simple(st) = tr else { continue };
+            let new_variety = match &st.variety {
+                Variety::Union { members } => Variety::Union {
+                    members: members.iter().map(|m| resolve(m, &snapshot)).collect(),
+                },
+                Variety::List { item_type } => Variety::List {
+                    item_type: resolve(item_type, &snapshot),
+                },
+                Variety::Atomic => continue,
+            };
+            let mut new_st = (**st).clone();
+            new_st.variety = new_variety;
+            *st = Arc::new(new_st);
+            changed = true;
+        }
+        if !changed { break; }
+    }
+}
+
 fn merge_extension_chains(
     types: &mut HashMap<QName, TypeRef>,
 ) -> Result<(), SchemaCompileError> {

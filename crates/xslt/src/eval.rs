@@ -466,7 +466,7 @@ impl<'a, I: DocIndexLike> XPathBindings for XsltBindings<'a, I> {
                 if let Some(TypeRef::Simple(st)) = schema.type_def(&qn) {
                     let s = sup_xml_core::xpath::eval::value_to_string(&args[0], self.idx);
                     return Some(match st.validate(&s) {
-                        Ok(xv) => Ok(xsd_value_to_xpath(xv)),
+                        Ok(xv) => Ok(xsd_value_to_xpath(xv, &s)),
                         Err(_) => Err(sup_xml_core::xpath::eval::xpath_err(format!(
                             "cannot construct {{{ns_uri}}}{name} from '{s}' (FORG0001)"))
                             .with_xpath_code("FORG0001")),
@@ -497,20 +497,33 @@ impl<'a, I: DocIndexLike> XPathBindings for XsltBindings<'a, I> {
 /// constructor / cast.  Date-time and other structured values keep their
 /// canonical lexical form as a string atomic for now.
 #[cfg(feature = "xsd")]
-fn xsd_value_to_xpath(v: sup_xml_core::xsd::Value) -> Value {
+fn xsd_value_to_xpath(v: sup_xml_core::xsd::Value, input: &str) -> Value {
     use sup_xml_core::xsd::Value as X;
     use sup_xml_core::xpath::eval::TypedAtomic;
     use sup_xml_core::rust_decimal::prelude::ToPrimitive;
     let typed = |kind: &'static str, lexical: String, numeric: Option<f64>, boolean: Option<bool>|
         Value::Typed(Box::new(TypedAtomic { kind, lexical, numeric, boolean }));
+    // Date/time and structured values keep the (whitespace-collapsed)
+    // input lexical — a valid lexical for the type, so it re-validates.
+    let lex = || input.split_whitespace().collect::<Vec<_>>().join(" ");
     match v {
         X::String(s) | X::Token(s) => typed("string", s, None, None),
-        X::Bool(b)    => typed("boolean", if b { "true" } else { "false" }.to_string(), None, Some(b)),
-        X::Int(i)     => typed("integer", i.to_string(), Some(i as f64), None),
-        X::Decimal(d) => typed("decimal", d.to_string(), d.to_f64(), None),
-        X::Float(f)   => typed("float", f.to_string(), Some(f as f64), None),
-        X::Double(d)  => typed("double", d.to_string(), Some(d), None),
-        other         => typed("string", format!("{other:?}"), None, None),
+        X::Bool(b)       => typed("boolean", if b { "true" } else { "false" }.to_string(), None, Some(b)),
+        X::Int(i)        => typed("integer", i.to_string(), Some(i as f64), None),
+        X::BigInt(_)     => typed("integer", lex(), None, None),
+        X::Decimal(d)    => typed("decimal", d.to_string(), d.to_f64(), None),
+        X::Float(f)      => typed("float", f.to_string(), Some(f as f64), None),
+        X::Double(d)     => typed("double", d.to_string(), Some(d), None),
+        X::Bytes(_)      => typed("string", lex(), None, None),
+        X::DateTime(_)   => typed("dateTime", lex(), None, None),
+        X::Date(_)       => typed("date", lex(), None, None),
+        X::Time(_)       => typed("time", lex(), None, None),
+        X::Duration(_)   => typed("duration", lex(), None, None),
+        X::GYearMonth(_) => typed("gYearMonth", lex(), None, None),
+        X::GYear(_)      => typed("gYear", lex(), None, None),
+        X::GMonthDay(_)  => typed("gMonthDay", lex(), None, None),
+        X::GDay(_)       => typed("gDay", lex(), None, None),
+        X::GMonth(_)     => typed("gMonth", lex(), None, None),
     }
 }
 
