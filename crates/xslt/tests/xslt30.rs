@@ -551,10 +551,8 @@ fn parse_test_set(path: &Path) -> Vec<TestCase> {
                         if let Some(v) = feature_value {
                             if matches!(v.as_str(),
                                 "higher_order_functions" | "streaming"
-                                | "schema_aware" | "XPath_3.0" | "XPath_3.1"
-                                | "namespace_axis" | "dynamic_evaluation"
+                                | "schema_aware" | "XPath_3.0"
                                 | "XSD_1.1" | "schemaImport"
-                                | "backwards_compatibility"
                             ) {
                                 if in_case {
                                     cur_case.requires_post_1_0 = true;

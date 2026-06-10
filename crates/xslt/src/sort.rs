@@ -80,7 +80,7 @@ where
     if sorts.is_empty() {
         return Ok(nodes.to_vec());
     }
-    // Materialise each (node, [keys]) pair, then sort lexicographically.
+    // Materialize each (node, [keys]) pair, then sort lexicographically.
     let size = nodes.len();
     let mut indexed: Vec<(usize, NodeId, Vec<Key>)> = Vec::with_capacity(size);
     for (i, &n) in nodes.iter().enumerate() {

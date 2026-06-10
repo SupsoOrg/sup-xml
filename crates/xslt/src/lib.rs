@@ -173,8 +173,8 @@ impl Stylesheet {
     }
 
     /// Apply this stylesheet to `source_doc`, returning the
-    /// materialised result tree.  Serialise via
-    /// [`ResultTree::to_string`] (honours `<xsl:output method=…>`)
+    /// materialized result tree.  Serialize via
+    /// [`ResultTree::to_string`] (honors `<xsl:output method=…>`)
     /// or inspect [`ResultTree::children`] directly.
     pub fn apply(
         &self,

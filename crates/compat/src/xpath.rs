@@ -3063,7 +3063,7 @@ fn node_id_to_ptr<'doc>(id: sup_xml_core::xpath::NodeId, index: &DocIndex<'doc>)
         INodeKind::Namespace { .. } => {
             // A namespace node has no backing tree node; libxml2 places
             // a synthetic `xmlNs` (XML_NAMESPACE_DECL) in the node-set
-            // instead.  Materialise one so the `namespace::` axis can
+            // instead.  Materialize one so the `namespace::` axis can
             // hand results to C callers (libxslt `xsl:copy-of`, lxml).
             return ns_node_to_ptr(id, index);
         }
@@ -3129,7 +3129,7 @@ fn resolve_ns_context_id<'doc>(
     })
 }
 
-/// Materialise a libxml2 `xmlNs`-layout node for a namespace [`NodeId`]
+/// Materialize a libxml2 `xmlNs`-layout node for a namespace [`NodeId`]
 /// so the `namespace::` axis can cross the XPath→C boundary.  libxml2
 /// represents a namespace node inside an `xmlNodeSet` as an `xmlNs`
 /// whose `type` is `XML_NAMESPACE_DECL`, whose `prefix`/`href` carry the

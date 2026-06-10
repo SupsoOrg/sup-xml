@@ -193,6 +193,27 @@ impl<'doc> DocIndex<'doc> {
                     ns_start:   0, ns_end:   0,
                     content_children: Vec::new(),
                 });
+                // Materialise namespace nodes (XPath 1.0 §5.4) *before* the
+                // attributes: the data model places an element's namespace
+                // nodes ahead of its attribute nodes in document order, and
+                // NodeId order is the document order that dedup_sort()
+                // relies on (so e.g. `namespace::* | attribute::*` sorts
+                // correctly).  Both stay adjacent to the element, before its
+                // content children, so that assumption holds.
+                let ns_start = self.nodes.len();
+                for (prefix, uri) in collect_in_scope_namespaces(node) {
+                    self.nodes.push(INode {
+                        kind: INodeKind::Namespace { prefix, uri },
+                        parent: Some(id),
+                        attr_start: 0, attr_end: 0,
+                        ns_start:   0, ns_end:   0,
+                        content_children: Vec::new(),
+                    });
+                }
+                let ns_end = self.nodes.len();
+                self.nodes[id].ns_start = ns_start;
+                self.nodes[id].ns_end   = ns_end;
+
                 let attr_start = self.nodes.len();
                 for attr in node.attributes() {
                     // Namespace declarations sometimes land in the
@@ -213,25 +234,6 @@ impl<'doc> DocIndex<'doc> {
                 let attr_end = self.nodes.len();
                 self.nodes[id].attr_start = attr_start;
                 self.nodes[id].attr_end   = attr_end;
-
-                // Materialise namespace nodes (XPath 1.0 §5.4) right
-                // after attributes.  Allocating them here keeps their
-                // NodeIds adjacent to the element's, before any of its
-                // content children — which preserves the dedup_sort()
-                // assumption that NodeId order is document order.
-                let ns_start = self.nodes.len();
-                for (prefix, uri) in collect_in_scope_namespaces(node) {
-                    self.nodes.push(INode {
-                        kind: INodeKind::Namespace { prefix, uri },
-                        parent: Some(id),
-                        attr_start: 0, attr_end: 0,
-                        ns_start:   0, ns_end:   0,
-                        content_children: Vec::new(),
-                    });
-                }
-                let ns_end = self.nodes.len();
-                self.nodes[id].ns_start = ns_start;
-                self.nodes[id].ns_end   = ns_end;
 
                 let mut children = Vec::new();
                 for child in node.children() {

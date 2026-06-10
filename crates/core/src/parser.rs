@@ -606,7 +606,7 @@ fn drive(
     // `Cow::Borrowed`, the bytes live in the input buffer (now owned by the
     // builder via `set_source`).  Stash a `&str` slice directly via
     // `alloc_str_borrow` — zero copy.  When the payload is `Cow::Owned`, the
-    // reader had to materialise it (entity decode, char ref, encoding
+    // reader had to materialize it (entity decode, char ref, encoding
     // conversion, etc.) — we copy into the bump.
     //
     // SAFETY: the input lifetime — which the borrowed Cow slices come from —
@@ -1106,7 +1106,7 @@ fn drive(
             }
             BytesEvent::EntityRef(e) => {
                 // `resolve_entities: false` left an `&name;` literal in
-                // the source; materialise it as a dedicated
+                // the source; materialize it as a dedicated
                 // `NodeKind::EntityRef` node so the tree round-trips
                 // back to source and lxml's `tag == Entity` /
                 // `text == "&name;"` semantics work.

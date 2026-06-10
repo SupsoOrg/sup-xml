@@ -129,3 +129,9 @@ that's load-bearing for a reader trying to navigate the file.
 Ask "would a senior engineer reviewing this code for inclusion in a
 library they're going to depend on find this comment helpful, or
 would they ask me to remove it?"
+
+## American English
+
+Use American English spelling in comments and documentation. Use
+words like "behavior" instead of "behaviour", "color" instead
+of "colour", etc.

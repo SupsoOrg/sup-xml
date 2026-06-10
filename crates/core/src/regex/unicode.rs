@@ -5,7 +5,7 @@
 //! the list is short and stable, and the spec pins the names so a
 //! drift between Unicode revisions isn't visible to schema authors.
 //!
-//! Categories are materialised into [`ClassSet`]s lazily on first
+//! Categories are materialized into [`ClassSet`]s lazily on first
 //! reference and cached in a `OnceLock` so repeated `\p{L}` matches
 //! pay no per-match cost.
 

@@ -42,7 +42,7 @@ use sup_xml_xslt::Stylesheet;
 /// compiled into the `Unsupported` AST node and errors at run time.
 ///
 /// What a real streaming impl would do: read `loans.xml` lazily, run
-/// the body's apply-templates once per subtree, never materialise the
+/// the body's apply-templates once per subtree, never materialize the
 /// whole tree.  For a 50 GB document, that's the difference between
 /// "works in 100 MB of RAM" and "crashes".
 #[test]

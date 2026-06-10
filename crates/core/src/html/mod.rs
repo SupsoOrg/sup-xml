@@ -183,7 +183,7 @@ pub unsafe fn parse_html_bytes_recovered_with_dict_arena(
 /// Whether the HTML source contains an explicit `<head>` start tag —
 /// matched as `<head` followed by a tag terminator, so `<header>` does
 /// not count.  html5ever always synthesizes a `<head>`, but libxml2's
-/// HTML parser materialises one only for an explicit tag or for
+/// HTML parser materializes one only for an explicit tag or for
 /// head-level content (title, meta, …).
 #[cfg(feature = "c-abi")]
 fn source_has_explicit_head(source: &[u8]) -> bool {
@@ -244,7 +244,7 @@ fn drop_implicit_empty_head(doc: &Document, source: &[u8]) {
 
 /// Whether the HTML source contains an explicit `<body>` start tag —
 /// matched as `<body` followed by a tag terminator.  html5ever always
-/// synthesizes a `<body>`; libxml2's HTML parser materialises one only
+/// synthesizes a `<body>`; libxml2's HTML parser materializes one only
 /// for an explicit tag or body-level content.
 #[cfg(feature = "c-abi")]
 fn source_has_explicit_body(source: &[u8]) -> bool {
