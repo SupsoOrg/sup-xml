@@ -7784,7 +7784,11 @@ fn eval_function<I: DocIndexLike>(name: &str, args: &[Expr], ctx: &EvalCtx<'_>, 
         // XPath 2.0 §10.4.4 / §10.4.5 / §10.4.6 — QName accessors.
         "local-name-from-QName" => {
             check_args!(1);
-            let s = value_to_string_with(&arg!(0), idx, ctx.bindings);
+            let a = arg!(0);
+            // `xs:QName?` argument — an empty sequence yields an empty
+            // sequence (F&O §17.5.2).
+            if sequence_len(&a) == 0 { return Ok(Value::NodeSet(Vec::new())); }
+            let s = value_to_string_with(&a, idx, ctx.bindings);
             // The string-value of an xs:QName is `prefix:local` or
             // `{uri}local` (Clark form when no prefix).  Take the
             // tail after the last `:` or after `}`.
@@ -7808,7 +7812,9 @@ fn eval_function<I: DocIndexLike>(name: &str, args: &[Expr], ctx: &EvalCtx<'_>, 
         }
         "namespace-uri-from-QName" => {
             check_args!(1);
-            let s = value_to_string_with(&arg!(0), idx, ctx.bindings);
+            let a = arg!(0);
+            if sequence_len(&a) == 0 { return Ok(Value::NodeSet(Vec::new())); }
+            let s = value_to_string_with(&a, idx, ctx.bindings);
             if s.starts_with('{') {
                 if let Some(end) = s.find('}') {
                     return Ok(Value::String(s[1..end].to_string()));
