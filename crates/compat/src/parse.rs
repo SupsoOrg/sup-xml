@@ -1325,14 +1325,12 @@ mod tests {
     /// without closing the caller's fd.
     #[test]
     fn read_fd_parses_and_leaves_fd_open() {
-        use std::io::Read;
-        use std::os::unix::io::AsRawFd;
+        use crate::rawfd::testfd;
 
         let path = std::env::temp_dir()
             .join(format!("supxml_readfd_{}.xml", std::process::id()));
         std::fs::write(&path, b"<r>hi</r>").unwrap();
-        let f = std::fs::File::open(&path).unwrap();
-        let fd = f.as_raw_fd();
+        let fd = testfd::open_ro(&path);
 
         let doc = unsafe { xmlReadFd(fd, ptr::null(), ptr::null(), 0) };
         assert!(!doc.is_null(), "xmlReadFd should parse the fd's contents");
@@ -1340,16 +1338,15 @@ mod tests {
         assert_eq!(unsafe { &*root }.name(), "r");
         unsafe { xmlFreeDoc(doc); }
 
-        // The fd must NOT have been closed by xmlReadFd — we can still
-        // read from it (after seeking back to the start).
-        let mut f2 = f;
-        use std::io::Seek;
-        f2.seek(std::io::SeekFrom::Start(0)).unwrap();
-        let mut s = String::new();
-        f2.read_to_string(&mut s).unwrap();
-        assert_eq!(s, "<r>hi</r>", "fd should remain open and readable");
+        // The fd must NOT have been closed by xmlReadFd — seek back to the
+        // start and read its contents again.
+        testfd::rewind(fd);
+        let mut buf = [0u8; 9];
+        let n = testfd::read(fd, &mut buf);
+        assert_eq!(n, 9, "fd should remain open and readable");
+        assert_eq!(&buf, b"<r>hi</r>");
 
-        drop(f2);
+        testfd::close(fd);
         std::fs::remove_file(&path).ok();
     }
 
@@ -1394,13 +1391,13 @@ mod tests {
 
     #[test]
     fn input_from_fd() {
-        use std::os::unix::io::AsRawFd;
+        use crate::rawfd::testfd;
         let path = std::env::temp_dir().join(format!("supxml_inputfd_{}.xml", std::process::id()));
         std::fs::write(&path, b"<fd/>").unwrap();
-        let f = std::fs::File::open(&path).unwrap();
-        let input = unsafe { xmlNewInputFromFd(ptr::null(), f.as_raw_fd(), 0) };
+        let fd = testfd::open_ro(&path);
+        let input = unsafe { xmlNewInputFromFd(ptr::null(), fd, 0) };
         unsafe { parse_input_expect_root(input, "fd"); }
-        drop(f);
+        testfd::close(fd);
         std::fs::remove_file(&path).ok();
     }
 

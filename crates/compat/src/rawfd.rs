@@ -55,3 +55,84 @@ pub(crate) fn borrow_fd(fd: c_int) -> Option<ManuallyDrop<File>> {
         File::from_raw_handle(handle as RawHandle)
     }))
 }
+
+/// Test-only helpers that open and drive a real C `int` descriptor through
+/// the CRT, so the fd-based entry points can be exercised on every platform.
+///
+/// They go through `libc::open`/`read`/`write`/`lseek`/`close` (mapped to
+/// `_open`/`_read`/… on Windows) rather than `File::as_raw_fd`, which is
+/// Unix-only.  The descriptor is fully owned by the caller — no `File`/Win32
+/// `HANDLE` aliasing — so `close` is unambiguous on both platforms.  The
+/// per-OS signature differences (`size_t` vs `c_uint`, the Windows
+/// `O_BINARY` flag) are contained here.
+#[cfg(test)]
+pub(crate) mod testfd {
+    use std::ffi::CString;
+    use std::os::raw::c_int;
+    use std::path::Path;
+
+    fn cpath(path: &Path) -> CString {
+        CString::new(path.to_str().expect("utf-8 temp path")).unwrap()
+    }
+
+    /// Open `path` read-only (binary) and return its descriptor.
+    pub(crate) fn open_ro(path: &Path) -> c_int {
+        let c = cpath(path);
+        #[cfg(unix)]
+        let fd = unsafe { libc::open(c.as_ptr(), libc::O_RDONLY) };
+        #[cfg(windows)]
+        let fd = unsafe { libc::open(c.as_ptr(), libc::O_RDONLY | libc::O_BINARY) };
+        assert!(fd >= 0, "open_ro({}) failed", path.display());
+        fd
+    }
+
+    /// Create/truncate `path` for writing (binary) and return its descriptor.
+    pub(crate) fn open_w(path: &Path) -> c_int {
+        let c = cpath(path);
+        #[cfg(unix)]
+        let fd = unsafe {
+            libc::open(c.as_ptr(), libc::O_WRONLY | libc::O_CREAT | libc::O_TRUNC, 0o644)
+        };
+        #[cfg(windows)]
+        let fd = unsafe {
+            libc::open(
+                c.as_ptr(),
+                libc::O_WRONLY | libc::O_CREAT | libc::O_TRUNC | libc::O_BINARY,
+                libc::S_IWRITE,
+            )
+        };
+        assert!(fd >= 0, "open_w({}) failed", path.display());
+        fd
+    }
+
+    /// Read up to `buf.len()` bytes from `fd` at its current offset.
+    pub(crate) fn read(fd: c_int, buf: &mut [u8]) -> isize {
+        let ptr = buf.as_mut_ptr() as *mut std::os::raw::c_void;
+        #[cfg(unix)]
+        let n = unsafe { libc::read(fd, ptr, buf.len()) };
+        #[cfg(windows)]
+        let n = unsafe { libc::read(fd, ptr, buf.len() as u32) as isize };
+        n
+    }
+
+    /// Write `bytes` to `fd` at its current offset; returns bytes written.
+    pub(crate) fn write(fd: c_int, bytes: &[u8]) -> isize {
+        let ptr = bytes.as_ptr() as *const std::os::raw::c_void;
+        #[cfg(unix)]
+        let n = unsafe { libc::write(fd, ptr, bytes.len()) };
+        #[cfg(windows)]
+        let n = unsafe { libc::write(fd, ptr, bytes.len() as u32) as isize };
+        n
+    }
+
+    /// Seek `fd` back to the start.
+    pub(crate) fn rewind(fd: c_int) {
+        let r = unsafe { libc::lseek(fd, 0, libc::SEEK_SET) };
+        assert!(r >= 0, "lseek failed");
+    }
+
+    /// Close `fd`.
+    pub(crate) fn close(fd: c_int) {
+        unsafe { libc::close(fd) };
+    }
+}

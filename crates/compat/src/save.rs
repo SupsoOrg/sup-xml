@@ -580,11 +580,11 @@ mod tests {
 
     #[test]
     fn save_to_fd_writes_and_does_not_close_fd() {
+        use crate::rawfd::testfd;
         // Use a temp file, get its fd, ensure xmlSaveClose doesn't
         // close it (we can still write to it afterwards).
         let tmp = std::env::temp_dir().join(format!("xmlsave_fd_{}.xml", std::process::id()));
-        let f = std::fs::File::create(&tmp).unwrap();
-        let fd = std::os::fd::AsRawFd::as_raw_fd(&f);
+        let fd = testfd::open_w(&tmp);
 
         let doc = parse(b"<r/>");
         // SAFETY: fd is open + writable for this scope.
@@ -593,11 +593,11 @@ mod tests {
         assert!(n > 0);
         unsafe { xmlSaveClose(ctx); }
 
-        // fd must still be writable — File is still alive here.
-        use std::io::Write;
-        (&f).write_all(b"<!-- after -->").expect("fd not closed");
-        drop(f);
+        // fd must still be writable — xmlSaveClose must not have closed it.
+        let w = testfd::write(fd, b"<!-- after -->");
+        assert_eq!(w, 14, "fd should remain open and writable");
 
+        testfd::close(fd);
         let _ = fs::remove_file(&tmp);
         unsafe { crate::parse::xmlFreeDoc(doc); }
     }

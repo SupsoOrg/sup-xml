@@ -83,3 +83,7 @@ bumpalo = "3"
 # to prove the C-ABI malloc/free family stays libc-symmetric even when
 # the host process runs a non-default Rust allocator.
 mimalloc = { version = "0.1", default-features = false }
+# Test-only: the fd-roundtrip tests open a real C `int` descriptor via the
+# CRT (open/read/write/lseek/close) to drive the fd-based entry points on
+# every platform.  See `rawfd::testfd`.
+libc = "0.2"

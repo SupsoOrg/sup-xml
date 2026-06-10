@@ -1671,6 +1671,7 @@ name = "sup-xml-compat"
 version = "1.0.0"
 dependencies = [
  "bumpalo",
+ "libc",
  "mimalloc",
  "regex",
  "sup-xml-core",
