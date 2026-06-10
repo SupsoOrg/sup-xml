@@ -47,4 +47,5 @@ pub use schema::{
 pub use types::{
     BuiltinType, ComplexType, Derivation, DerivationMethod, SimpleType, TypeDef, Value,
 };
+pub use validate::PsviTypes;
 pub use whitespace::WhitespaceMode;

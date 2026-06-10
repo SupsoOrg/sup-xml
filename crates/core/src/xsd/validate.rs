@@ -51,6 +51,13 @@ pub(crate) trait XsdEventSource<'x> {
     /// live-document source implements this; string/byte sources can't
     /// mutate their input and leave it a no-op.
     fn fill_default_attr(&self, _name: &str, _value: &str) {}
+    /// Stable identity key (the node's address) of the element whose
+    /// `StartElement` was most recently emitted, when the source can
+    /// supply one.  The arena-DOM walker returns the live node's
+    /// address so callers can recover per-node schema types after
+    /// validation (see [`PsviTypes`]); byte/stream sources have no
+    /// persistent nodes and return `None`.
+    fn current_node_key(&self) -> Option<usize> { None }
 }
 
 impl<'x> XsdEventSource<'x> for XmlReader<'x> {
@@ -143,6 +150,59 @@ impl Schema {
             Err(ValidationError { issues: v.issues })
         }
     }
+
+    /// As [`validate_doc`](Self::validate_doc), but also returns
+    /// [`PsviTypes`] — a per-node map of the schema type that governed
+    /// each element during validation.
+    ///
+    /// This is the post-schema-validation infoset entry point that
+    /// schema-aware XPath/XSLT processing builds on (typed atomization,
+    /// `instance of element(*, T)`, `data()`).  The returned table is
+    /// keyed by the addresses of `doc`'s nodes, so it is only valid
+    /// while `doc` is alive.  Validation errors are reported in the
+    /// `Result` exactly as `validate_doc` reports them; the annotations
+    /// are returned regardless, so a caller that wants best-effort
+    /// typing of a partially-valid document can ignore the `Result`.
+    pub fn validate_doc_typed(&self, doc: &sup_xml_tree::dom::Document)
+        -> (std::result::Result<(), ValidationError>, PsviTypes)
+    {
+        let source = DocumentEventSource::new(doc);
+        let mut v = Validator::new_with_source(self, source, ValidationOptions::default());
+        v.type_sink = Some(HashMap::default());
+        v.run();
+        let psvi = PsviTypes { by_node: v.type_sink.take().unwrap_or_default() };
+        let res = if v.issues.is_empty() {
+            Ok(())
+        } else {
+            Err(ValidationError { issues: v.issues })
+        };
+        (res, psvi)
+    }
+}
+
+/// Post-schema-validation type annotations produced by
+/// [`Schema::validate_doc_typed`].
+///
+/// Maps each validated element to the schema type that governed it,
+/// keyed by the source node's address.  Identity is by address: the
+/// document the table was built from must outlive every lookup (the
+/// borrow on `validate_doc_typed` ties the contents to that document at
+/// the call site).  Nodes validation never reached — e.g. content under
+/// a skip wildcard — simply have no entry and return `None`.
+#[derive(Default)]
+pub struct PsviTypes {
+    by_node: HashMap<usize, TypeRef>,
+}
+
+impl PsviTypes {
+    /// Governing type recorded for `node`, or `None` if validation
+    /// didn't assign one.
+    pub fn governing_type(&self, node: &sup_xml_tree::dom::Node) -> Option<&TypeRef> {
+        self.by_node.get(&(node as *const sup_xml_tree::dom::Node as usize))
+    }
+
+    /// True when no node received a type annotation.
+    pub fn is_empty(&self) -> bool { self.by_node.is_empty() }
 }
 
 // ── internal driver ──────────────────────────────────────────────────────────
@@ -168,6 +228,11 @@ struct Validator<'s, 'x, E: XsdEventSource<'x>> {
     /// element with `<xs:key>`/`<xs:keyref>`/`<xs:unique>` declarations,
     /// popped (and validated) on leaving.
     key_scopes: Vec<KeyScope>,
+    /// When `Some`, records each element's governing type keyed by
+    /// source-node address as validation proceeds — the post-schema-
+    /// validation infoset (see [`PsviTypes`]).  `None` on the ordinary
+    /// pass/fail path so it costs nothing.
+    type_sink: Option<HashMap<usize, TypeRef>>,
 }
 
 struct ElementCtx<'s> {
@@ -394,7 +459,18 @@ impl<'s, 'x, E: XsdEventSource<'x>> Validator<'s, 'x, E> {
             attr_buf: Vec::new(),
             ns_stack: vec![HashMap::default()],
             key_scopes: Vec::new(),
+            type_sink: None,
             _src: std::marker::PhantomData,
+        }
+    }
+
+    /// Record the governing `type_def` for the element currently being
+    /// validated, keyed by its source-node address.  No-op unless type
+    /// collection is enabled (`type_sink` is `Some`).
+    fn record_governing_type(&mut self, type_def: &TypeRef) {
+        let Some(key) = self.reader.current_node_key() else { return };
+        if let Some(sink) = self.type_sink.as_mut() {
+            sink.insert(key, type_def.clone());
         }
     }
 
@@ -911,6 +987,7 @@ impl<'s, 'x, E: XsdEventSource<'x>> Validator<'s, 'x, E> {
             None => 1,
         };
 
+        self.record_governing_type(&type_def);
         self.stack.push(ElementCtx {
             decl,
             type_def,
@@ -1532,6 +1609,7 @@ impl<'s, 'x, E: XsdEventSource<'x>> Validator<'s, 'x, E> {
             Some(parent) => bump_child_counter(&mut parent.child_counters, &qn.local),
             None => 1,
         };
+        self.record_governing_type(&type_def);
         self.stack.push(ElementCtx {
             decl,
             type_def,
@@ -4611,5 +4689,45 @@ mod tests {
             .expect("expected KeyNotUnique error");
         assert_eq!(issue.line, Some(3),
             "expected <users> (declaring element) on line 3, got {issue:?}");
+    }
+
+    #[test]
+    fn validate_doc_typed_records_governing_types() {
+        let s = Schema::compile_str(&xsd_str(r#"
+            <xs:element name="root">
+                <xs:complexType>
+                    <xs:sequence>
+                        <xs:element name="count" type="xs:integer"/>
+                        <xs:element name="label" type="xs:string"/>
+                    </xs:sequence>
+                </xs:complexType>
+            </xs:element>
+        "#)).unwrap();
+        let mut opts = crate::ParseOptions::default();
+        opts.namespace_aware = true;
+        let doc = crate::parse_str(
+            &format!(r#"<root {}><count>3</count><label>hi</label></root>"#, instance_ns()),
+            &opts,
+        ).unwrap();
+        let (res, psvi) = s.validate_doc_typed(&doc);
+        assert!(res.is_ok(), "expected valid doc, got {res:?}");
+        assert!(!psvi.is_empty(), "expected recorded type annotations");
+
+        // Walk to the two leaf elements and check their recorded
+        // primitive types.
+        let root = doc.root();
+        assert!(psvi.governing_type(root).is_some(), "root should be typed");
+        for child in root.children().filter(|n|
+            matches!(n.kind, sup_xml_tree::dom::NodeKind::Element))
+        {
+            let ty = psvi.governing_type(child)
+                .unwrap_or_else(|| panic!("{} should be typed", child.name()));
+            let TypeRef::Simple(st) = ty else { panic!("expected simple type") };
+            match child.name() {
+                "count" => assert_eq!(st.builtin, BuiltinType::Integer),
+                "label" => assert_eq!(st.builtin, BuiltinType::String),
+                other   => panic!("unexpected child {other}"),
+            }
+        }
     }
 }

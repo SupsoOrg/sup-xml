@@ -174,6 +174,10 @@ impl<'doc> XsdEventSource<'doc> for DocumentEventSource<'doc> {
     fn src_offset(&self) -> usize { 0 }
     fn line_col_at(&self, _offset: usize) -> (u32, u32) { (0, 0) }
 
+    fn current_node_key(&self) -> Option<usize> {
+        self.current_elem.get().map(|n| n as *const Node<'doc> as usize)
+    }
+
     fn fill_default_attr(&self, name: &str, value: &str) {
         let Some(elem) = self.current_elem.get() else { return };
         // Copy name/value into the document arena so the new attribute's
