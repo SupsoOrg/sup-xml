@@ -765,6 +765,16 @@ pub trait XPathBindings {
     fn node_schema_type(&self, _node_id: NodeId) -> Option<(String, String)> {
         None
     }
+    /// Schema-aware atomization (XPath 2.0 §2.5.2): the typed value of
+    /// source node `node_id`, whose string value is `lexical`, when the
+    /// node carries a simple-typed schema annotation.  Returns the typed
+    /// atomic (so `data($n) instance of xs:integer` and arithmetic see
+    /// the real type).  `None` when the node wasn't schema-typed or its
+    /// type has no atomizable typed value — the caller then atomizes to
+    /// xs:untypedAtomic as before.
+    fn node_typed_value(&self, _node_id: NodeId, _lexical: &str) -> Option<Value> {
+        None
+    }
     /// Look up an XPath variable's value.  `None` means undefined,
     /// which surfaces as an XPath error.
     fn variable(&self, _name: &str) -> Option<Value> { None }
@@ -2223,6 +2233,9 @@ impl<'p> XPathBindings for ClosureBindings<'p> {
     fn node_schema_type(&self, id: NodeId) -> Option<(String, String)> {
         self.base.node_schema_type(id)
     }
+    fn node_typed_value(&self, id: NodeId, lexical: &str) -> Option<Value> {
+        self.base.node_typed_value(id, lexical)
+    }
     fn xpath_version_2_or_later(&self) -> bool { self.base.xpath_version_2_or_later() }
     fn load_document(&self, u: &str, b: Option<&str>) -> Option<Result<Vec<ForeignNodePtr>>> {
         self.base.load_document(u, b)
@@ -2431,6 +2444,9 @@ impl<'p> XPathBindings for ScopedBindings<'p> {
     fn node_schema_type(&self, id: NodeId) -> Option<(String, String)> {
         self.parent.node_schema_type(id)
     }
+    fn node_typed_value(&self, id: NodeId, lexical: &str) -> Option<Value> {
+        self.parent.node_typed_value(id, lexical)
+    }
     fn foreign_string_value(
         &self, p: crate::xpath::eval::ForeignNodePtr,
     ) -> String {
@@ -2522,6 +2538,9 @@ impl<'p> XPathBindings for ErrBindings<'p> {
     }
     fn node_schema_type(&self, id: NodeId) -> Option<(String, String)> {
         self.parent.node_schema_type(id)
+    }
+    fn node_typed_value(&self, id: NodeId, lexical: &str) -> Option<Value> {
+        self.parent.node_typed_value(id, lexical)
     }
     fn foreign_string_value(
         &self, p: crate::xpath::eval::ForeignNodePtr,
@@ -6917,7 +6936,14 @@ fn eval_function<I: DocIndexLike>(name: &str, args: &[Expr], ctx: &EvalCtx<'_>, 
             match v {
                 Value::NodeSet(ns) => {
                     let items: Vec<Value> = ns.iter()
-                        .map(|&id| Value::String(idx.string_value(id)))
+                        .map(|&id| {
+                            let sv = idx.string_value(id);
+                            // Schema-aware: a node with a recorded simple
+                            // schema type atomizes to its typed value;
+                            // otherwise to xs:untypedAtomic (a String).
+                            ctx.bindings.node_typed_value(id, &sv)
+                                .unwrap_or(Value::String(sv))
+                        })
                         .collect();
                     match items.len() {
                         0 => Ok(Value::NodeSet(Vec::new())),

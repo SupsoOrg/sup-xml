@@ -514,6 +514,18 @@ impl<'a, I: DocIndexLike> XPathBindings for XsltBindings<'a, I> {
     fn node_schema_type(&self, node_id: NodeId) -> Option<(String, String)> {
         self.source_types?.by_node.get(&node_id)?.name.clone()
     }
+    #[cfg(feature = "xsd")]
+    fn node_typed_value(&self, node_id: NodeId, lexical: &str) -> Option<Value> {
+        use sup_xml_core::xsd::TypeRef;
+        let nt = self.source_types?.by_node.get(&node_id)?;
+        // Only simple-typed (and simple-content) nodes have an
+        // atomizable typed value here; complex element-only content
+        // falls back to untyped atomization at the call site.
+        let TypeRef::Simple(st) = &nt.type_ref else { return None };
+        let xv = st.validate(lexical).ok()?;
+        let user_type = nt.name.as_ref().map(|(n, l)| (n.as_str(), l.as_str()));
+        Some(xsd_value_to_xpath(xv, lexical, user_type))
+    }
     fn call_function_in(
         &self, ns_uri: &str, name: &str, args: Vec<Value>,
         xpath_context_node: NodeId,
