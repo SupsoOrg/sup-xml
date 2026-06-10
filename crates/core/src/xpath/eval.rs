@@ -5269,9 +5269,62 @@ fn eval_json_function<I: DocIndexLike>(
             xml_node_to_json(elem, idx, false, &mut out)?;
             Ok(Value::String(out))
         })(),
+        // fn:serialize($value [, $options]) (F&O §17.2) — only the JSON
+        // output method is modelled here; node-tree serialization (the
+        // xml/html/text methods) is the XSLT result-document layer's job,
+        // so those fall back to the value's string value.
+        "serialize" if (1..=2).contains(&args.len()) => (|| {
+            let method = opt_str(args.get(1), "method").unwrap_or_default();
+            if method == "json" {
+                let mut out = String::new();
+                value_to_json(&args[0], idx, &mut out)?;
+                Ok(Value::String(out))
+            } else {
+                Ok(Value::String(value_to_string(&args[0], idx)))
+            }
+        })(),
         _ => return None,
     };
     Some(res)
+}
+
+/// Serialize an XDM value as JSON (the `method=json` output method,
+/// F&O §17.2 / §17.5): maps become objects, arrays become arrays, the
+/// numeric/boolean atomics become JSON literals, and everything else its
+/// quoted string value.
+fn value_to_json<I: DocIndexLike>(v: &Value, idx: &I, out: &mut String) -> Result<()> {
+    match v {
+        Value::Map(m) => {
+            out.push('{');
+            for (i, (k, val)) in m.iter().enumerate() {
+                if i > 0 { out.push(','); }
+                out.push('"');
+                json_escape_into(&value_to_string(k, idx), out);
+                out.push_str("\":");
+                value_to_json(val, idx, out)?;
+            }
+            out.push('}');
+        }
+        Value::Array(a) => {
+            out.push('[');
+            for (i, val) in a.iter().enumerate() {
+                if i > 0 { out.push(','); }
+                value_to_json(val, idx, out)?;
+            }
+            out.push(']');
+        }
+        Value::Boolean(b) => out.push_str(if *b { "true" } else { "false" }),
+        Value::Number(_) => out.push_str(&value_to_string(v, idx)),
+        Value::Typed(t) if t.numeric.is_some() => out.push_str(&value_to_string(v, idx)),
+        Value::NodeSet(ns) if ns.is_empty() => out.push_str("null"),
+        Value::Sequence(items) if items.is_empty() => out.push_str("null"),
+        other => {
+            out.push('"');
+            json_escape_into(&value_to_string(other, idx), out);
+            out.push('"');
+        }
+    }
+    Ok(())
 }
 
 /// A structural event emitted by [`parse_json_events`].  Lets a
