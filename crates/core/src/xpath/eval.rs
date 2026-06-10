@@ -502,8 +502,12 @@ pub enum FunctionItem {
         closure: Vec<(String, Value)>,
     },
     /// A reference to a named function (built-in or user-defined),
-    /// `name#arity`, invoked by re-entering function dispatch.
-    Named { name: String, arity: usize },
+    /// `name#arity`, invoked by re-entering function dispatch.  `name`
+    /// is the lexical QName used for dispatch; `ns` is its resolved
+    /// namespace URI (the default function namespace for an unprefixed
+    /// name), captured at reference time so `fn:function-name` can
+    /// rebuild the expanded QName without the defining scope.
+    Named { name: String, ns: String, arity: usize },
     /// A partial application: a base function with some arguments
     /// already bound; `None` slots are the remaining parameters.
     Partial { base: Box<FunctionItem>, bound: Vec<Option<Value>> },
@@ -802,6 +806,17 @@ fn resolve_prefix_or_implicit(bindings: &dyn XPathBindings, prefix: &str) -> Opt
     bindings
         .resolve_prefix(prefix)
         .or_else(|| implicit_prefix(prefix).map(str::to_string))
+}
+
+/// Resolve the namespace URI of a `name#arity` function reference.  An
+/// unprefixed name lies in the default function namespace (`fn:`); a
+/// prefixed one resolves through the in-scope bindings (empty URI if the
+/// prefix is unbound).
+fn named_function_namespace(name: &str, bindings: &dyn XPathBindings) -> String {
+    match name.split_once(':') {
+        Some((prefix, _)) => resolve_prefix_or_implicit(bindings, prefix).unwrap_or_default(),
+        None => FN_NAMESPACE.to_string(),
+    }
 }
 
 static NO_BINDINGS: NoBindings = NoBindings;
@@ -1478,7 +1493,11 @@ pub fn eval_expr<I: DocIndexLike>(expr: &Expr, ctx: &EvalCtx<'_>, idx: &I) -> Re
             })))
         }
         Expr::NamedFunctionRef { name, arity } => Ok(Value::Function(Box::new(
-            FunctionItem::Named { name: name.clone(), arity: *arity }))),
+            FunctionItem::Named {
+                name:  name.clone(),
+                ns:    named_function_namespace(name, ctx.bindings),
+                arity: *arity,
+            }))),
         Expr::DynamicCall { func, args } => {
             let f = eval_expr(func, ctx, idx)?;
             let fi = match &f {
@@ -2108,7 +2127,7 @@ fn call_function_item<I: DocIndexLike>(
             };
             eval_expr(body, &inner, idx)
         }
-        FunctionItem::Named { name, arity } => {
+        FunctionItem::Named { name, arity, .. } => {
             if args.len() != *arity {
                 return Err(xpath_err(format!(
                     "function {name}#{arity} called with {} argument(s)", args.len())));
@@ -5040,6 +5059,23 @@ fn eval_hof_function<I: DocIndexLike>(
         // fn:function-arity($function).
         "function-arity" if args.len() == 1 =>
             f(0).map(|func| Value::Number(Numeric::Integer(func.arity() as i64))),
+        // fn:function-name($function) as xs:QName? — the expanded QName of
+        // a named-function reference, or the empty sequence for an
+        // anonymous (inline / partially-applied) function.
+        "function-name" if args.len() == 1 => f(0).map(|func| match func {
+            FunctionItem::Named { name, ns, .. } => {
+                let local = name.rsplit(':').next().unwrap_or(name);
+                let lexical = if ns.is_empty() {
+                    local.to_string()
+                } else {
+                    format!("{{{ns}}}{local}")
+                };
+                Value::Typed(Box::new(TypedAtomic {
+                    kind: "QName", lexical, numeric: None, boolean: None,
+                }))
+            }
+            _ => Value::NodeSet(Vec::new()),
+        }),
         _ => return None,
     };
     Some(res)
