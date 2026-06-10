@@ -3068,6 +3068,22 @@ pub fn value_to_number_with<I: DocIndexLike>(
     }
 }
 
+/// True iff `v` is a function item.  Used to reject the atomization,
+/// comparison, and string-value of function items (FOTY0013/0014/0015) —
+/// operations the spec defines only for nodes and atomic values.
+fn value_is_function(v: &Value) -> bool {
+    matches!(v, Value::Function(_))
+}
+
+/// True iff `v` is, or contains, a function item.
+fn value_seq_has_function(v: &Value) -> bool {
+    match v {
+        Value::Function(_) => true,
+        Value::Sequence(items) => items.iter().any(value_seq_has_function),
+        _ => false,
+    }
+}
+
 pub fn value_to_string<I: DocIndexLike>(v: &Value, idx: &I) -> String {
     value_to_string_with(v, idx, &NO_BINDINGS)
 }
@@ -6281,8 +6297,14 @@ fn eval_function<I: DocIndexLike>(name: &str, args: &[Expr], ctx: &EvalCtx<'_>, 
                 Ok(Value::String(idx.string_value(ctx.context_node)))
             } else {
                 check_args!(1);
+                let a = arg!(0);
+                if value_is_function(&a) {
+                    return Err(xpath_err(
+                        "string(): a function item has no string value (FOTY0014)")
+                        .with_xpath_code("FOTY0014"));
+                }
                 Ok(Value::String(value_to_string_with_compat(
-                    &arg!(0), idx, ctx.bindings, ctx.static_ctx.libxml2_compatible)))
+                    &a, idx, ctx.bindings, ctx.static_ctx.libxml2_compatible)))
             }
         }
         "concat" => {
@@ -6698,6 +6720,15 @@ fn eval_function<I: DocIndexLike>(name: &str, args: &[Expr], ctx: &EvalCtx<'_>, 
                         _ => Ok(Value::Sequence(items)),
                     }
                 }
+                // A function item has no typed value — atomization is a
+                // type error.
+                Value::Function(_) => Err(xpath_err(
+                    "data(): a function item cannot be atomized (FOTY0013)")
+                    .with_xpath_code("FOTY0013")),
+                Value::Sequence(items) if items.iter().any(value_is_function) =>
+                    Err(xpath_err(
+                        "data(): a function item cannot be atomized (FOTY0013)")
+                        .with_xpath_code("FOTY0013")),
                 other => Ok(other),
             }
         }
@@ -7354,6 +7385,12 @@ fn eval_function<I: DocIndexLike>(name: &str, args: &[Expr], ctx: &EvalCtx<'_>, 
             }
             let a = arg!(0);
             let b = arg!(1);
+            // Function items cannot be compared for deep equality (FOTY0015).
+            if value_seq_has_function(&a) || value_seq_has_function(&b) {
+                return Err(xpath_err(
+                    "deep-equal() cannot compare function items (FOTY0015)")
+                    .with_xpath_code("FOTY0015"));
+            }
             Ok(Value::Boolean(deep_equal_values(&a, &b, idx, ctx.bindings)))
         }
         "base-uri" => {
@@ -10854,6 +10891,13 @@ fn value_compare<I: DocIndexLike>(
         (None, _) | (_, None) => return Ok(Value::NodeSet(Vec::new())),
         (Some(a), Some(b))    => (a, b),
     };
+    // A function item has no typed value, so it cannot take part in a
+    // value comparison (FOTY0013).
+    if value_is_function(&lv) || value_is_function(&rv) {
+        return Err(xpath_err(
+            "a function item cannot appear in a value comparison (FOTY0013)")
+            .with_xpath_code("FOTY0013"));
+    }
     // XPath 2.0 §3.5.2 — when both operands atomise to strings (or
     // untyped, which converts to string for comparison), the
     // in-scope default-collation drives equality / ordering.
