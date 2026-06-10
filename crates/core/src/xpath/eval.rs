@@ -565,6 +565,19 @@ pub struct TypedAtomic {
     pub numeric: Option<f64>,
     /// Boolean form, populated for xs:boolean values.
     pub boolean: Option<bool>,
+    /// The declared user-defined (schema) type this value was constructed
+    /// as — `(namespace, local)`.  `None` for built-in-typed and untyped
+    /// values.  Read by `instance of my:type` (which is decided by the
+    /// declared type, not the value space).  Boxed so the common
+    /// built-in case keeps `TypedAtomic` small.
+    pub user_type: Option<Box<(String, String)>>,
+}
+
+impl TypedAtomic {
+    /// A typed atomic of a built-in XSD type (no user-type tag).
+    pub fn builtin(kind: &'static str, lexical: String, numeric: Option<f64>, boolean: Option<bool>) -> Self {
+        TypedAtomic { kind, lexical, numeric, boolean, user_type: None }
+    }
 }
 
 /// XSD type-hierarchy lookup — parent of a derived type per
@@ -731,6 +744,15 @@ pub trait XPathBindings {
     /// in scope or the type is unknown.
     fn cast_to_user_type(&self, _ns_uri: &str, _local: &str, _value: &str)
         -> Option<Result<Value>> {
+        None
+    }
+    /// Schema-aware processing: is a value whose declared type is
+    /// `value_type` (its expanded name, or `None` if untyped / built-in)
+    /// an instance of the user-defined target type?  `None` when no schema
+    /// is in scope or the target type is unknown.
+    fn instance_of_user_type(
+        &self, _target_ns: &str, _target_local: &str, _value_type: Option<(&str, &str)>,
+    ) -> Option<bool> {
         None
     }
     /// Look up an XPath variable's value.  `None` means undefined,
@@ -1450,6 +1472,34 @@ pub fn eval_expr<I: DocIndexLike>(expr: &Expr, ctx: &EvalCtx<'_>, idx: &I) -> Re
         Expr::InstanceOf(inner, st) => {
             let v = eval_expr(inner, ctx, idx)?;
             let st = resolve_kind_test_namespaces(st, ctx.bindings);
+            // Schema-aware: a user-defined (schema) target type keeps its
+            // `prefix:local` name; `instance of` is decided by the value's
+            // *declared* type, not its lexical space.
+            if let crate::xpath::ast::ItemType::Atomic(name) = &st.item {
+                if let Some((prefix, local)) = name.split_once(':') {
+                    if let Some(uri) = resolve_prefix_or_implicit(ctx.bindings, prefix) {
+                        let value_type = match &v {
+                            Value::Typed(t) => t.user_type.as_deref()
+                                .map(|(ns, l)| (ns.as_str(), l.as_str())),
+                            _ => None,
+                        };
+                        // Only intercept when the target is a known schema
+                        // type; otherwise fall through to the ordinary path.
+                        if let Some(matches_type) =
+                            ctx.bindings.instance_of_user_type(&uri, local, value_type)
+                        {
+                            let ok = match sequence_len(&v) {
+                                0 => matches!(st.occurrence,
+                                    crate::xpath::ast::Occurrence::Optional
+                                    | crate::xpath::ast::Occurrence::ZeroOrMore),
+                                1 => matches_type,
+                                _ => false,
+                            };
+                            return Ok(Value::Boolean(ok));
+                        }
+                    }
+                }
+            }
             Ok(Value::Boolean(value_matches_sequence_type(&v, &st, idx)))
         }
         Expr::CastAs(inner, st) => {
@@ -2154,6 +2204,9 @@ impl<'p> XPathBindings for ClosureBindings<'p> {
     fn castable_as_user_type(&self, ns: &str, l: &str, v: &str, sk: Option<&str>) -> Option<bool> {
         self.base.castable_as_user_type(ns, l, v, sk)
     }
+    fn instance_of_user_type(&self, ns: &str, l: &str, vt: Option<(&str, &str)>) -> Option<bool> {
+        self.base.instance_of_user_type(ns, l, vt)
+    }
     fn cast_to_user_type(&self, ns: &str, l: &str, v: &str) -> Option<Result<Value>> {
         self.base.cast_to_user_type(ns, l, v)
     }
@@ -2356,6 +2409,9 @@ impl<'p> XPathBindings for ScopedBindings<'p> {
     fn castable_as_user_type(&self, ns: &str, l: &str, v: &str, sk: Option<&str>) -> Option<bool> {
         self.parent.castable_as_user_type(ns, l, v, sk)
     }
+    fn instance_of_user_type(&self, ns: &str, l: &str, vt: Option<(&str, &str)>) -> Option<bool> {
+        self.parent.instance_of_user_type(ns, l, vt)
+    }
     fn cast_to_user_type(&self, ns: &str, l: &str, v: &str) -> Option<Result<Value>> {
         self.parent.cast_to_user_type(ns, l, v)
     }
@@ -2441,6 +2497,9 @@ impl<'p> XPathBindings for ErrBindings<'p> {
     }
     fn castable_as_user_type(&self, ns: &str, l: &str, v: &str, sk: Option<&str>) -> Option<bool> {
         self.parent.castable_as_user_type(ns, l, v, sk)
+    }
+    fn instance_of_user_type(&self, ns: &str, l: &str, vt: Option<(&str, &str)>) -> Option<bool> {
+        self.parent.instance_of_user_type(ns, l, vt)
     }
     fn cast_to_user_type(&self, ns: &str, l: &str, v: &str) -> Option<Result<Value>> {
         self.parent.cast_to_user_type(ns, l, v)
@@ -3888,7 +3947,7 @@ fn duration_value(kind: &'static str, units: i64) -> Value {
     } else {
         format_year_month_duration_months(units)
     };
-    Value::Typed(Box::new(TypedAtomic { kind, lexical, numeric: None, boolean: None }))
+    Value::Typed(Box::new(TypedAtomic { kind, lexical, numeric: None, boolean: None, user_type: None }))
 }
 
 /// Format a signed second-count back into `xs:dayTimeDuration`
@@ -4143,7 +4202,7 @@ fn duration_mul<I: DocIndexLike>(
         return Some(Value::Typed(Box::new(TypedAtomic {
             kind: "yearMonthDuration",
             lexical: format_year_month_duration_months(scaled),
-            numeric: None, boolean: None,
+            numeric: None, boolean: None, user_type: None,
         })));
     }
     // dayTimeDuration scales in microseconds so fractional seconds
@@ -4153,7 +4212,7 @@ fn duration_mul<I: DocIndexLike>(
     Some(Value::Typed(Box::new(TypedAtomic {
         kind: "dayTimeDuration",
         lexical: canonical_day_time_duration_lex(&format_day_time_duration_micros(scaled)),
-        numeric: None, boolean: None,
+        numeric: None, boolean: None, user_type: None,
     })))
 }
 
@@ -4190,7 +4249,7 @@ fn duration_div<I: DocIndexLike>(
                 return Some(Value::Typed(Box::new(TypedAtomic {
                     kind: "yearMonthDuration",
                     lexical: format_year_month_duration_months(scaled),
-                    numeric: None, boolean: None,
+                    numeric: None, boolean: None, user_type: None,
                 })));
             }
             let us = parse_day_time_duration_micros(&d.lexical)?;
@@ -4198,7 +4257,7 @@ fn duration_div<I: DocIndexLike>(
             Some(Value::Typed(Box::new(TypedAtomic {
                 kind: "dayTimeDuration",
                 lexical: canonical_day_time_duration_lex(&format_day_time_duration_micros(scaled)),
-                numeric: None, boolean: None,
+                numeric: None, boolean: None, user_type: None,
             })))
         }
         _ => None,
@@ -4252,7 +4311,7 @@ fn add_one_day(year: i32, month: u8, day: u8) -> (i32, u8, u8) {
 /// returns `None` (the caller surfaces a type error / no-op).
 fn duration_combine(a: &TypedAtomic, b: &TypedAtomic, subtract: bool) -> Option<Value> {
     let mk = |kind: &'static str, lexical: String| {
-        Value::Typed(Box::new(TypedAtomic { kind, lexical, numeric: None, boolean: None }))
+        Value::Typed(Box::new(TypedAtomic { kind, lexical, numeric: None, boolean: None, user_type: None }))
     };
     match (a.kind, b.kind) {
         ("yearMonthDuration", "yearMonthDuration") => {
@@ -4301,7 +4360,7 @@ fn date_arith_add(l: &Value, r: &Value) -> Option<Value> {
                 let (ny, nm, nd) = add_months_to_ymd(y, m, d, months);
                 let lex = format!("{:04}-{:02}-{:02}", ny, nm, nd);
                 return Some(Value::Typed(Box::new(TypedAtomic {
-                    kind: "date", lexical: lex, numeric: None, boolean: None,
+                    kind: "date", lexical: lex, numeric: None, boolean: None, user_type: None,
                 })));
             }
             let sec = parse_day_time_duration_secs(&dur.lexical)?;
@@ -4311,7 +4370,7 @@ fn date_arith_add(l: &Value, r: &Value) -> Option<Value> {
             let (ny, nm, nd) = days_to_ymd(new_days);
             let lex = format!("{:04}-{:02}-{:02}", ny, nm, nd);
             Some(Value::Typed(Box::new(TypedAtomic {
-                kind: "date", lexical: lex, numeric: None, boolean: None,
+                kind: "date", lexical: lex, numeric: None, boolean: None, user_type: None,
             })))
         }
         "time" => {
@@ -4343,7 +4402,7 @@ fn date_arith_add(l: &Value, r: &Value) -> Option<Value> {
                 l
             };
             Some(Value::Typed(Box::new(TypedAtomic {
-                kind: "time", lexical: lex, numeric: None, boolean: None,
+                kind: "time", lexical: lex, numeric: None, boolean: None, user_type: None,
             })))
         }
         "dateTime" => {
@@ -4357,7 +4416,7 @@ fn date_arith_add(l: &Value, r: &Value) -> Option<Value> {
                 let (ny, nm, nd) = add_months_to_ymd(y, mo as u32, d as u32, months);
                 let lex = format_datetime_lexical(ny, nm as u8, nd as u8, h, mi, s, frac, tz);
                 return Some(Value::Typed(Box::new(TypedAtomic {
-                    kind: "dateTime", lexical: lex, numeric: None, boolean: None,
+                    kind: "dateTime", lexical: lex, numeric: None, boolean: None, user_type: None,
                 })));
             }
             // xs:dateTime + xs:dayTimeDuration with sub-second
@@ -4383,7 +4442,7 @@ fn date_arith_add(l: &Value, r: &Value) -> Option<Value> {
             let ns = (remain_secs % 60) as u8;
             let lex = format_datetime_lexical(ny, nm as u8, nd as u8, nh, nmi, ns, new_frac, tz);
             Some(Value::Typed(Box::new(TypedAtomic {
-                kind: "dateTime", lexical: lex, numeric: None, boolean: None,
+                kind: "dateTime", lexical: lex, numeric: None, boolean: None, user_type: None,
             })))
         }
         _ => None,
@@ -4433,7 +4492,7 @@ fn date_arith_sub(l: &Value, r: &Value) -> Option<Value> {
             let lex = format_day_time_duration_secs(diff_days * 86_400);
             Some(Value::Typed(Box::new(TypedAtomic {
                 kind: "dayTimeDuration", lexical: lex,
-                numeric: None, boolean: None,
+                numeric: None, boolean: None, user_type: None,
             })))
         }
         // date - duration → date
@@ -4447,7 +4506,7 @@ fn date_arith_sub(l: &Value, r: &Value) -> Option<Value> {
             let (ny, nm, nd) = days_to_ymd(new_days);
             let lex = format!("{:04}-{:02}-{:02}", ny, nm, nd);
             Some(Value::Typed(Box::new(TypedAtomic {
-                kind: "date", lexical: lex, numeric: None, boolean: None,
+                kind: "date", lexical: lex, numeric: None, boolean: None, user_type: None,
             })))
         }
         // dateTime - duration → dateTime / time - duration → time —
@@ -4460,7 +4519,7 @@ fn date_arith_sub(l: &Value, r: &Value) -> Option<Value> {
                 kind: b.kind,
                 lexical: negate_duration_lex(&b.lexical),
                 numeric: None,
-                boolean: None,
+                boolean: None, user_type: None,
             };
             return date_arith_add(l, &Value::Typed(Box::new(negated)));
         }
@@ -4482,7 +4541,7 @@ fn date_arith_sub(l: &Value, r: &Value) -> Option<Value> {
             );
             Some(Value::Typed(Box::new(TypedAtomic {
                 kind: "dayTimeDuration", lexical: lex,
-                numeric: None, boolean: None,
+                numeric: None, boolean: None, user_type: None,
             })))
         }
         // duration - duration → duration (same sub-family only).
@@ -5303,7 +5362,7 @@ fn eval_hof_function<I: DocIndexLike>(
                     format!("{{{ns}}}{local}")
                 };
                 Value::Typed(Box::new(TypedAtomic {
-                    kind: "QName", lexical, numeric: None, boolean: None,
+                    kind: "QName", lexical, numeric: None, boolean: None, user_type: None,
                 }))
             }
             _ => Value::NodeSet(Vec::new()),
@@ -6876,7 +6935,7 @@ fn eval_function<I: DocIndexLike>(name: &str, args: &[Expr], ctx: &EvalCtx<'_>, 
                 kind: "dateTime",
                 lexical: format_datetime_utc(now),
                 numeric: None,
-                boolean: None,
+                boolean: None, user_type: None,
             })))
         }
         "current-date" => {
@@ -6886,7 +6945,7 @@ fn eval_function<I: DocIndexLike>(name: &str, args: &[Expr], ctx: &EvalCtx<'_>, 
                 kind: "date",
                 lexical: format_date_utc(now),
                 numeric: None,
-                boolean: None,
+                boolean: None, user_type: None,
             })))
         }
         "current-time" => {
@@ -6896,7 +6955,7 @@ fn eval_function<I: DocIndexLike>(name: &str, args: &[Expr], ctx: &EvalCtx<'_>, 
                 kind: "time",
                 lexical: format_time_utc(now),
                 numeric: None,
-                boolean: None,
+                boolean: None, user_type: None,
             })))
         }
         // XPath 2.0 §10.5 — `fn:adjust-{date,dateTime,time}-to-timezone`.
@@ -6948,7 +7007,7 @@ fn eval_function<I: DocIndexLike>(name: &str, args: &[Expr], ctx: &EvalCtx<'_>, 
                 kind,
                 lexical: adjust_timezone(&lex, kind, new_tz_minutes),
                 numeric: None,
-                boolean: None,
+                boolean: None, user_type: None,
             })))
         }
 
@@ -8456,7 +8515,7 @@ fn eval_function<I: DocIndexLike>(name: &str, args: &[Expr], ctx: &EvalCtx<'_>, 
                         kind: "QName",
                         lexical: lex,
                         numeric: None,
-                        boolean: None,
+                        boolean: None, user_type: None,
                     })))
                 }
                 _ => Ok(Value::NodeSet(Vec::new())),
@@ -9052,7 +9111,7 @@ fn cast_value_to_atomic_impl<I: DocIndexLike>(
     let make_typed = |kind: &'static str, lex: String,
                       numeric: Option<f64>, boolean: Option<bool>| -> Value {
         Value::Typed(Box::new(TypedAtomic {
-            kind, lexical: lex, numeric, boolean,
+            kind, lexical: lex, numeric, boolean, user_type: None,
         }))
     };
     match &st.item {
@@ -11877,7 +11936,7 @@ fn xs_constructor<I: DocIndexLike>(
                     let tz = tz_start.map(|i| &after[i..]).unwrap_or("");
                     let lex = format!("{}{}", &t.lexical[..t_pos], tz);
                     return Ok(Value::Typed(Box::new(TypedAtomic {
-                        kind: "date", lexical: lex, numeric: None, boolean: None,
+                        kind: "date", lexical: lex, numeric: None, boolean: None, user_type: None,
                     })));
                 }
             }
@@ -11889,7 +11948,7 @@ fn xs_constructor<I: DocIndexLike>(
         if let Some(lex) = convert_binary_kind(&args[0], local) {
             let kind = atomic_kind_static(local).unwrap();
             return Ok(Value::Typed(Box::new(TypedAtomic {
-                kind, lexical: lex, numeric: None, boolean: None,
+                kind, lexical: lex, numeric: None, boolean: None, user_type: None,
             })));
         }
     }
@@ -11915,7 +11974,7 @@ fn xs_constructor<I: DocIndexLike>(
                     };
                     let kind = atomic_kind_static(local).unwrap();
                     return Ok(Value::Typed(Box::new(TypedAtomic {
-                        kind, lexical: lex, numeric: None, boolean: None,
+                        kind, lexical: lex, numeric: None, boolean: None, user_type: None,
                     })));
                 }
             }
@@ -12039,7 +12098,7 @@ fn xs_constructor<I: DocIndexLike>(
         // hex digits.
         trimmed.to_ascii_uppercase()
     } else { trimmed.to_string() };
-    Ok(Value::Typed(Box::new(TypedAtomic { kind, lexical, numeric, boolean })))
+    Ok(Value::Typed(Box::new(TypedAtomic { kind, lexical, numeric, boolean, user_type: None })))
 }
 
 /// Resolve an XSD type local name to a stable `&'static str`.  Used
@@ -12554,7 +12613,7 @@ mod tests {
     #[test]
     fn duration_combine_dispatches_by_family() {
         let dur = |k: &'static str, lex: &str| TypedAtomic {
-            kind: k, lexical: lex.to_string(), numeric: None, boolean: None,
+            kind: k, lexical: lex.to_string(), numeric: None, boolean: None, user_type: None,
         };
         let lex = |v: Option<Value>| match v {
             Some(Value::Typed(t)) => t.lexical.clone(),

@@ -385,6 +385,32 @@ impl<'a, I: DocIndexLike> XPathBindings for XsltBindings<'a, I> {
         }
         None
     }
+    #[cfg(feature = "xsd")]
+    fn instance_of_user_type(
+        &self, target_ns: &str, target_local: &str, value_type: Option<(&str, &str)>,
+    ) -> Option<bool> {
+        // `instance of` is decided by the value's declared type.  A value
+        // is an instance of the target user type iff its declared type is
+        // the target itself or a member of the target union.
+        use sup_xml_core::xsd::{types::Variety, QName as XQName, TypeRef};
+        // Only answer YES, and only for a value with a declared user type:
+        // its declared type is the target itself, or a member of the
+        // target union.  Anything else falls through to the ordinary
+        // sequence-type check, so this can fix but never regress.
+        let (vns, vlocal) = value_type?;
+        let qn = XQName::new((!target_ns.is_empty()).then_some(target_ns), target_local);
+        for schema in &self.style.schemas {
+            let Some(TypeRef::Simple(target_st)) = schema.type_def(&qn) else { continue };
+            if vns == target_ns && vlocal == target_local { return Some(true); }
+            if let Variety::Union { members } = &target_st.variety {
+                let m = members.iter().any(|m| m.name.as_deref()
+                    .map_or(false, |n| simple_type_name_is(n, vns, vlocal)));
+                if m { return Some(true); }
+            }
+            return None;
+        }
+        None
+    }
     fn call_function_in(
         &self, ns_uri: &str, name: &str, args: Vec<Value>,
         xpath_context_node: NodeId,
@@ -467,7 +493,7 @@ impl<'a, I: DocIndexLike> XPathBindings for XsltBindings<'a, I> {
                 if let Some(TypeRef::Simple(st)) = schema.type_def(&qn) {
                     let s = sup_xml_core::xpath::eval::value_to_string(&args[0], self.idx);
                     return Some(match st.validate(&s) {
-                        Ok(xv) => Ok(xsd_value_to_xpath(xv, &s)),
+                        Ok(xv) => Ok(xsd_value_to_xpath(xv, &s, Some((ns_uri, name)))),
                         Err(_) => Err(sup_xml_core::xpath::eval::xpath_err(format!(
                             "cannot construct {{{ns_uri}}}{name} from '{s}' (FORG0001)"))
                             .with_xpath_code("FORG0001")),
@@ -491,6 +517,19 @@ impl<'a, I: DocIndexLike> XPathBindings for XsltBindings<'a, I> {
         // xslt stays `forbid(unsafe_code)`.
         sup_xml_tree::dom::Document::node_string_value_by_ptr(p)
     }
+}
+
+/// Does a schema simple type's stored name (`{ns}local`, a bare `local`,
+/// or an `UNRESOLVED:` marker) denote the expanded name `(ns, local)`?
+#[cfg(feature = "xsd")]
+fn simple_type_name_is(name: &str, ns: &str, local: &str) -> bool {
+    let name = name.strip_prefix("UNRESOLVED:").unwrap_or(name);
+    if let Some(rest) = name.strip_prefix('{') {
+        if let Some(end) = rest.find('}') {
+            return &rest[..end] == ns && &rest[end + 1..] == local;
+        }
+    }
+    name == local
 }
 
 /// Is a value of the given simple type castable from a source value?  An
@@ -559,12 +598,16 @@ fn cast_primitive_allowed(
 /// constructor / cast.  Date-time and other structured values keep their
 /// canonical lexical form as a string atomic for now.
 #[cfg(feature = "xsd")]
-fn xsd_value_to_xpath(v: sup_xml_core::xsd::Value, input: &str) -> Value {
+fn xsd_value_to_xpath(v: sup_xml_core::xsd::Value, input: &str, user_type: Option<(&str, &str)>) -> Value {
     use sup_xml_core::xsd::Value as X;
     use sup_xml_core::xpath::eval::TypedAtomic;
     use sup_xml_core::rust_decimal::prelude::ToPrimitive;
-    let typed = |kind: &'static str, lexical: String, numeric: Option<f64>, boolean: Option<bool>|
-        Value::Typed(Box::new(TypedAtomic { kind, lexical, numeric, boolean }));
+    let typed = |kind: &'static str, lexical: String, numeric: Option<f64>, boolean: Option<bool>| {
+        // Tag the result with the constructed user type so
+        // `instance of my:type` (decided by declared type) can recognise it.
+        let user_type = user_type.map(|(ns, l)| Box::new((ns.to_string(), l.to_string())));
+        Value::Typed(Box::new(TypedAtomic { kind, lexical, numeric, boolean, user_type }))
+    };
     // Date/time and structured values keep the (whitespace-collapsed)
     // input lexical — a valid lexical for the type, so it re-validates.
     let lex = || input.split_whitespace().collect::<Vec<_>>().join(" ");
