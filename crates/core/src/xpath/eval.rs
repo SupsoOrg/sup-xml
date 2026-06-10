@@ -679,6 +679,13 @@ pub trait XPathBindings {
     ) -> Option<Result<Value>> {
         self.call_function(ns_uri, name, args)
     }
+    /// Is a function with this expanded name and arity available to call —
+    /// a registered user `xsl:function` or extension?  Lets
+    /// `fn:function-lookup` return the empty sequence for unknown names
+    /// without invoking anything.  Default `false`.
+    fn function_available_in(&self, _ns_uri: &str, _name: &str, _arity: usize) -> bool {
+        false
+    }
     /// Look up an XPath variable's value.  `None` means undefined,
     /// which surfaces as an XPath error.
     fn variable(&self, _name: &str) -> Option<Value> { None }
@@ -2016,6 +2023,9 @@ impl<'p> XPathBindings for ClosureBindings<'p> {
     fn call_function_in(&self, ns: &str, n: &str, a: Vec<Value>, cn: NodeId) -> Option<Result<Value>> {
         self.base.call_function_in(ns, n, a, cn)
     }
+    fn function_available_in(&self, ns: &str, n: &str, a: usize) -> bool {
+        self.base.function_available_in(ns, n, a)
+    }
     fn xpath_version_2_or_later(&self) -> bool { self.base.xpath_version_2_or_later() }
     fn load_document(&self, u: &str, b: Option<&str>) -> Option<Result<Vec<ForeignNodePtr>>> {
         self.base.load_document(u, b)
@@ -2127,10 +2137,28 @@ fn call_function_item<I: DocIndexLike>(
             };
             eval_expr(body, &inner, idx)
         }
-        FunctionItem::Named { name, arity, .. } => {
+        FunctionItem::Named { name, ns, arity } => {
             if args.len() != *arity {
                 return Err(xpath_err(format!(
                     "function {name}#{arity} called with {} argument(s)", args.len())));
+            }
+            // A statically-resolved non-default-function namespace lets a
+            // `name#arity` reference to a user `xsl:function` or extension
+            // dispatch even when the call site binds no prefix for that
+            // namespace (the value `fn:function-lookup` produces).  Try the
+            // user-function hook and EXSLT by (namespace, local) directly;
+            // anything unmatched falls through to ordinary lexical dispatch
+            // (XSD constructors, built-ins, and the unknown-function error).
+            if !ns.is_empty() && ns.as_str() != FN_NAMESPACE {
+                let local = name.rsplit(':').next().unwrap_or(name);
+                if let Some(r) =
+                    ctx.bindings.call_function_in(ns, local, args.clone(), ctx.context_node)
+                {
+                    return r;
+                }
+                if let Some(r) = super::exslt::dispatch(ns, local, args.clone(), idx) {
+                    return r;
+                }
             }
             // Bind the values as synthetic variables and re-enter
             // function dispatch with variable-reference arguments.
@@ -2186,6 +2214,9 @@ impl<'p> XPathBindings for ScopedBindings<'p> {
         xpath_context_node: NodeId,
     ) -> Option<std::result::Result<Value, crate::error::XmlError>> {
         self.parent.call_function_in(ns_uri, name, args, xpath_context_node)
+    }
+    fn function_available_in(&self, ns: &str, n: &str, a: usize) -> bool {
+        self.parent.function_available_in(ns, n, a)
     }
     fn foreign_string_value(
         &self, p: crate::xpath::eval::ForeignNodePtr,
@@ -2259,6 +2290,9 @@ impl<'p> XPathBindings for ErrBindings<'p> {
         xpath_context_node: NodeId,
     ) -> Option<std::result::Result<Value, crate::error::XmlError>> {
         self.parent.call_function_in(ns_uri, name, args, xpath_context_node)
+    }
+    fn function_available_in(&self, ns: &str, n: &str, a: usize) -> bool {
+        self.parent.function_available_in(ns, n, a)
     }
     fn foreign_string_value(
         &self, p: crate::xpath::eval::ForeignNodePtr,
@@ -5076,6 +5110,36 @@ fn eval_hof_function<I: DocIndexLike>(
             }
             _ => Value::NodeSet(Vec::new()),
         }),
+        // fn:function-lookup($name as xs:QName, $arity as xs:integer) — a
+        // function item for the named function, or the empty sequence when
+        // no such function is available in scope.
+        "function-lookup" if args.len() == 2 => {
+            let qname = value_to_string(&args[0], idx);
+            let arity = value_to_number(&args[1], idx) as usize;
+            // QName string-value is Clark `{uri}local`, lexical
+            // `prefix:local`, or a bare local in the default function
+            // namespace.
+            let (ns, local) = if let Some(rest) = qname.strip_prefix('{') {
+                rest.split_once('}')
+                    .map(|(u, l)| (u.to_string(), l.to_string()))
+                    .unwrap_or_else(|| (String::new(), qname.clone()))
+            } else if let Some((prefix, l)) = qname.split_once(':') {
+                (resolve_prefix_or_implicit(ctx.bindings, prefix).unwrap_or_default(),
+                 l.to_string())
+            } else {
+                (FN_NAMESPACE.to_string(), qname.clone())
+            };
+            let available = if ns.is_empty() || ns.as_str() == FN_NAMESPACE {
+                xpath_function_available(&local, ctx)
+            } else {
+                ctx.bindings.function_available_in(&ns, &local, arity)
+            };
+            if available {
+                Ok(Value::Function(Box::new(FunctionItem::Named { name: local, ns, arity })))
+            } else {
+                Ok(Value::NodeSet(Vec::new()))
+            }
+        }
         _ => return None,
     };
     Some(res)

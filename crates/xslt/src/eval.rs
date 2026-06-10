@@ -344,6 +344,14 @@ impl<'a, I: DocIndexLike> XPathBindings for XsltBindings<'a, I> {
         // should route through `call_function_in` instead.
         self.call_function_in(ns_uri, name, args, self.xslt_context_node)
     }
+    fn function_available_in(&self, ns_uri: &str, name: &str, arity: usize) -> bool {
+        // A registered user `xsl:function` with this expanded name and
+        // arity (XSLT 2.0 function names are always namespaced).  Built-in
+        // and EXSLT availability is decided by the core engine.
+        self.user_functions.unwrap_or(&[]).iter().any(|uf| {
+            uf.name.uri == ns_uri && uf.name.local == name && uf.params.len() == arity
+        })
+    }
     fn call_function_in(
         &self, ns_uri: &str, name: &str, args: Vec<Value>,
         xpath_context_node: NodeId,
