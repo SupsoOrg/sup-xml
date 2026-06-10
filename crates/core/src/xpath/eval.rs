@@ -498,6 +498,8 @@ pub enum FunctionItem {
     /// the defining scope (static scoping).
     Inline {
         params:  Vec<String>,
+        /// Declared signature, for function subtyping in `instance of`.
+        sig:     Box<crate::xpath::ast::FunctionSig>,
         body:    crate::xpath::ast::Expr,
         closure: Vec<(String, Value)>,
     },
@@ -537,6 +539,7 @@ impl FunctionItem {
     pub fn declared_sig(&self) -> Option<&crate::xpath::ast::FunctionSig> {
         match self {
             FunctionItem::Named { sig, .. } => sig.as_deref(),
+            FunctionItem::Inline { sig, .. } => Some(sig),
             _ => None,
         }
     }
@@ -1508,7 +1511,7 @@ pub fn eval_expr<I: DocIndexLike>(expr: &Expr, ctx: &EvalCtx<'_>, idx: &I) -> Re
                 .unwrap_or(Value::NodeSet(vec![ctx.context_node]));
             eval_lookup(&ctx_item, key, ctx, idx)
         }
-        Expr::InlineFunction { params, body } => {
+        Expr::InlineFunction { params, sig, body } => {
             // Capture the free variables of the body (minus the
             // parameters) from the defining scope — static scoping.
             let mut refs = Vec::new();
@@ -1522,6 +1525,7 @@ pub fn eval_expr<I: DocIndexLike>(expr: &Expr, ctx: &EvalCtx<'_>, idx: &I) -> Re
             }
             Ok(Value::Function(Box::new(FunctionItem::Inline {
                 params: params.clone(),
+                sig: sig.clone(),
                 body: (**body).clone(),
                 closure,
             })))
@@ -2156,7 +2160,7 @@ fn call_function_item<I: DocIndexLike>(
     fi: &FunctionItem, args: Vec<Value>, ctx: &EvalCtx<'_>, idx: &I,
 ) -> Result<Value> {
     match fi {
-        FunctionItem::Inline { params, body, closure } => {
+        FunctionItem::Inline { params, body, closure, .. } => {
             if args.len() != params.len() {
                 return Err(xpath_err(format!(
                     "inline function expects {} argument(s), got {}",

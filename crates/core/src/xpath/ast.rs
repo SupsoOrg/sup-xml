@@ -263,7 +263,13 @@ pub enum Expr {
     /// XPath 3.1 §3.12 inline function `function($p, …) { body }`.
     /// Parameter types and the return type are accepted but not
     /// enforced; only the parameter names matter for binding.
-    InlineFunction { params: Vec<String>, body: Box<Expr> },
+    InlineFunction {
+        params: Vec<String>,
+        /// Declared signature (parameter and return types, `item()*` where
+        /// omitted) — used for function subtyping in `instance of`.
+        sig:    Box<FunctionSig>,
+        body:   Box<Expr>,
+    },
     /// XPath 3.1 §3.1.6 named function reference `name#arity`.
     NamedFunctionRef { name: String, arity: usize },
     /// XPath 3.1 §3.2.2 dynamic function call `F(args)` where `F` is

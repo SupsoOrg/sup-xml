@@ -1995,7 +1995,7 @@ fn collect_variable_refs(e: &sup_xml_core::xpath::ast::Expr, out: &mut Vec<Strin
         // An inline function's parameters are locally bound; references
         // to them inside the body are not dependencies of the enclosing
         // scope, so they are excluded from the collected set.
-        Expr::InlineFunction { params, body } => {
+        Expr::InlineFunction { params, body, .. } => {
             let mut inner = Vec::new();
             collect_variable_refs(body, &mut inner);
             for v in inner {

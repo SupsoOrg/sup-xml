@@ -1796,9 +1796,12 @@ impl Parser {
     /// and return-type annotations are accepted and discarded — the
     /// dynamic evaluator is untyped, so they impose no runtime check.
     fn parse_inline_function(&mut self) -> Result<Expr> {
+        use crate::xpath::ast::{FunctionSig, ItemType, Occurrence, SequenceType};
+        let item_star = || SequenceType { item: ItemType::Any, occurrence: Occurrence::ZeroOrMore };
         self.consume(); // function
         self.expect(&Token::LParen)?;
         let mut params = Vec::new();
+        let mut param_types = Vec::new();
         if self.peek() != &Token::RParen {
             loop {
                 self.expect(&Token::Dollar)?;
@@ -1808,19 +1811,25 @@ impl Parser {
                         "expected inline-function parameter name, got {t:?}"))),
                 };
                 params.push(name);
-                if is_name_tok(self.peek(), "as") {
+                // An omitted parameter type defaults to `item()*`.
+                let pt = if is_name_tok(self.peek(), "as") {
                     self.consume();
-                    let _ = self.parse_sequence_type()?;
-                }
+                    self.parse_sequence_type()?
+                } else {
+                    item_star()
+                };
+                param_types.push(pt);
                 if self.peek() == &Token::Comma { self.consume(); continue; }
                 break;
             }
         }
         self.expect(&Token::RParen)?;
-        if is_name_tok(self.peek(), "as") {
+        let ret = if is_name_tok(self.peek(), "as") {
             self.consume();
-            let _ = self.parse_sequence_type()?;
-        }
+            self.parse_sequence_type()?
+        } else {
+            item_star()
+        };
         self.expect(&Token::LBrace)?;
         self.enter()?;
         let body = if self.peek() == &Token::RBrace {
@@ -1830,7 +1839,11 @@ impl Parser {
         };
         self.expect(&Token::RBrace)?;
         self.leave();
-        Ok(Expr::InlineFunction { params, body: Box::new(body) })
+        Ok(Expr::InlineFunction {
+            params,
+            sig: Box::new(FunctionSig { params: param_types, ret }),
+            body: Box::new(body),
+        })
     }
 
     /// XPath 3.1 §3.11.2 `array { Expr }` — curly form; the contained
