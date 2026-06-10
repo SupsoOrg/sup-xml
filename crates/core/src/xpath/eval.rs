@@ -721,7 +721,9 @@ pub trait XPathBindings {
     /// name.  `Some(bool)` when the type is known (true = castable);
     /// `None` when no schema is in scope or the type is unknown, in which
     /// case the caller treats it as an unrecognized type as before.
-    fn castable_as_user_type(&self, _ns_uri: &str, _local: &str, _value: &str) -> Option<bool> {
+    fn castable_as_user_type(
+        &self, _ns_uri: &str, _local: &str, _value: &str, _source_kind: Option<&str>,
+    ) -> Option<bool> {
         None
     }
     /// Schema-aware processing: cast a lexical value to a user-defined
@@ -1629,8 +1631,26 @@ pub fn eval_expr<I: DocIndexLike>(expr: &Expr, ctx: &EvalCtx<'_>, idx: &I) -> Re
             if let crate::xpath::ast::ItemType::Atomic(name) = &st.item {
                 if let Some((prefix, local)) = name.split_once(':') {
                     if let Some(uri) = resolve_prefix_or_implicit(ctx.bindings, prefix) {
+                        // An empty sequence is castable only to an optional
+                        // target type (`T?`), never a required single one.
+                        if sequence_len(&v) == 0 {
+                            return Ok(Value::Boolean(matches!(st.occurrence,
+                                crate::xpath::ast::Occurrence::Optional
+                                | crate::xpath::ast::Occurrence::ZeroOrMore)));
+                        }
+                        // The atomic type a typed source carries drives the
+                        // XSD cast-compatibility check; an untyped / string /
+                        // node source (`None`) just validates the lexical.
+                        let source_kind = match &v {
+                            Value::Typed(t) => Some(t.kind),
+                            Value::Number(n) => Some(n.kind()),
+                            Value::Boolean(_) => Some("boolean"),
+                            _ => None,
+                        };
                         let s = value_to_string(&v, idx);
-                        if let Some(ok) = ctx.bindings.castable_as_user_type(&uri, local, &s) {
+                        if let Some(ok) =
+                            ctx.bindings.castable_as_user_type(&uri, local, &s, source_kind)
+                        {
                             return Ok(Value::Boolean(ok));
                         }
                     }
@@ -2127,8 +2147,8 @@ impl<'p> XPathBindings for ClosureBindings<'p> {
         -> Option<crate::xpath::ast::FunctionSig> {
         self.base.function_signature_in(ns, n, a)
     }
-    fn castable_as_user_type(&self, ns: &str, l: &str, v: &str) -> Option<bool> {
-        self.base.castable_as_user_type(ns, l, v)
+    fn castable_as_user_type(&self, ns: &str, l: &str, v: &str, sk: Option<&str>) -> Option<bool> {
+        self.base.castable_as_user_type(ns, l, v, sk)
     }
     fn cast_to_user_type(&self, ns: &str, l: &str, v: &str) -> Option<Result<Value>> {
         self.base.cast_to_user_type(ns, l, v)
@@ -2329,8 +2349,8 @@ impl<'p> XPathBindings for ScopedBindings<'p> {
         -> Option<crate::xpath::ast::FunctionSig> {
         self.parent.function_signature_in(ns, n, a)
     }
-    fn castable_as_user_type(&self, ns: &str, l: &str, v: &str) -> Option<bool> {
-        self.parent.castable_as_user_type(ns, l, v)
+    fn castable_as_user_type(&self, ns: &str, l: &str, v: &str, sk: Option<&str>) -> Option<bool> {
+        self.parent.castable_as_user_type(ns, l, v, sk)
     }
     fn cast_to_user_type(&self, ns: &str, l: &str, v: &str) -> Option<Result<Value>> {
         self.parent.cast_to_user_type(ns, l, v)
@@ -2415,8 +2435,8 @@ impl<'p> XPathBindings for ErrBindings<'p> {
         -> Option<crate::xpath::ast::FunctionSig> {
         self.parent.function_signature_in(ns, n, a)
     }
-    fn castable_as_user_type(&self, ns: &str, l: &str, v: &str) -> Option<bool> {
-        self.parent.castable_as_user_type(ns, l, v)
+    fn castable_as_user_type(&self, ns: &str, l: &str, v: &str, sk: Option<&str>) -> Option<bool> {
+        self.parent.castable_as_user_type(ns, l, v, sk)
     }
     fn cast_to_user_type(&self, ns: &str, l: &str, v: &str) -> Option<Result<Value>> {
         self.parent.cast_to_user_type(ns, l, v)

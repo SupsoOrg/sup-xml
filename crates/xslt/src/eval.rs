@@ -369,14 +369,15 @@ impl<'a, I: DocIndexLike> XPathBindings for XsltBindings<'a, I> {
         Some(FunctionSig { params, ret })
     }
     #[cfg(feature = "xsd")]
-    fn castable_as_user_type(&self, ns_uri: &str, local: &str, value: &str) -> Option<bool> {
-        // Resolve the expanded type name against the imported schemas; a
-        // user simple type is castable iff the value validates against it.
+    fn castable_as_user_type(
+        &self, ns_uri: &str, local: &str, value: &str, source_kind: Option<&str>,
+    ) -> Option<bool> {
+        // Resolve the expanded type name against the imported schemas.
         use sup_xml_core::xsd::{QName as XQName, TypeRef};
         let qn = XQName::new((!ns_uri.is_empty()).then_some(ns_uri), local);
         for schema in &self.style.schemas {
             match schema.type_def(&qn) {
-                Some(TypeRef::Simple(st)) => return Some(st.validate(value).is_ok()),
+                Some(TypeRef::Simple(st)) => return Some(simple_type_castable(st, value, source_kind)),
                 // A complex type is not a cast target.
                 Some(TypeRef::Complex(_)) => return Some(false),
                 None => {}
@@ -489,6 +490,62 @@ impl<'a, I: DocIndexLike> XPathBindings for XsltBindings<'a, I> {
         // Tree-crate accessor encapsulates the unsafe deref —
         // xslt stays `forbid(unsafe_code)`.
         sup_xml_tree::dom::Document::node_string_value_by_ptr(p)
+    }
+}
+
+/// Is a value of the given simple type castable from a source value?  An
+/// untyped / string source (`source_kind` = `None`) just needs the lexical
+/// to validate; a typed source additionally requires the XSD cast table to
+/// permit the conversion (so `xs:gYear("2001")` is not castable to a
+/// numeric type even though "2001" is a valid integer lexical).
+#[cfg(feature = "xsd")]
+fn simple_type_castable(
+    st: &std::sync::Arc<sup_xml_core::xsd::SimpleType>, value: &str, source_kind: Option<&str>,
+) -> bool {
+    let Some(kind) = source_kind else { return st.validate(value).is_ok(); };
+    let src = sup_xml_core::xsd::BuiltinType::from_name(kind)
+        .unwrap_or(sup_xml_core::xsd::BuiltinType::String);
+    castable_typed(st, value, src)
+}
+
+#[cfg(feature = "xsd")]
+fn castable_typed(
+    st: &std::sync::Arc<sup_xml_core::xsd::SimpleType>, value: &str,
+    src: sup_xml_core::xsd::BuiltinType,
+) -> bool {
+    use sup_xml_core::xsd::types::Variety;
+    match &st.variety {
+        Variety::Union { members } => members.iter().any(|m| castable_typed(m, value, src)),
+        Variety::List { .. } => false,
+        Variety::Atomic => cast_primitive_allowed(src, st.builtin) && st.validate(value).is_ok(),
+    }
+}
+
+/// The XSD 1.0 §17.1 cast-compatibility table at primitive granularity:
+/// can a value of primitive `src` be cast to primitive `target`?
+#[cfg(feature = "xsd")]
+fn cast_primitive_allowed(
+    src: sup_xml_core::xsd::BuiltinType, target: sup_xml_core::xsd::BuiltinType,
+) -> bool {
+    use sup_xml_core::xsd::BuiltinType::*;
+    let s = src.primitive();
+    let t = target.primitive();
+    // String / untyped-atomic sources cast to anything whose lexical
+    // validates; every atomic casts to the string family / untyped.
+    if matches!(s, String | AnySimpleType | AnyAtomicType) { return true; }
+    if matches!(t, String | AnySimpleType | AnyAtomicType) { return true; }
+    if s == t { return true; }
+    let numeric = |b| matches!(b, Decimal | Float | Double);
+    if (numeric(s) || s == Boolean) && (numeric(t) || t == Boolean) { return true; }
+    if matches!(s, Duration) && matches!(t, Duration) { return true; }
+    if matches!(s, HexBinary | Base64Binary) && matches!(t, HexBinary | Base64Binary) { return true; }
+    // Only xs:dateTime / xs:date are cast sources for the gregorian and
+    // time component types; the gregorian types cast only to themselves
+    // (and the string family handled above).
+    match s {
+        DateTime => matches!(t, DateTime | Date | Time | GYearMonth | GYear | GMonthDay | GMonth | GDay),
+        Date     => matches!(t, Date | DateTime | GYearMonth | GYear | GMonthDay | GMonth | GDay),
+        _ => false,
     }
 }
 
