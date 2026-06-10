@@ -120,11 +120,14 @@ fn stream_available_function_is_unsupported() {
 /// `cast as xs:date`, etc.) and source documents get validated +
 /// PSVI-annotated as they're loaded.
 ///
-/// Our engine doesn't process `<xsl:import-schema>` at all — it lands
-/// in the `Unsupported` AST bin.  Stylesheets that depend on it
-/// silently degrade to untyped behavior.
+/// With a loader that resolves the schema, the engine now honors
+/// `<xsl:import-schema>` (it compiles the schema, validates the source,
+/// and types source nodes — see `tests/schema_aware.rs`).  This case
+/// pins the *no-loader* fallback: the `schema-location` can't be
+/// fetched, so the import is silently skipped and the body still runs
+/// against an untyped source rather than failing to compile.
 #[test]
-fn import_schema_is_unsupported() {
+fn import_schema_without_loader_degrades_to_untyped() {
     let xsl = r#"<xsl:stylesheet version="2.0"
                                 xmlns:xsl="http://www.w3.org/1999/XSL/Transform"
                                 xmlns:xs="http://www.w3.org/2001/XMLSchema">
