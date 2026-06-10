@@ -755,6 +755,16 @@ pub trait XPathBindings {
     ) -> Option<bool> {
         None
     }
+    /// Schema-aware processing: the expanded name `(ns, local)` of the
+    /// schema type that governs the source node `node_id`, as recorded
+    /// by validating the source document against the in-scope schema
+    /// (the post-schema-validation infoset).  `None` when the source
+    /// wasn't schema-validated, the node has no annotation, or the
+    /// governing type is anonymous (no name to report).  Callers treat
+    /// `None` as "untyped" — today's behavior.
+    fn node_schema_type(&self, _node_id: NodeId) -> Option<(String, String)> {
+        None
+    }
     /// Look up an XPath variable's value.  `None` means undefined,
     /// which surfaces as an XPath error.
     fn variable(&self, _name: &str) -> Option<Value> { None }
@@ -2210,6 +2220,9 @@ impl<'p> XPathBindings for ClosureBindings<'p> {
     fn cast_to_user_type(&self, ns: &str, l: &str, v: &str) -> Option<Result<Value>> {
         self.base.cast_to_user_type(ns, l, v)
     }
+    fn node_schema_type(&self, id: NodeId) -> Option<(String, String)> {
+        self.base.node_schema_type(id)
+    }
     fn xpath_version_2_or_later(&self) -> bool { self.base.xpath_version_2_or_later() }
     fn load_document(&self, u: &str, b: Option<&str>) -> Option<Result<Vec<ForeignNodePtr>>> {
         self.base.load_document(u, b)
@@ -2415,6 +2428,9 @@ impl<'p> XPathBindings for ScopedBindings<'p> {
     fn cast_to_user_type(&self, ns: &str, l: &str, v: &str) -> Option<Result<Value>> {
         self.parent.cast_to_user_type(ns, l, v)
     }
+    fn node_schema_type(&self, id: NodeId) -> Option<(String, String)> {
+        self.parent.node_schema_type(id)
+    }
     fn foreign_string_value(
         &self, p: crate::xpath::eval::ForeignNodePtr,
     ) -> String {
@@ -2503,6 +2519,9 @@ impl<'p> XPathBindings for ErrBindings<'p> {
     }
     fn cast_to_user_type(&self, ns: &str, l: &str, v: &str) -> Option<Result<Value>> {
         self.parent.cast_to_user_type(ns, l, v)
+    }
+    fn node_schema_type(&self, id: NodeId) -> Option<(String, String)> {
+        self.parent.node_schema_type(id)
     }
     fn foreign_string_value(
         &self, p: crate::xpath::eval::ForeignNodePtr,

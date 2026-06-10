@@ -35,6 +35,100 @@ use crate::result_tree::{ResultBuilder, ResultNode, ResultTree};
 
 type Result<T> = std::result::Result<T, XsltError>;
 
+/// Per-source-node schema type annotations for one transform — the
+/// post-schema-validation infoset.  Built at apply time by validating
+/// the source document against the stylesheet's imported schemas; maps
+/// each source node's `NodeId` to the schema type that governed it.
+/// Consulted by typed atomization and `instance of element(*, T)`.
+#[cfg(feature = "xsd")]
+pub(crate) struct NodeType {
+    /// The schema type that governed this node, retained for typed
+    /// atomization (the type's primitive + facets drive `data()`).
+    #[allow(dead_code)]
+    pub type_ref: sup_xml_core::xsd::TypeRef,
+    /// Expanded name `(ns, local)` of the governing type when it is a
+    /// named global type; `None` for anonymous (inline) types, which
+    /// have no name to report through `node_schema_type`.
+    pub name: Option<(String, String)>,
+}
+
+#[cfg(feature = "xsd")]
+#[derive(Default)]
+pub(crate) struct SourceTypes {
+    by_node: HashMap<NodeId, NodeType>,
+}
+
+/// Placeholder when the `xsd` feature is off — schema-aware processing
+/// is compiled out, so the table is always absent.
+#[cfg(not(feature = "xsd"))]
+#[derive(Default)]
+pub(crate) struct SourceTypes;
+
+/// Validate `source_doc` against each imported schema and collect the
+/// governing type of every source element into a `NodeId`-keyed table.
+///
+/// Returns `None` when no schema is imported or the stylesheet declared
+/// `input-type-annotations="strip"` (XSLT 2.0 §3.6 — the input is then
+/// untyped).  Validation is best-effort: errors are discarded here so a
+/// partially-valid source still types whatever did validate; surfacing
+/// validation failures is `xsl:validate`'s job.
+#[cfg(feature = "xsd")]
+fn build_source_types(
+    style: &StylesheetAst, source_doc: &Document, idx: &DocIndex,
+) -> Option<SourceTypes> {
+    if style.schemas.is_empty()
+        || style.input_type_annotations.iter().any(|v| v == "strip")
+    {
+        return None;
+    }
+    let mut by_node: HashMap<NodeId, NodeType> = HashMap::new();
+    for schema in &style.schemas {
+        let (_res, psvi) = schema.validate_doc_typed(source_doc);
+        if psvi.is_empty() { continue; }
+        for (id, inode) in idx.nodes.iter().enumerate() {
+            let INodeKind::Element(n) = &inode.kind else { continue };
+            let std::collections::hash_map::Entry::Vacant(e) = by_node.entry(id) else { continue };
+            if let Some(ty) = psvi.governing_type(n) {
+                e.insert(NodeType {
+                    name: registered_type_name(ty, schema),
+                    type_ref: ty.clone(),
+                });
+            }
+        }
+    }
+    (!by_node.is_empty()).then_some(SourceTypes { by_node })
+}
+
+/// Expanded name `(ns, local)` of a governing type, recovered by
+/// matching it against the schema's registered global types by Arc
+/// identity.  Returns `None` for anonymous (inline) types, which aren't
+/// in the registry — so `node_schema_type` reports them as untyped
+/// rather than guessing a name.
+#[cfg(feature = "xsd")]
+fn registered_type_name(
+    ty: &sup_xml_core::xsd::TypeRef, schema: &sup_xml_core::xsd::Schema,
+) -> Option<(String, String)> {
+    use sup_xml_core::xsd::TypeRef;
+    schema.types().find_map(|(qn, registered)| {
+        let same = match (ty, registered) {
+            (TypeRef::Simple(a),  TypeRef::Simple(b))  => std::sync::Arc::ptr_eq(a, b),
+            (TypeRef::Complex(a), TypeRef::Complex(b)) => std::sync::Arc::ptr_eq(a, b),
+            _ => false,
+        };
+        same.then(|| (
+            qn.namespace.as_deref().unwrap_or("").to_string(),
+            qn.local.to_string(),
+        ))
+    })
+}
+
+#[cfg(not(feature = "xsd"))]
+fn build_source_types(
+    _style: &StylesheetAst, _source_doc: &Document, _idx: &DocIndex,
+) -> Option<SourceTypes> {
+    None
+}
+
 // ── XPath bindings bridge ─────────────────────────────────────────
 
 /// Bridge between the XSLT evaluator's runtime state (variables,
@@ -122,6 +216,11 @@ struct XsltBindings<'a, I: DocIndexLike> {
     /// xsl:document instructions that carried xml:base — see
     /// [`EvalState::rtf_base_uris`].
     rtf_base_uris:        &'a std::cell::RefCell<HashMap<NodeId, String>>,
+    /// Post-schema-validation type annotations over the source tree —
+    /// `Some` only when a schema was imported and the source validated.
+    /// Powers `node_schema_type`.  See [`SourceTypes`].
+    #[cfg_attr(not(feature = "xsd"), allow(dead_code))]
+    source_types:         Option<&'a SourceTypes>,
 }
 
 /// Does the stylesheet's `version=` attribute select XSLT 3.0 or
@@ -410,6 +509,10 @@ impl<'a, I: DocIndexLike> XPathBindings for XsltBindings<'a, I> {
             return None;
         }
         None
+    }
+    #[cfg(feature = "xsd")]
+    fn node_schema_type(&self, node_id: NodeId) -> Option<(String, String)> {
+        self.source_types?.by_node.get(&node_id)?.name.clone()
     }
     fn call_function_in(
         &self, ns_uri: &str, name: &str, args: Vec<Value>,
@@ -1767,6 +1870,11 @@ struct EvalState<'a> {
     /// this state constructs so XPath operators observe the same
     /// 1.0/2.0/3.0 distinctions the [`XsltBindings`] declares.
     static_ctx: StaticContext,
+    /// Post-schema-validation type annotations over the source tree;
+    /// `None` outside schema-aware processing.  Threaded into every
+    /// [`XsltBindings`] this state constructs so `node_schema_type`
+    /// can answer per-node type queries.  See [`SourceTypes`].
+    source_types: Option<&'a SourceTypes>,
 }
 
 /// Conservative ceiling on template-invocation depth.  Real-world
@@ -1838,6 +1946,7 @@ impl<'a> EvalState<'a> {
             loader_base:          self.loader_base,
             dyn_doc_cache:        self.dyn_doc_cache,
             rtf_base_uris:        self.rtf_base_uris,
+            source_types:         self.source_types,
         }
     }
 
@@ -2109,6 +2218,13 @@ pub fn apply_stylesheet_full_with_params_and_initial(
     // value-of / @* selectors.
     apply_strip_space(style, &mut idx);
 
+    // Schema-aware: when the stylesheet imports a schema (and didn't
+    // ask to strip input type annotations), validate the source against
+    // it to produce the post-schema-validation infoset — per-node
+    // governing types consulted by typed atomization and
+    // `instance of element(*, T)`.
+    let source_types = build_source_types(style, source_doc, &idx);
+
     let namespaces = NamespaceContext::from_stylesheet(style);
     // XSLT 1.0 §12.4 — `unparsed-entity-uri()` returns the entity's
     // SYSTEM identifier resolved against the base URI of its
@@ -2213,6 +2329,7 @@ pub fn apply_stylesheet_full_with_params_and_initial(
         dyn_doc_cache: Some(&dyn_doc_cache),
         rtf_base_uris: &rtf_base_uris,
         static_ctx: static_ctx_for_version(&style.version),
+        source_types: source_types.as_ref(),
     };
 
     // Stylesheet global variables / params (very partial — proper
@@ -6080,6 +6197,7 @@ fn build_rtf_nodes_no_merge(
         principal_buf: None,
         unparsed_entities: state.unparsed_entities.clone(),
         source_doc: state.source_doc,
+        source_types: state.source_types,
         apply_imports_ctx: state.apply_imports_ctx.clone(),
         user_exts: state.user_exts,
         sequence_sinks: std::mem::take(&mut state.sequence_sinks),
@@ -7016,6 +7134,7 @@ fn build_rtf_nodes(
         principal_buf: None,
         unparsed_entities: state.unparsed_entities.clone(),
         source_doc: state.source_doc,
+        source_types: state.source_types,
         apply_imports_ctx: state.apply_imports_ctx.clone(),
         user_exts: state.user_exts,
         sequence_sinks: std::mem::take(&mut state.sequence_sinks),
@@ -7415,6 +7534,7 @@ fn stringify_into_string(
         principal_buf: None,
         unparsed_entities: state.unparsed_entities.clone(),
         source_doc: state.source_doc,
+        source_types: state.source_types,
         apply_imports_ctx: state.apply_imports_ctx.clone(),
         user_exts: state.user_exts,
         sequence_sinks: std::mem::take(&mut state.sequence_sinks),
@@ -8029,6 +8149,7 @@ fn sort_items_for_iter(
     let loader_base = state.loader_base;
     let dyn_doc_cache = state.dyn_doc_cache;
     let rtf_base_uris = state.rtf_base_uris;
+    let source_types = state.source_types;
     crate::sort::sort_items(items, sorts, idx, |expr, item, p, s| {
         let bindings = XsltBindings {
             variables, namespaces, keys,
@@ -8038,6 +8159,7 @@ fn sort_items_for_iter(
             regex_groups, user_functions, unparsed_texts, xslt_3_0,
             xslt_version, static_base_uri,
             loader, loader_base, dyn_doc_cache, rtf_base_uris,
+            source_types,
         };
         let ctx = EvalCtx { context_node: ctx_node, pos: p, size: s, bindings: &bindings, static_ctx: &sc };
         sup_xml_core::xpath::eval::with_atomic_context_item(
@@ -8079,6 +8201,7 @@ fn sort_group_indices(
     let loader_base = state.loader_base;
     let dyn_doc_cache = state.dyn_doc_cache;
     let rtf_base_uris = state.rtf_base_uris;
+    let source_types = state.source_types;
     // `sort_nodes` calls the key evaluator with `p` = the group's
     // 1-based position in unsorted order, so `groups[p - 1]` is the
     // group whose accessors must be in scope.  Group leader nodes are
@@ -8100,6 +8223,7 @@ fn sort_group_indices(
             user_functions, unparsed_texts, xslt_3_0,
             xslt_version, static_base_uri,
             loader, loader_base, dyn_doc_cache, rtf_base_uris,
+            source_types,
         };
         let ctx = EvalCtx { context_node: n, pos: p, size: s, bindings: &bindings, static_ctx: &sc };
         eval_expr(expr, &ctx, idx).map_err(XsltError::from)
@@ -8232,6 +8356,7 @@ fn with_sort_key_eval<R>(
     let loader_base = state.loader_base;
     let dyn_doc_cache = state.dyn_doc_cache;
     let rtf_base_uris = state.rtf_base_uris;
+    let source_types = state.source_types;
     let mut eval = |expr: &sup_xml_core::xpath::Expr, n, p, s| {
         let bindings = XsltBindings {
             variables, namespaces, keys,
@@ -8241,6 +8366,7 @@ fn with_sort_key_eval<R>(
             regex_groups, user_functions, unparsed_texts, xslt_3_0,
             xslt_version, static_base_uri,
             loader, loader_base, dyn_doc_cache, rtf_base_uris,
+            source_types,
         };
         let ctx = EvalCtx { context_node: n, pos: p, size: s, bindings: &bindings, static_ctx: &sc };
         eval_expr(expr, &ctx, idx).map_err(XsltError::from)
