@@ -66,6 +66,20 @@ fn is_value_op_kw(tok: &Token, name: &str) -> bool {
 /// re-entry count.
 const MAX_PARSE_DEPTH: u32 = 64;
 
+/// Parse a `SequenceType` from its lexical form (`"xs:long"`,
+/// `"element(e)"`, `"function(*)?"`, …).  Used to reconstruct a user
+/// function's declared signature for function-subtyping checks.  Returns
+/// `None` on a lex/parse error or trailing input.
+pub fn parse_sequence_type_str(src: &str)
+    -> Option<crate::xpath::ast::SequenceType>
+{
+    let tokens = crate::xpath::lexer::tokenize_only(src).ok()?;
+    let mut p = Parser::new(tokens);
+    p.xpath_2_0 = true;
+    let st = p.parse_sequence_type().ok()?;
+    (p.peek() == &Token::Eof).then_some(st)
+}
+
 pub struct Parser {
     tokens: Vec<Token>,
     /// Source byte ranges for each `tokens[i]`.  Same length as
@@ -938,7 +952,37 @@ impl Parser {
     }
 
     fn parse_item_type(&mut self) -> Result<crate::xpath::ast::ItemType> {
-        use crate::xpath::ast::ItemType;
+        use crate::xpath::ast::{ItemType, FunctionSig, SequenceType, Occurrence};
+        // XPath 3.1 §2.5.4.3 function test: `function(*)` or
+        // `function(SeqType, …) as SeqType`.  The specific form captures
+        // the parameter and return types for function subtyping.
+        if matches!(self.peek(), Token::Name(n) if n == "function")
+            && self.peek2() == &Token::LParen
+        {
+            self.consume(); // function
+            self.consume(); // (
+            if self.peek() == &Token::Star {
+                self.consume();
+                self.expect(&Token::RParen)?;
+                return Ok(ItemType::Function(None));
+            }
+            let mut params = Vec::new();
+            if self.peek() != &Token::RParen {
+                loop {
+                    params.push(self.parse_sequence_type()?);
+                    if self.peek() == &Token::Comma { self.consume(); continue; }
+                    break;
+                }
+            }
+            self.expect(&Token::RParen)?;
+            let ret = if matches!(self.peek(), Token::Name(a) if a == "as") {
+                self.consume();
+                self.parse_sequence_type()?
+            } else {
+                SequenceType { item: ItemType::Any, occurrence: Occurrence::ZeroOrMore }
+            };
+            return Ok(ItemType::Function(Some(Box::new(FunctionSig { params, ret }))));
+        }
         // KindTest forms — `node()`, `element()`, etc. — recognise via
         // the lookahead `name (` pattern.
         if let Token::Name(name) = self.peek().clone() {

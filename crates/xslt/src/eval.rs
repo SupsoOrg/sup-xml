@@ -352,6 +352,21 @@ impl<'a, I: DocIndexLike> XPathBindings for XsltBindings<'a, I> {
             uf.name.uri == ns_uri && uf.name.local == name && uf.params.len() == arity
         })
     }
+    fn function_signature_in(&self, ns_uri: &str, name: &str, arity: usize)
+        -> Option<sup_xml_core::xpath::FunctionSig> {
+        use sup_xml_core::xpath::{parse_sequence_type_str, FunctionSig, ItemType,
+            Occurrence, SequenceType};
+        // The declared `as=` types of a matching user `xsl:function` and
+        // its `xsl:param`s.  An omitted type defaults to `item()*`.
+        let item_star = || SequenceType { item: ItemType::Any, occurrence: Occurrence::ZeroOrMore };
+        let uf = self.user_functions.unwrap_or(&[]).iter().find(|uf|
+            uf.name.uri == ns_uri && uf.name.local == name && uf.params.len() == arity)?;
+        let params = uf.params.iter().map(|p|
+            p.as_type.as_deref().and_then(parse_sequence_type_str).unwrap_or_else(item_star)
+        ).collect();
+        let ret = uf.as_type.as_deref().and_then(parse_sequence_type_str).unwrap_or_else(item_star);
+        Some(FunctionSig { params, ret })
+    }
     fn call_function_in(
         &self, ns_uri: &str, name: &str, args: Vec<Value>,
         xpath_context_node: NodeId,
@@ -5157,8 +5172,8 @@ fn node_matches_kind_test<I: sup_xml_core::xpath::DocIndexLike>(
         // atomization separately (this function is only consulted
         // for kind tests).
         ItemType::Atomic(_) => false,
-        // `empty-sequence()` never matches an individual node.
-        ItemType::EmptySequence => false,
+        // A node is never a function item, nor the empty sequence.
+        ItemType::Function(_) | ItemType::EmptySequence => false,
     }
 }
 
@@ -5236,8 +5251,10 @@ fn result_node_matches_item(
             R::ProcessingInstruction { target, .. }
                 if name.as_ref().map_or(true, |n| target == n)),
         // A template body never yields a bare document node at the top
-        // level, and atomic/empty-sequence types aren't enforced here.
-        ItemType::Document | ItemType::Atomic(_) | ItemType::EmptySequence => false,
+        // level, and atomic/function/empty-sequence types aren't enforced
+        // here.
+        ItemType::Document | ItemType::Atomic(_) | ItemType::Function(_)
+        | ItemType::EmptySequence => false,
     }
 }
 

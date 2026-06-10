@@ -507,7 +507,14 @@ pub enum FunctionItem {
     /// namespace URI (the default function namespace for an unprefixed
     /// name), captured at reference time so `fn:function-name` can
     /// rebuild the expanded QName without the defining scope.
-    Named { name: String, ns: String, arity: usize },
+    Named {
+        name: String, ns: String, arity: usize,
+        /// The function's declared signature, captured at reference time
+        /// for function subtyping (`instance of function(…)`).  `None`
+        /// when unknown (built-ins / extensions) — subtyping then falls
+        /// back to arity-only matching.
+        sig: Option<Box<crate::xpath::ast::FunctionSig>>,
+    },
     /// A partial application: a base function with some arguments
     /// already bound; `None` slots are the remaining parameters.
     Partial { base: Box<FunctionItem>, bound: Vec<Option<Value>> },
@@ -521,6 +528,16 @@ impl FunctionItem {
             FunctionItem::Named { arity, .. } => *arity,
             FunctionItem::Partial { bound, .. } =>
                 bound.iter().filter(|b| b.is_none()).count(),
+        }
+    }
+
+    /// The function's declared signature, if captured (named user
+    /// functions record it at reference time).  `None` for inline,
+    /// partial, and built-in items.
+    pub fn declared_sig(&self) -> Option<&crate::xpath::ast::FunctionSig> {
+        match self {
+            FunctionItem::Named { sig, .. } => sig.as_deref(),
+            _ => None,
         }
     }
 }
@@ -685,6 +702,16 @@ pub trait XPathBindings {
     /// without invoking anything.  Default `false`.
     fn function_available_in(&self, _ns_uri: &str, _name: &str, _arity: usize) -> bool {
         false
+    }
+    /// The declared signature of a user `xsl:function` with this expanded
+    /// name and arity, if known — used to apply function subtyping in
+    /// `instance of function(…)`.  `None` means the signature is unknown
+    /// (a built-in, an extension, or no such function), in which case the
+    /// caller falls back to arity-only matching.
+    fn function_signature_in(
+        &self, _ns_uri: &str, _name: &str, _arity: usize,
+    ) -> Option<crate::xpath::ast::FunctionSig> {
+        None
     }
     /// Look up an XPath variable's value.  `None` means undefined,
     /// which surfaces as an XPath error.
@@ -1499,12 +1526,16 @@ pub fn eval_expr<I: DocIndexLike>(expr: &Expr, ctx: &EvalCtx<'_>, idx: &I) -> Re
                 closure,
             })))
         }
-        Expr::NamedFunctionRef { name, arity } => Ok(Value::Function(Box::new(
-            FunctionItem::Named {
-                name:  name.clone(),
-                ns:    named_function_namespace(name, ctx.bindings),
-                arity: *arity,
-            }))),
+        Expr::NamedFunctionRef { name, arity } => {
+            let ns = named_function_namespace(name, ctx.bindings);
+            let local = name.rsplit(':').next().unwrap_or(name);
+            let sig = ctx.bindings
+                .function_signature_in(&ns, local, *arity)
+                .map(Box::new);
+            Ok(Value::Function(Box::new(FunctionItem::Named {
+                name: name.clone(), ns, arity: *arity, sig,
+            })))
+        }
         Expr::DynamicCall { func, args } => {
             let f = eval_expr(func, ctx, idx)?;
             let fi = match &f {
@@ -2026,6 +2057,10 @@ impl<'p> XPathBindings for ClosureBindings<'p> {
     fn function_available_in(&self, ns: &str, n: &str, a: usize) -> bool {
         self.base.function_available_in(ns, n, a)
     }
+    fn function_signature_in(&self, ns: &str, n: &str, a: usize)
+        -> Option<crate::xpath::ast::FunctionSig> {
+        self.base.function_signature_in(ns, n, a)
+    }
     fn xpath_version_2_or_later(&self) -> bool { self.base.xpath_version_2_or_later() }
     fn load_document(&self, u: &str, b: Option<&str>) -> Option<Result<Vec<ForeignNodePtr>>> {
         self.base.load_document(u, b)
@@ -2137,7 +2172,7 @@ fn call_function_item<I: DocIndexLike>(
             };
             eval_expr(body, &inner, idx)
         }
-        FunctionItem::Named { name, ns, arity } => {
+        FunctionItem::Named { name, ns, arity, .. } => {
             if args.len() != *arity {
                 return Err(xpath_err(format!(
                     "function {name}#{arity} called with {} argument(s)", args.len())));
@@ -2218,6 +2253,10 @@ impl<'p> XPathBindings for ScopedBindings<'p> {
     fn function_available_in(&self, ns: &str, n: &str, a: usize) -> bool {
         self.parent.function_available_in(ns, n, a)
     }
+    fn function_signature_in(&self, ns: &str, n: &str, a: usize)
+        -> Option<crate::xpath::ast::FunctionSig> {
+        self.parent.function_signature_in(ns, n, a)
+    }
     fn foreign_string_value(
         &self, p: crate::xpath::eval::ForeignNodePtr,
     ) -> String {
@@ -2293,6 +2332,10 @@ impl<'p> XPathBindings for ErrBindings<'p> {
     }
     fn function_available_in(&self, ns: &str, n: &str, a: usize) -> bool {
         self.parent.function_available_in(ns, n, a)
+    }
+    fn function_signature_in(&self, ns: &str, n: &str, a: usize)
+        -> Option<crate::xpath::ast::FunctionSig> {
+        self.parent.function_signature_in(ns, n, a)
     }
     fn foreign_string_value(
         &self, p: crate::xpath::eval::ForeignNodePtr,
@@ -5135,7 +5178,8 @@ fn eval_hof_function<I: DocIndexLike>(
                 ctx.bindings.function_available_in(&ns, &local, arity)
             };
             if available {
-                Ok(Value::Function(Box::new(FunctionItem::Named { name: local, ns, arity })))
+                let sig = ctx.bindings.function_signature_in(&ns, &local, arity).map(Box::new);
+                Ok(Value::Function(Box::new(FunctionItem::Named { name: local, ns, arity, sig })))
             } else {
                 Ok(Value::NodeSet(Vec::new()))
             }
@@ -8371,11 +8415,77 @@ fn value_matches_sequence_type<I: DocIndexLike>(
                 matches!(idx.kind(id), crate::xpath::XPathNodeKind::Document)),
             _ => false,
         },
+        // `function(*)` matches any function item; a specific
+        // `function(T1, …, Tn) as R` applies function subtyping against
+        // the item's own declared signature when known (named user
+        // functions capture it), else falls back to arity.
+        ItemType::Function(want) => match v {
+            Value::Function(fi) => match want {
+                None => true,
+                Some(want) => fi.arity() == want.params.len()
+                    && match fi.declared_sig() {
+                        Some(have) => function_sig_subtype_of(have, want),
+                        None => true,
+                    },
+            },
+            Value::Sequence(items) => items.iter().all(|item|
+                value_matches_sequence_type(item, st, idx)),
+            _ => false,
+        },
         // `empty-sequence()` — no individual item matches; a non-empty
         // value reaches here only after the count==0 short-circuit
         // above declined it, so it is not the empty sequence.
         ItemType::EmptySequence => false,
     }
+}
+
+/// XPath 3.1 occurrence-indicator subsumption: are all cardinalities
+/// permitted by `sub` also permitted by `sup`?
+fn occurrence_subsumes(sub: Occurrence, sup: Occurrence) -> bool {
+    let allows_zero = |o: Occurrence| matches!(o, Occurrence::Optional | Occurrence::ZeroOrMore);
+    let allows_many = |o: Occurrence| matches!(o, Occurrence::OneOrMore | Occurrence::ZeroOrMore);
+    (!allows_zero(sub) || allows_zero(sup)) && (!allows_many(sub) || allows_many(sup))
+}
+
+/// `a` is a subtype of `b` (XPath 3.1 §2.5.6) to the resolution this
+/// engine models — atomic types via the XSD lattice, node kinds, and
+/// nested function signatures.
+fn sequence_type_subtype_of(a: &SequenceType, b: &SequenceType) -> bool {
+    occurrence_subsumes(a.occurrence, b.occurrence)
+        && item_type_subtype_of(&a.item, &b.item)
+}
+
+fn item_type_subtype_of(a: &ItemType, b: &ItemType) -> bool {
+    match (a, b) {
+        (_, ItemType::Any) => true,
+        (ItemType::EmptySequence, _) => true,
+        (ItemType::Atomic(x), ItemType::Atomic(y)) => xsd_is_subtype_of(x, y),
+        (ItemType::AnyNode, ItemType::AnyNode) => true,
+        (ItemType::Element(_) | ItemType::Attribute(_) | ItemType::Text
+            | ItemType::Comment | ItemType::PI(_) | ItemType::Document,
+         ItemType::AnyNode) => true,
+        (ItemType::Element(x), ItemType::Element(y)) => y.is_none() || x == y,
+        (ItemType::Attribute(x), ItemType::Attribute(y)) => y.is_none() || x == y,
+        (ItemType::PI(x), ItemType::PI(y)) => y.is_none() || x == y,
+        (ItemType::Text, ItemType::Text)
+            | (ItemType::Comment, ItemType::Comment)
+            | (ItemType::Document, ItemType::Document) => true,
+        (ItemType::Function(_), ItemType::Function(None)) => true,
+        (ItemType::Function(Some(sa)), ItemType::Function(Some(sb))) =>
+            function_sig_subtype_of(sa, sb),
+        _ => false,
+    }
+}
+
+/// Function subtyping (XPath 3.1 §2.5.6.3): `have` is a subtype of `want`
+/// iff same arity, `have`'s return type is a subtype of `want`'s
+/// (covariant), and each of `want`'s parameter types is a subtype of the
+/// corresponding `have` parameter type (contravariant).
+fn function_sig_subtype_of(have: &FunctionSig, want: &FunctionSig) -> bool {
+    have.params.len() == want.params.len()
+        && sequence_type_subtype_of(&have.ret, &want.ret)
+        && have.params.iter().zip(&want.params)
+            .all(|(hp, wp)| sequence_type_subtype_of(wp, hp))
 }
 
 /// Lenient lexical check for the common atomic XSD types.  Used by

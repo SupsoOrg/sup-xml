@@ -300,6 +300,16 @@ pub struct SequenceType {
     pub occurrence:  Occurrence,
 }
 
+/// The signature of a specific function test `function(T1, …, Tn) as R`
+/// (XPath 3.1 §2.5.4.3).  Drives the function-subtyping rules applied by
+/// `instance of` / `treat as`: the parameter types are contravariant and
+/// the return type is covariant.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FunctionSig {
+    pub params: Vec<SequenceType>,
+    pub ret:    SequenceType,
+}
+
 /// `SingleType` — a `SequenceType` with implicit `?` (one or zero).
 /// Used in `cast as` / `castable as`.
 pub type SingleType = SequenceType;
@@ -323,6 +333,10 @@ pub enum ItemType {
     Comment,
     PI(Option<String>),
     Document,
+    /// Function test (XPath 3.1 §2.5.4.3).  `None` is `function(*)` (any
+    /// function item); `Some` carries a specific `function(T1, …, Tn) as R`
+    /// signature, matched by function subtyping.
+    Function(Option<Box<FunctionSig>>),
     /// `empty-sequence()` — matches only the empty sequence.  As an
     /// item test it matches no individual item; the empty case is
     /// admitted by the cardinality check alone.
