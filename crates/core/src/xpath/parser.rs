@@ -1107,47 +1107,50 @@ impl Parser {
     }
 
     fn parse_filter_path_expr(&mut self) -> Result<Expr> {
-        let mut primary = self.parse_primary_expr()?;
+        let mut expr = self.parse_primary_expr()?;
 
-        // XPath 3.1 §3.2.2 dynamic function call `E(args)` — chainable,
-        // binds tighter than predicates/lookups on the result.
-        while self.xpath_2_0 && self.peek() == &Token::LParen {
-            primary = self.parse_dynamic_call(primary)?;
-        }
-
-        let mut predicates = Vec::new();
-        while self.peek() == &Token::LBracket {
-            self.consume();
-            self.enter()?;
-            let pred = self.parse_expr_single()?;
-            self.leave();
-            predicates.push(pred);
-            self.expect(&Token::RBracket)?;
-        }
-
-        // Optional path continuation
-        let steps = if matches!(self.peek(), Token::Slash | Token::DoubleSlash) {
-            self.parse_path_steps()?
-        } else {
-            Vec::new()
-        };
-
-        let base = if predicates.is_empty() && steps.is_empty() {
-            primary
-        } else {
-            Expr::FilterPath {
-                primary: Box::new(primary),
-                predicates,
-                steps,
+        // XPath 3.1 PostfixExpr: a primary followed by any mix of dynamic
+        // function calls `E(args)`, filter predicates `E[…]`, postfix
+        // lookups `E?K`, and relative-path steps `E/…`, applied left to
+        // right (§3.2.2 / §3.11.3).  A single chained loop is what lets a
+        // call follow a predicate (`$f[3](2)[1]`) and vice versa.
+        loop {
+            match self.peek() {
+                Token::LParen if self.xpath_2_0 => {
+                    expr = self.parse_dynamic_call(expr)?;
+                }
+                Token::LBracket => {
+                    // Fold consecutive predicates into one FilterPath; an
+                    // interleaved call/lookup/step starts a fresh wrapper.
+                    let mut predicates = Vec::new();
+                    while self.peek() == &Token::LBracket {
+                        self.consume();
+                        self.enter()?;
+                        predicates.push(self.parse_expr_single()?);
+                        self.leave();
+                        self.expect(&Token::RBracket)?;
+                    }
+                    expr = Expr::FilterPath {
+                        primary: Box::new(expr),
+                        predicates,
+                        steps: Vec::new(),
+                    };
+                }
+                Token::Question if self.xpath_2_0 => {
+                    self.consume();
+                    let key = self.parse_lookup_key()?;
+                    expr = Expr::Lookup(Box::new(expr), key);
+                }
+                Token::Slash | Token::DoubleSlash => {
+                    let steps = self.parse_path_steps()?;
+                    expr = Expr::FilterPath {
+                        primary: Box::new(expr),
+                        predicates: Vec::new(),
+                        steps,
+                    };
+                }
+                _ => break,
             }
-        };
-
-        // XPath 3.1 §3.11.3 postfix lookup `E ? K` (chainable).
-        let mut expr = base;
-        while self.xpath_2_0 && self.peek() == &Token::Question {
-            self.consume();
-            let key = self.parse_lookup_key()?;
-            expr = Expr::Lookup(Box::new(expr), key);
         }
         Ok(expr)
     }
