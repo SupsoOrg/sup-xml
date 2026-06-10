@@ -716,6 +716,21 @@ pub trait XPathBindings {
     ) -> Option<crate::xpath::ast::FunctionSig> {
         None
     }
+    /// Schema-aware processing: test whether a lexical value is castable to
+    /// a user-defined (schema) simple type, identified by its expanded
+    /// name.  `Some(bool)` when the type is known (true = castable);
+    /// `None` when no schema is in scope or the type is unknown, in which
+    /// case the caller treats it as an unrecognized type as before.
+    fn castable_as_user_type(&self, _ns_uri: &str, _local: &str, _value: &str) -> Option<bool> {
+        None
+    }
+    /// Schema-aware processing: cast a lexical value to a user-defined
+    /// simple type, returning the typed value.  `None` when no schema is
+    /// in scope or the type is unknown.
+    fn cast_to_user_type(&self, _ns_uri: &str, _local: &str, _value: &str)
+        -> Option<Result<Value>> {
+        None
+    }
     /// Look up an XPath variable's value.  `None` means undefined,
     /// which surfaces as an XPath error.
     fn variable(&self, _name: &str) -> Option<Value> { None }
@@ -1608,6 +1623,19 @@ pub fn eval_expr<I: DocIndexLike>(expr: &Expr, ctx: &EvalCtx<'_>, idx: &I) -> Re
             // `xs:integer`, even though our untyped value model
             // doesn't initially classify it as one.
             let v = eval_expr(inner, ctx, idx)?;
+            // Schema-aware: a user-defined (schema) target type keeps its
+            // `prefix:local` name — resolve the prefix and validate the
+            // value against the imported schema's simple type.
+            if let crate::xpath::ast::ItemType::Atomic(name) = &st.item {
+                if let Some((prefix, local)) = name.split_once(':') {
+                    if let Some(uri) = resolve_prefix_or_implicit(ctx.bindings, prefix) {
+                        let s = value_to_string(&v, idx);
+                        if let Some(ok) = ctx.bindings.castable_as_user_type(&uri, local, &s) {
+                            return Ok(Value::Boolean(ok));
+                        }
+                    }
+                }
+            }
             Ok(Value::Boolean(cast_value_to_atomic(&v, st, idx).is_ok()))
         }
         Expr::TryCatch { body, catches } => {
@@ -2099,6 +2127,12 @@ impl<'p> XPathBindings for ClosureBindings<'p> {
         -> Option<crate::xpath::ast::FunctionSig> {
         self.base.function_signature_in(ns, n, a)
     }
+    fn castable_as_user_type(&self, ns: &str, l: &str, v: &str) -> Option<bool> {
+        self.base.castable_as_user_type(ns, l, v)
+    }
+    fn cast_to_user_type(&self, ns: &str, l: &str, v: &str) -> Option<Result<Value>> {
+        self.base.cast_to_user_type(ns, l, v)
+    }
     fn xpath_version_2_or_later(&self) -> bool { self.base.xpath_version_2_or_later() }
     fn load_document(&self, u: &str, b: Option<&str>) -> Option<Result<Vec<ForeignNodePtr>>> {
         self.base.load_document(u, b)
@@ -2295,6 +2329,12 @@ impl<'p> XPathBindings for ScopedBindings<'p> {
         -> Option<crate::xpath::ast::FunctionSig> {
         self.parent.function_signature_in(ns, n, a)
     }
+    fn castable_as_user_type(&self, ns: &str, l: &str, v: &str) -> Option<bool> {
+        self.parent.castable_as_user_type(ns, l, v)
+    }
+    fn cast_to_user_type(&self, ns: &str, l: &str, v: &str) -> Option<Result<Value>> {
+        self.parent.cast_to_user_type(ns, l, v)
+    }
     fn foreign_string_value(
         &self, p: crate::xpath::eval::ForeignNodePtr,
     ) -> String {
@@ -2374,6 +2414,12 @@ impl<'p> XPathBindings for ErrBindings<'p> {
     fn function_signature_in(&self, ns: &str, n: &str, a: usize)
         -> Option<crate::xpath::ast::FunctionSig> {
         self.parent.function_signature_in(ns, n, a)
+    }
+    fn castable_as_user_type(&self, ns: &str, l: &str, v: &str) -> Option<bool> {
+        self.parent.castable_as_user_type(ns, l, v)
+    }
+    fn cast_to_user_type(&self, ns: &str, l: &str, v: &str) -> Option<Result<Value>> {
+        self.parent.cast_to_user_type(ns, l, v)
     }
     fn foreign_string_value(
         &self, p: crate::xpath::eval::ForeignNodePtr,

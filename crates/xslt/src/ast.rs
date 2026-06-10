@@ -938,6 +938,15 @@ pub struct StylesheetAst {
     /// attribute is present) and the post-merge check raises XTSE0265
     /// on conflict.
     pub input_type_annotations: Vec<String>,
+    /// `(namespace, schema-location)` pairs from `xsl:import-schema`,
+    /// recorded at parse time and resolved against the loader once the
+    /// module tree is assembled.
+    pub schema_imports: Vec<(Option<String>, String)>,
+    /// Schemas compiled from `schema_imports` (schema-aware processing).
+    /// Empty unless the stylesheet imports a schema; consulted by
+    /// `castable as` / `cast as` / `instance of` for user-defined types.
+    #[cfg(feature = "xsd")]
+    pub schemas: Vec<std::sync::Arc<sup_xml_core::xsd::Schema>>,
 }
 
 /// One `<xsl:mode>` declaration (XSLT 3.0 §6.6).

@@ -1668,12 +1668,16 @@ fn compile_top_level(node: &Node, ast: &mut StylesheetAst, pos: u32) -> Result<(
         "attribute-set"   => ast.attribute_sets.push(compile_attribute_set(node)?),
         "mode"            => ast.modes.push(compile_mode(node)?),
         "accumulator"     => ast.accumulators.push(compile_accumulator(node)?),
-        // XSLT 3.0 §3.16 — accepted but not enforced: we don't track
-        // post-schema-validation types, so `element(*, T)` tests treat
-        // nodes as untyped and `validation=` is ignored.  This lets the
-        // many (mostly streaming) stylesheets that import a schema but
-        // don't actually depend on type annotations compile and run.
-        "import-schema"   => {}
+        // XSLT 2.0 §3.13 — record the imported schema for deferred
+        // loading; the loader isn't available here, so resolution happens
+        // once the module tree is assembled.  Used by `castable`/`cast`/
+        // `instance of` for user-defined types (schema-aware processing).
+        "import-schema"   => {
+            let namespace = read_attribute(node, "namespace").map(|s| s.to_string());
+            if let Some(loc) = read_attribute(node, "schema-location") {
+                ast.schema_imports.push((namespace, loc.to_string()));
+            }
+        }
         "use-package"     => ast.use_packages.push(compile_use_package(node)?),
         "output"          => ast.outputs.push(compile_output(node)?),
         "strip-space"     => collect_whitespace_rules(node, true,  &mut ast.whitespace_rules)?,
@@ -2320,8 +2324,25 @@ pub fn compile_with_imports(
     // module across the whole import/include/use-package tree has merged,
     // since a higher-precedence declaration may resolve a lower-precedence
     // clash — so the check runs here, after the recursive build.
-    let ast = compile_with_imports_inner(text, loader, base, acc, precedence_counter)?;
+    #[cfg_attr(not(feature = "xsd"), allow(unused_mut))]
+    let mut ast = compile_with_imports_inner(text, loader, base, acc, precedence_counter)?;
     finalize_decimal_format_conflicts(&ast)?;
+    // Schema-aware: resolve `xsl:import-schema` against the loader and
+    // compile each imported schema.  Lenient — a schema that can't be
+    // loaded or compiled is skipped (the stylesheet still runs untyped),
+    // matching the many stylesheets that import a schema they don't
+    // actually depend on.
+    #[cfg(feature = "xsd")]
+    {
+        let imports = ast.schema_imports.clone();
+        for (_ns, location) in &imports {
+            if let Ok(text) = loader.load(location, base) {
+                if let Ok(schema) = sup_xml_core::xsd::Schema::compile_str(&text) {
+                    ast.schemas.push(std::sync::Arc::new(schema));
+                }
+            }
+        }
+    }
     Ok(ast)
 }
 
@@ -2468,6 +2489,7 @@ fn compile_with_imports_inner(
     acc.attribute_sets.extend(local_attribute_sets);
     acc.modes.extend(local.modes);
     acc.accumulators.extend(local.accumulators);
+    acc.schema_imports.extend(local.schema_imports);
     // Decimal-formats merge per-attribute by import precedence (XSLT 2.0
     // §16.4.2): this module is merged at `this_precedence`; its imports
     // recurse below at a lower precedence and cannot override an

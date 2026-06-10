@@ -15,6 +15,9 @@ workspace = true
 
 [features]
 default = []
+# Schema-aware processing: xsl:import-schema, castable/cast/instance-of
+# for user-defined (schema) types.  Forwards to the core XSD validator.
+xsd = ["sup-xml-core/xsd"]
 
 [dependencies]
 sup-xml-core = { path = "../core", version = "1.0.0" }

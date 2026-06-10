@@ -1102,11 +1102,17 @@ impl Parser {
             // an unprefixed name may resolve through the surrounding
             // xpath-default-namespace; defer the strictness to eval.
             self.consume();
-            let local = match name.split_once(':') {
-                Some((_, l)) => l.to_string(),
-                None         => name,
+            // Built-in types are stored by local name (eval matches them by
+            // the XSD lattice); a user-defined (schema) type keeps its
+            // `prefix:local` so eval can resolve the namespace against the
+            // imported schema.
+            let local = name.rsplit(':').next().unwrap_or(&name).to_string();
+            let stored = if crate::xpath::eval::atomic_kind_static(&local).is_some() {
+                local
+            } else {
+                name
             };
-            return Ok(ItemType::Atomic(local));
+            return Ok(ItemType::Atomic(stored));
         }
         Err(self.error(format!(
             "expected SequenceType / ItemType, got {:?}", self.peek()

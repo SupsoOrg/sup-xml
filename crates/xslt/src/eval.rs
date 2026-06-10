@@ -368,6 +368,22 @@ impl<'a, I: DocIndexLike> XPathBindings for XsltBindings<'a, I> {
         let ret = uf.as_type.as_deref().and_then(parse_sequence_type_str).unwrap_or_else(item_star);
         Some(FunctionSig { params, ret })
     }
+    #[cfg(feature = "xsd")]
+    fn castable_as_user_type(&self, ns_uri: &str, local: &str, value: &str) -> Option<bool> {
+        // Resolve the expanded type name against the imported schemas; a
+        // user simple type is castable iff the value validates against it.
+        use sup_xml_core::xsd::{QName as XQName, TypeRef};
+        let qn = XQName::new((!ns_uri.is_empty()).then_some(ns_uri), local);
+        for schema in &self.style.schemas {
+            match schema.type_def(&qn) {
+                Some(TypeRef::Simple(st)) => return Some(st.validate(value).is_ok()),
+                // A complex type is not a cast target.
+                Some(TypeRef::Complex(_)) => return Some(false),
+                None => {}
+            }
+        }
+        None
+    }
     fn call_function_in(
         &self, ns_uri: &str, name: &str, args: Vec<Value>,
         xpath_context_node: NodeId,
@@ -439,6 +455,25 @@ impl<'a, I: DocIndexLike> XPathBindings for XsltBindings<'a, I> {
                 ));
             }
         }
+        // Schema-aware: `{uri}typeName(value)` is a constructor function
+        // for a user-defined simple type — validate/cast the single
+        // argument against the imported schema.
+        #[cfg(feature = "xsd")]
+        if args.len() == 1 && !ns_uri.is_empty() {
+            use sup_xml_core::xsd::{QName as XQName, TypeRef};
+            let qn = XQName::new(Some(ns_uri), name);
+            for schema in &self.style.schemas {
+                if let Some(TypeRef::Simple(st)) = schema.type_def(&qn) {
+                    let s = sup_xml_core::xpath::eval::value_to_string(&args[0], self.idx);
+                    return Some(match st.validate(&s) {
+                        Ok(xv) => Ok(xsd_value_to_xpath(xv)),
+                        Err(_) => Err(sup_xml_core::xpath::eval::xpath_err(format!(
+                            "cannot construct {{{ns_uri}}}{name} from '{s}' (FORG0001)"))
+                            .with_xpath_code("FORG0001")),
+                    });
+                }
+            }
+        }
         // User-registered extensions get the next shot.  Either
         // branch returning `None` falls through to native EXSLT
         // dispatch in the core engine — which now covers
@@ -454,6 +489,28 @@ impl<'a, I: DocIndexLike> XPathBindings for XsltBindings<'a, I> {
         // Tree-crate accessor encapsulates the unsafe deref —
         // xslt stays `forbid(unsafe_code)`.
         sup_xml_tree::dom::Document::node_string_value_by_ptr(p)
+    }
+}
+
+/// Convert a value produced by the XSD validator into the XPath typed
+/// atomic it corresponds to — the result of a user-defined simple-type
+/// constructor / cast.  Date-time and other structured values keep their
+/// canonical lexical form as a string atomic for now.
+#[cfg(feature = "xsd")]
+fn xsd_value_to_xpath(v: sup_xml_core::xsd::Value) -> Value {
+    use sup_xml_core::xsd::Value as X;
+    use sup_xml_core::xpath::eval::TypedAtomic;
+    use sup_xml_core::rust_decimal::prelude::ToPrimitive;
+    let typed = |kind: &'static str, lexical: String, numeric: Option<f64>, boolean: Option<bool>|
+        Value::Typed(Box::new(TypedAtomic { kind, lexical, numeric, boolean }));
+    match v {
+        X::String(s) | X::Token(s) => typed("string", s, None, None),
+        X::Bool(b)    => typed("boolean", if b { "true" } else { "false" }.to_string(), None, Some(b)),
+        X::Int(i)     => typed("integer", i.to_string(), Some(i as f64), None),
+        X::Decimal(d) => typed("decimal", d.to_string(), d.to_f64(), None),
+        X::Float(f)   => typed("float", f.to_string(), Some(f as f64), None),
+        X::Double(d)  => typed("double", d.to_string(), Some(d), None),
+        other         => typed("string", format!("{other:?}"), None, None),
     }
 }
 

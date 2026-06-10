@@ -707,8 +707,12 @@ fn name_and_type_ok(d: &ElementDecl, b: &ElementDecl, ctx: &Ctx) -> Result<(), S
 /// * Mixed: rejected unless the base is `xs:anyType`.
 fn type_derives_from(derived: &TypeRef, base: &TypeRef, ctx: &Ctx) -> Result<(), String> {
     if type_refs_same(derived, base, ctx) { return Ok(()); }
-    if is_any_type(base) { return Ok(()); }
-    match (derived, base) {
+    // Resolve named placeholders so a union / list base is seen with its
+    // real variety rather than an unresolved atomic default.
+    let derived = resolve_typeref(derived, ctx);
+    let base = resolve_typeref(base, ctx);
+    if is_any_type(&base) { return Ok(()); }
+    match (&derived, &base) {
         (TypeRef::Complex(d), TypeRef::Complex(b)) => complex_derives_from(d, b, ctx),
         (TypeRef::Simple(d),  TypeRef::Simple(b))  => simple_derives_from(d, b),
         _ => Err("simple and complex type are not compatible".into()),
@@ -793,6 +797,13 @@ fn simple_derives_from(
     if Arc::ptr_eq(derived, base) { return Ok(()); }
     if derived.name.is_some() && derived.name == base.name { return Ok(()); }
     if is_any_simple_type_st(base) { return Ok(()); }
+    // A type validly restricts a union base if it derives from one of the
+    // union's member types (XSD 1.0 §3.16.6, clause 2.2.2).
+    if let Variety::Union { members } = &base.variety {
+        if members.iter().any(|m| simple_derives_from(derived, m).is_ok()) {
+            return Ok(());
+        }
+    }
     match (&derived.variety, &base.variety) {
         (Variety::Atomic, Variety::Atomic) => {
             // Schema doesn't track per-type simple derivation chains
