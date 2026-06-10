@@ -1754,16 +1754,39 @@ impl Parser {
                 // XPath 2.0 § 3.1.5).
                 self.enter()?;
                 let mut args = Vec::new();
+                let mut has_placeholder = false;
                 if self.peek() != &Token::RParen {
-                    args.push(self.parse_expr_single()?);
-                    while self.peek() == &Token::Comma {
-                        self.consume();
-                        args.push(self.parse_expr_single()?);
+                    loop {
+                        // XPath 3.1 §3.1.6 — a `?` argument is a placeholder
+                        // for partial application.
+                        if self.peek() == &Token::Question
+                            && matches!(self.peek2(), Token::Comma | Token::RParen)
+                        {
+                            self.consume();
+                            args.push(Expr::Placeholder);
+                            has_placeholder = true;
+                        } else {
+                            args.push(self.parse_expr_single()?);
+                        }
+                        if self.peek() == &Token::Comma { self.consume(); continue; }
+                        break;
                     }
                 }
                 self.expect(&Token::RParen)?;
                 self.leave();
-                Ok(Expr::FunctionCall(name, args))
+                if has_placeholder {
+                    // Partial application of a named (built-in or user)
+                    // function — desugar to a dynamic call on the named
+                    // function reference so the partial-application path
+                    // handles the bound/unbound slots.
+                    let arity = args.len();
+                    Ok(Expr::DynamicCall {
+                        func: Box::new(Expr::NamedFunctionRef { name, arity }),
+                        args,
+                    })
+                } else {
+                    Ok(Expr::FunctionCall(name, args))
+                }
             }
             other => Err(self.error(format!("unexpected token in expression: {other:?}"))),
         }
