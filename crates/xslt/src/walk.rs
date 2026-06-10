@@ -154,7 +154,7 @@ fn walk_expr_for_literals(e: &Expr, out: &mut Vec<String>) {
             walk_expr_for_literals(func, out);
             for a in args { walk_expr_for_literals(a, out); }
         }
-        NamedFunctionRef { .. } | Placeholder => {}
+        NamedFunctionRef { .. } | Placeholder | ContextItem => {}
     }
 }
 
@@ -271,7 +271,7 @@ fn walk_expr_for_unparsed_text(e: &Expr, out: &mut Vec<String>) {
             walk_expr_for_unparsed_text(func, out);
             for a in args { walk_expr_for_unparsed_text(a, out); }
         }
-        NamedFunctionRef { .. } | Placeholder => {}
+        NamedFunctionRef { .. } | Placeholder | ContextItem => {}
     }
 }
 
@@ -397,7 +397,7 @@ fn walk_expr_for_doc_node_set(e: &Expr, found: &mut bool) {
             walk_expr_for_doc_node_set(func, found);
             for a in args { walk_expr_for_doc_node_set(a, found); }
         }
-        NamedFunctionRef { .. } | Placeholder => {}
+        NamedFunctionRef { .. } | Placeholder | ContextItem => {}
     }
 }
 
@@ -517,7 +517,7 @@ fn walk_expr_for_dynamic_doc(e: &Expr, found: &mut bool) {
             walk_expr_for_dynamic_doc(func, found);
             for a in args { walk_expr_for_dynamic_doc(a, found); }
         }
-        NamedFunctionRef { .. } | Placeholder => {}
+        NamedFunctionRef { .. } | Placeholder | ContextItem => {}
     }
 }
 
@@ -1108,6 +1108,6 @@ fn walk_expr(e: &Expr, out: &mut Vec<String>) {
             walk_expr(func, out);
             for a in args { walk_expr(a, out); }
         }
-        Expr::NamedFunctionRef { .. } | Expr::Placeholder => {}
+        Expr::NamedFunctionRef { .. } | Expr::Placeholder | Expr::ContextItem => {}
     }
 }

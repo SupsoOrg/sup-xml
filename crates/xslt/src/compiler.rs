@@ -452,7 +452,7 @@ fn rewrite_base_uri_calls(expr: &mut Expr, base: &str) {
             rewrite_base_uri_calls(func, base);
             for a in args { rewrite_base_uri_calls(a, base); }
         }
-        Expr::NamedFunctionRef { .. } | Expr::Placeholder => {}
+        Expr::NamedFunctionRef { .. } | Expr::Placeholder | Expr::ContextItem => {}
         Expr::Literal(_) | Expr::Integer(_) | Expr::Decimal(_) | Expr::Double(_) | Expr::Variable(_) => {}
     }
 }
@@ -594,7 +594,7 @@ fn apply_xpath_default_namespace(expr: &mut Expr, node: &Node) {
                 rewrite(func, uri);
                 for a in args { rewrite(a, uri); }
             }
-            Expr::NamedFunctionRef { .. } | Expr::Placeholder => {}
+            Expr::NamedFunctionRef { .. } | Expr::Placeholder | Expr::ContextItem => {}
             Expr::Literal(_) | Expr::Integer(_) | Expr::Decimal(_) | Expr::Double(_) | Expr::Variable(_) => {}
         }
     }
@@ -683,7 +683,7 @@ fn resolve_xpath_variable_prefixes(expr: &mut Expr, node: &Node) {
                 walk(func, node);
                 for a in args { walk(a, node); }
             }
-            Expr::NamedFunctionRef { .. } | Expr::Placeholder => {}
+            Expr::NamedFunctionRef { .. } | Expr::Placeholder | Expr::ContextItem => {}
             Expr::Literal(_) | Expr::Integer(_) | Expr::Decimal(_) | Expr::Double(_) => {}
         }
     }
@@ -2006,7 +2006,7 @@ fn collect_variable_refs(e: &sup_xml_core::xpath::ast::Expr, out: &mut Vec<Strin
             collect_variable_refs(func, out);
             for a in args { collect_variable_refs(a, out); }
         }
-        Expr::NamedFunctionRef { .. } | Expr::Placeholder => {}
+        Expr::NamedFunctionRef { .. } | Expr::Placeholder | Expr::ContextItem => {}
         Expr::Literal(_) | Expr::Integer(_) | Expr::Decimal(_) | Expr::Double(_) => {}
     }
 }
@@ -2093,8 +2093,9 @@ fn expr_uses_outer_focus(e: &sup_xml_core::xpath::ast::Expr) -> bool {
             members.iter().any(expr_uses_outer_focus),
         Expr::Lookup(b, key) => expr_uses_outer_focus(b)
             || matches!(key, sup_xml_core::xpath::ast::LookupKey::Expr(e) if expr_uses_outer_focus(e)),
-        // A unary lookup reads the context item — outer focus.
-        Expr::UnaryLookup(_) => true,
+        // The context-item primary and a unary lookup both read the
+        // context item — outer focus.
+        Expr::ContextItem | Expr::UnaryLookup(_) => true,
         // An inline function establishes its own focus when called; its
         // body never reads the focus of the surrounding expression.
         Expr::InlineFunction { .. } => false,
@@ -6948,7 +6949,7 @@ fn reject_pattern_grouping_calls(expr: &Expr, who: &str) -> Result<(), XsltError
             Expr::InlineFunction { body, .. } => walk(body),
             Expr::DynamicCall { func, args } =>
                 walk(func).or_else(|| args.iter().find_map(walk)),
-            Expr::NamedFunctionRef { .. } | Expr::Placeholder => None,
+            Expr::NamedFunctionRef { .. } | Expr::Placeholder | Expr::ContextItem => None,
             Expr::Literal(_) | Expr::Integer(_) | Expr::Decimal(_) | Expr::Double(_) | Expr::Variable(_) => None,
         }
     }

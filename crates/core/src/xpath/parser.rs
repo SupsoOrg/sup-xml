@@ -1142,6 +1142,14 @@ impl Parser {
     }
 
     fn parse_path_expr_inner(&mut self) -> Result<Expr> {
+        // `.` carrying a postfix — `.(args)` (dynamic call on the context
+        // item) or `.?key` (lookup) — is a context-item *primary*, not a
+        // self step, so route it through the postfix parser.
+        if self.xpath_2_0 && self.peek() == &Token::Dot
+            && matches!(self.peek2(), Token::LParen | Token::Question)
+        {
+            return self.parse_filter_path_expr();
+        }
         if self.is_location_path_start() {
             let path = self.parse_location_path()?;
             return Ok(Expr::Path(path));
@@ -1642,6 +1650,12 @@ impl Parser {
 
     fn parse_primary_expr(&mut self) -> Result<Expr> {
         match self.peek().clone() {
+            // `.` reached here (rather than as a path) is a context-item
+            // primary carrying a postfix — `.(args)` / `.?key`.
+            Token::Dot => {
+                self.consume();
+                Ok(Expr::ContextItem)
+            }
             Token::Dollar => {
                 self.consume();
                 let saved_pos = self.pos;

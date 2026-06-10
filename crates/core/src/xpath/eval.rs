@@ -1044,7 +1044,7 @@ pub fn validate_prefixes(expr: &Expr, bindings: &dyn XPathBindings) -> Result<()
             for a in args { validate_prefixes(a, bindings)?; }
             Ok(())
         }
-        Expr::NamedFunctionRef { .. } | Expr::Placeholder => Ok(()),
+        Expr::NamedFunctionRef { .. } | Expr::Placeholder | Expr::ContextItem => Ok(()),
     }
 }
 
@@ -1107,6 +1107,11 @@ pub fn eval_expr<I: DocIndexLike>(expr: &Expr, ctx: &EvalCtx<'_>, idx: &I) -> Re
     // every recursive sub-expression a predicate may build.
     charge_eval_step()?;
     match expr {
+        // `.` as a primary expression yields the current context item —
+        // its actual value (which may be a function item), falling back to
+        // the context node when no non-node context item is set.
+        Expr::ContextItem => Ok(current_context_item()
+            .unwrap_or_else(|| Value::NodeSet(vec![ctx.context_node]))),
         Expr::Or(l, r) => {
             if value_to_bool(&eval_expr(l, ctx, idx)?, idx) {
                 return Ok(Value::Boolean(true));
@@ -2143,7 +2148,7 @@ fn collect_var_refs(e: &Expr, out: &mut Vec<String>) {
             if let crate::xpath::ast::LookupKey::Expr(x) = key { collect_var_refs(x, out); },
         E::InlineFunction { body, .. } => collect_var_refs(body, out),
         E::Literal(_) | E::Integer(_) | E::Decimal(_) | E::Double(_)
-        | E::NamedFunctionRef { .. } | E::Placeholder => {}
+        | E::NamedFunctionRef { .. } | E::Placeholder | E::ContextItem => {}
     }
 }
 
@@ -11063,6 +11068,7 @@ pub fn expr_references_context_item(e: &Expr) -> bool {
     use Expr::*;
     match e {
         Path(p) => path_uses_context_item(p),
+        ContextItem => true,
         Variable(_) | Literal(_) | Integer(_) | Decimal(_) | Double(_) => false,
         Or(l, r) | And(l, r)
         | Eq(l, r) | Ne(l, r) | Lt(l, r) | Gt(l, r) | Le(l, r) | Ge(l, r)

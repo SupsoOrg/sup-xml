@@ -270,6 +270,12 @@ pub enum Expr {
         sig:    Box<FunctionSig>,
         body:   Box<Expr>,
     },
+    /// XPath 3.0 §3.1.4 context-item expression `.` used as a primary —
+    /// yields the current context item (which may be a non-node such as a
+    /// function item).  Distinct from a `self::node()` step: produced only
+    /// where `.` carries a postfix (`.(args)`, `.?key`), so the context
+    /// item's actual value, not its node projection, drives the postfix.
+    ContextItem,
     /// XPath 3.1 §3.1.6 named function reference `name#arity`.
     NamedFunctionRef { name: String, arity: usize },
     /// XPath 3.1 §3.2.2 dynamic function call `F(args)` where `F` is
@@ -465,7 +471,7 @@ pub fn max_predicate_nesting(expr: &Expr) -> u32 {
             Expr::Lookup(base, key) => expr_depth(base).max(lookup_key_depth(key)),
             Expr::UnaryLookup(key) => lookup_key_depth(key),
             Expr::InlineFunction { body, .. } => expr_depth(body),
-            Expr::NamedFunctionRef { .. } | Expr::Placeholder => 0,
+            Expr::NamedFunctionRef { .. } | Expr::Placeholder | Expr::ContextItem => 0,
             Expr::DynamicCall { func, args } => expr_depth(func)
                 .max(args.iter().map(expr_depth).max().unwrap_or(0)),
         }
