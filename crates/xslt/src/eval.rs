@@ -938,6 +938,11 @@ fn call_user_function_pure_xpath<I: DocIndexLike>(
     // back into an XmlError so the pure-XPath call site can surface
     // it the same way as any other dynamic function failure.
     if let Some(t) = &uf.as_type {
+        // A user-defined (schema) return type coerces via the schema;
+        // built-in atomic types route through the ordinary coercion.
+        if let Some(typed) = crate::eval::coerce_to_user_schema_type(&v, t, style, idx) {
+            return Ok(typed);
+        }
         if let Some(st) = crate::eval::parse_as_atomic_type(t) {
             return crate::eval::coerce_to_atomic_sequence(v, &st, idx)
                 .map_err(|e| err(&format!("xsl:function: {e}")));
@@ -5521,7 +5526,9 @@ fn bind_variable(
     // from the cast are surfaced to the caller — XSLT 2.0 says a
     // failed coercion is a runtime XTTE error.
     if let Some(t) = as_type {
-        if let Some(st) = parse_as_atomic_type(t) {
+        if let Some(typed) = coerce_to_user_schema_type(&v, t, state.style, state.idx) {
+            v = typed;
+        } else if let Some(st) = parse_as_atomic_type(t) {
             v = coerce_to_atomic_sequence(v, &st, state.idx)?;
         }
     }
@@ -5730,6 +5737,38 @@ fn result_node_matches_item(
         ItemType::Document | ItemType::Atomic(_) | ItemType::Function(_)
         | ItemType::Map | ItemType::Array | ItemType::EmptySequence => false,
     }
+}
+
+/// Coerce a value to a user-defined (schema) simple type named by an
+/// `as="prefix:local"` declaration (XSLT 2.0 §10) — validate the value's
+/// lexical form against the imported schema type and tag the result with
+/// the declared user type so `instance of my:type` recognises it.
+/// Returns `None` for built-in (`xs:`) targets and unknown types, which
+/// the caller routes through the ordinary atomic coercion.
+#[cfg(feature = "xsd")]
+pub(crate) fn coerce_to_user_schema_type<I: sup_xml_core::xpath::DocIndexLike>(
+    v: &Value, as_type: &str, style: &StylesheetAst, idx: &I,
+) -> Option<Value> {
+    use sup_xml_core::xsd::{QName as XQName, TypeRef};
+    let body = as_type.trim().trim_end_matches(['*', '+', '?']).trim();
+    let (prefix, local) = body.split_once(':')?;
+    if prefix == "xs" || prefix == "xsd" { return None; }
+    let ns = style.namespaces.get(prefix)?;
+    let qn = XQName::new(Some(ns.as_str()), local);
+    for schema in &style.schemas {
+        let Some(TypeRef::Simple(st)) = schema.type_def(&qn) else { continue };
+        let s = sup_xml_core::xpath::eval::value_to_string(v, idx);
+        return st.validate(&s).ok()
+            .map(|xv| xsd_value_to_xpath(xv, &s, Some((ns.as_str(), local))));
+    }
+    None
+}
+
+#[cfg(not(feature = "xsd"))]
+pub(crate) fn coerce_to_user_schema_type<I: sup_xml_core::xpath::DocIndexLike>(
+    _v: &Value, _as_type: &str, _style: &StylesheetAst, _idx: &I,
+) -> Option<Value> {
+    None
 }
 
 pub(crate) fn coerce_to_atomic_sequence<I: sup_xml_core::xpath::DocIndexLike>(
@@ -6831,7 +6870,9 @@ fn evaluate_with_params(
         if let Some(sel) = &p.select {
             let mut v = state.xpath_eval(sel, ctx_node, pos, size)?;
             if let Some(t) = &p.as_type {
-                if let Some(st) = parse_as_atomic_type(t) {
+                if let Some(typed) = coerce_to_user_schema_type(&v, t, state.style, state.idx) {
+                    v = typed;
+                } else if let Some(st) = parse_as_atomic_type(t) {
                     v = coerce_to_atomic_sequence(v, &st, state.idx)?;
                 }
             }
