@@ -512,8 +512,10 @@ fn unparsed_entity_uri_fn<I: DocIndexLike>(
     }
     let name = value_to_string(&args[0], idx);
     // The table already holds SYSTEM ids resolved against the source
-    // document's base URI (done once at apply time).
-    Ok(Value::String(
+    // document's base URI (done once at apply time).  Returns xs:anyURI
+    // (XSLT 2.0 §16.6.3) so `instance of xs:anyURI` answers correctly.
+    Ok(sup_xml_core::xpath::eval::typed_str(
+        "anyURI",
         table.get(&name).map(|e| e.system_id.clone()).unwrap_or_default()))
 }
 
@@ -1675,7 +1677,12 @@ mod tests {
         let v = dispatch("unparsed-entity-uri",
             vec![Value::String("foo".into())], &ctx.index, 0, None, &[], None, &HashMap::new(), &crate::eval::NamespaceContext::default(), &HashMap::new())
             .unwrap().unwrap();
-        match v { Value::String(s) => assert!(s.is_empty()), _ => panic!() }
+        // Returns a typed xs:anyURI (empty here, since "foo" isn't a
+        // declared unparsed entity).
+        match v {
+            Value::Typed(t) => { assert_eq!(t.kind, "anyURI"); assert!(t.lexical.is_empty()); }
+            other => panic!("expected typed anyURI, got {other:?}"),
+        }
     }
 
     // ── format-number() ─────────────────────────────────────────

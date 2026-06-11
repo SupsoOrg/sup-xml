@@ -87,16 +87,61 @@ fn build_source_types(
         if psvi.is_empty() { continue; }
         for (id, inode) in idx.nodes.iter().enumerate() {
             let INodeKind::Element(n) = &inode.kind else { continue };
-            let std::collections::hash_map::Entry::Vacant(e) = by_node.entry(id) else { continue };
-            if let Some(ty) = psvi.governing_type(n) {
+            let Some(ty) = psvi.governing_type(n) else { continue };
+            if let std::collections::hash_map::Entry::Vacant(e) = by_node.entry(id) {
                 e.insert(NodeType {
                     name: registered_type_name(ty, schema),
                     type_ref: ty.clone(),
                 });
             }
+            // Source-attribute typing: the element's complex type
+            // declares typed attributes (post-schema-validation infoset
+            // §3.3.4).  Record each present attribute's governing simple
+            // type so `data(@a)` / `@a instance of T` see it.
+            if let sup_xml_core::xsd::TypeRef::Complex(ct) = ty {
+                for aid in inode.attr_start..inode.attr_end {
+                    let alocal = idx.local_name(aid);
+                    let auri   = idx.namespace_uri(aid);
+                    let Some(au) = ct.attributes.iter().find(|au|
+                        au.decl.name.local.as_ref() == alocal
+                        && au.decl.name.namespace.as_deref().unwrap_or("") == auri)
+                    else { continue };
+                    let tref = resolve_unresolved_type(
+                        sup_xml_core::xsd::TypeRef::Simple(au.decl.type_def.clone()), schema);
+                    if let std::collections::hash_map::Entry::Vacant(e) = by_node.entry(aid) {
+                        e.insert(NodeType {
+                            name: registered_type_name(&tref, schema),
+                            type_ref: tref,
+                        });
+                    }
+                }
+            }
         }
     }
     (!by_node.is_empty()).then_some(SourceTypes { by_node })
+}
+
+/// Resolve a forward-referenced attribute type placeholder.
+///
+/// The XSD compiler records an attribute whose simple type is declared
+/// later in the schema as an `UNRESOLVED:{ns}local` placeholder (builtin
+/// String) rather than the real type.  Decode the placeholder (matching
+/// the parser's encoding) and swap in the registered named type so the
+/// attribute carries its actual governing type; non-placeholder types
+/// pass through unchanged.
+#[cfg(feature = "xsd")]
+fn resolve_unresolved_type(
+    tref: sup_xml_core::xsd::TypeRef, schema: &sup_xml_core::xsd::Schema,
+) -> sup_xml_core::xsd::TypeRef {
+    use sup_xml_core::xsd::{QName as XQName, TypeRef};
+    let TypeRef::Simple(st) = &tref else { return tref };
+    let Some(rest) = st.name.as_deref().and_then(|n| n.strip_prefix("UNRESOLVED:"))
+    else { return tref };
+    let qn = match rest.strip_prefix('{').and_then(|r| r.split_once('}')) {
+        Some((ns, local)) => XQName::new((!ns.is_empty()).then_some(ns), local),
+        None              => XQName::new(None, rest),
+    };
+    schema.type_def(&qn).cloned().unwrap_or(tref)
 }
 
 /// Expanded name `(ns, local)` of a governing type, recovered by
@@ -567,7 +612,20 @@ impl<'a, I: DocIndexLike> XPathBindings for XsltBindings<'a, I> {
         let TypeRef::Simple(st) = &nt.type_ref else { return None };
         let xv = st.validate(lexical).ok()?;
         let user_type = nt.name.as_ref().map(|(n, l)| (n.as_str(), l.as_str()));
-        Some(xsd_value_to_xpath(xv, lexical, user_type))
+        let v = xsd_value_to_xpath(xv, lexical, user_type);
+        // Set the precise built-in kind — `xsd_value_to_xpath` reports
+        // only the primitive, so xs:normalizedString / xs:token / xs:ID /
+        // xs:NOTATION would collapse to "string".  The exact name makes
+        // the subtype lattice (`instance of xs:NOTATION`) answer
+        // correctly, independently of the `user_type` tag (a value can be
+        // both kind="NOTATION" and user-type "nota").
+        if let Value::Typed(mut t) = v {
+            t.kind = st.name.as_deref()
+                .and_then(sup_xml_core::xpath::eval::atomic_kind_static)
+                .unwrap_or_else(|| st.builtin.name());
+            return Some(Value::Typed(t));
+        }
+        Some(v)
     }
     fn call_function_in(
         &self, ns_uri: &str, name: &str, args: Vec<Value>,
@@ -6824,10 +6882,22 @@ fn evaluate_with_params(
             } else {
                 let nodes = build_rtf_nodes(state, &p.body, ctx_node, pos, size)?;
                 let s     = stringify(&nodes);
+                // Body-form param with an atomic `as=` type: atomise the
+                // constructed text and cast to the declared type (XSLT
+                // 2.0 §10) so it carries the type forward (e.g.
+                // `as="xs:anyURI+"` over a body of `xs:anyURI(...)`).
+                let mut value = Value::String(s);
+                if let Some(t) = &p.as_type {
+                    if as_target_is_atomic(t) {
+                        if let Some(st) = parse_as_atomic_type(t) {
+                            value = coerce_to_atomic_sequence(value, &st, state.idx)?;
+                        }
+                    }
+                }
                 if p.tunnel {
-                    state.tunnel_pool.insert(qname_key(&p.name), Value::String(s));
+                    state.tunnel_pool.insert(qname_key(&p.name), value);
                 } else {
-                    out.push((p.name.clone(), Value::String(s), Some(nodes)));
+                    out.push((p.name.clone(), value, Some(nodes)));
                 }
             }
         };

@@ -580,6 +580,16 @@ impl TypedAtomic {
     }
 }
 
+/// Wrap a lexical string as a [`Value::Typed`] of a non-numeric,
+/// non-boolean built-in XSD type — the carrier for F&O functions whose
+/// return type is a specific atomic type (`fn:base-uri` → `xs:anyURI`,
+/// `fn:local-name-from-QName` → `xs:NCName`).  Returning a typed value
+/// (not a bare `Value::String`) is what makes `instance of` answer
+/// correctly per XPath 2.0 §3.10.2.
+pub fn typed_str(kind: &'static str, lexical: String) -> Value {
+    Value::Typed(Box::new(TypedAtomic::builtin(kind, lexical, None, None)))
+}
+
 /// XSD type-hierarchy lookup — parent of a derived type per
 /// XML Schema Part 2 §3.  Returns `None` when `t` is unknown or is
 /// already `anyType` (the universal supertype).  The chain bottoms
@@ -1496,27 +1506,37 @@ pub fn eval_expr<I: DocIndexLike>(expr: &Expr, ctx: &EvalCtx<'_>, idx: &I) -> Re
             // `prefix:local` name; `instance of` is decided by the value's
             // *declared* type, not its lexical space.
             if let crate::xpath::ast::ItemType::Atomic(name) = &st.item {
-                if let Some((prefix, local)) = name.split_once(':') {
-                    if let Some(uri) = resolve_prefix_or_implicit(ctx.bindings, prefix) {
-                        let value_type = match &v {
-                            Value::Typed(t) => t.user_type.as_deref()
-                                .map(|(ns, l)| (ns.as_str(), l.as_str())),
-                            _ => None,
+                // Resolve the target as a schema (user) type: a prefixed
+                // name through the in-scope namespaces; an unprefixed
+                // name that isn't a built-in atomic as a no-namespace
+                // schema type (a `targetNamespace`-less schema's
+                // `instance of nota`).
+                let target = match name.split_once(':') {
+                    Some((prefix, local)) => resolve_prefix_or_implicit(ctx.bindings, prefix)
+                        .map(|uri| (uri, local)),
+                    None if atomic_kind_static(name).is_none() =>
+                        Some((String::new(), name.as_str())),
+                    None => None,
+                };
+                if let Some((uri, local)) = target {
+                    let value_type = match &v {
+                        Value::Typed(t) => t.user_type.as_deref()
+                            .map(|(ns, l)| (ns.as_str(), l.as_str())),
+                        _ => None,
+                    };
+                    // Only intercept when the target is a known schema
+                    // type; otherwise fall through to the ordinary path.
+                    if let Some(matches_type) =
+                        ctx.bindings.instance_of_user_type(&uri, local, value_type)
+                    {
+                        let ok = match sequence_len(&v) {
+                            0 => matches!(st.occurrence,
+                                crate::xpath::ast::Occurrence::Optional
+                                | crate::xpath::ast::Occurrence::ZeroOrMore),
+                            1 => matches_type,
+                            _ => false,
                         };
-                        // Only intercept when the target is a known schema
-                        // type; otherwise fall through to the ordinary path.
-                        if let Some(matches_type) =
-                            ctx.bindings.instance_of_user_type(&uri, local, value_type)
-                        {
-                            let ok = match sequence_len(&v) {
-                                0 => matches!(st.occurrence,
-                                    crate::xpath::ast::Occurrence::Optional
-                                    | crate::xpath::ast::Occurrence::ZeroOrMore),
-                                1 => matches_type,
-                                _ => false,
-                            };
-                            return Ok(Value::Boolean(ok));
-                        }
+                        return Ok(Value::Boolean(ok));
                     }
                 }
             }
@@ -7702,7 +7722,7 @@ fn eval_function<I: DocIndexLike>(name: &str, args: &[Expr], ctx: &EvalCtx<'_>, 
                 });
             }
             match base {
-                Some(u) => Ok(Value::String(u)),
+                Some(u) => Ok(typed_str("anyURI", u)),
                 None    => Ok(Value::NodeSet(Vec::new())),
             }
         }
@@ -7714,7 +7734,7 @@ fn eval_function<I: DocIndexLike>(name: &str, args: &[Expr], ctx: &EvalCtx<'_>, 
                 return Err(xpath_err("static-base-uri() takes no arguments"));
             }
             match ctx.bindings.static_base_uri() {
-                Some(s) => Ok(Value::String(s)),
+                Some(s) => Ok(typed_str("anyURI", s)),
                 None    => Ok(Value::NodeSet(vec![])),
             }
         }
@@ -7763,12 +7783,12 @@ fn eval_function<I: DocIndexLike>(name: &str, args: &[Expr], ctx: &EvalCtx<'_>, 
             // Empty $relative resolves to the base URI itself
             // (RFC 3986 §5.2.2 / XPath 2.0 §15.5.7).
             if rel.is_empty() && !base.is_empty() {
-                return Ok(Value::String(base));
+                return Ok(typed_str("anyURI", base));
             }
             if base.is_empty() {
-                return Ok(Value::String(rel));
+                return Ok(typed_str("anyURI", rel));
             }
-            Ok(Value::String(resolve_uri_rfc3986(&base, &rel)))
+            Ok(typed_str("anyURI", resolve_uri_rfc3986(&base, &rel)))
         }
         // XPath 2.0 §10.5 — accessor functions on xs:date /
         // xs:dateTime / xs:time / xs:duration.  Values flow through
@@ -7865,7 +7885,7 @@ fn eval_function<I: DocIndexLike>(name: &str, args: &[Expr], ctx: &EvalCtx<'_>, 
             let uri = target.filter(|&n| idx.kind(n) == XPathNodeKind::Document)
                 .and_then(|n| ctx.bindings.node_base_uri(n));
             match uri {
-                Some(u) => Ok(Value::String(u)),
+                Some(u) => Ok(typed_str("anyURI", u)),
                 None    => Ok(Value::NodeSet(Vec::new())),
             }
         }
@@ -7971,7 +7991,7 @@ fn eval_function<I: DocIndexLike>(name: &str, args: &[Expr], ctx: &EvalCtx<'_>, 
             } else if let Some(i) = s.rfind(':') {
                 s[i + 1..].to_string()
             } else { s };
-            Ok(Value::String(local))
+            Ok(typed_str("NCName", local))
         }
         "prefix-from-QName" => {
             check_args!(1);
@@ -7991,7 +8011,7 @@ fn eval_function<I: DocIndexLike>(name: &str, args: &[Expr], ctx: &EvalCtx<'_>, 
             let s = value_to_string_with(&a, idx, ctx.bindings);
             if s.starts_with('{') {
                 if let Some(end) = s.find('}') {
-                    return Ok(Value::String(s[1..end].to_string()));
+                    return Ok(typed_str("anyURI", s[1..end].to_string()));
                 }
             }
             Ok(Value::String(String::new()))
@@ -8720,7 +8740,14 @@ fn value_matches_sequence_type<I: DocIndexLike>(
             // atomic values do the obvious match.
             let try_one = |s: &str| atomic_string_castable(s, name);
             match v {
-                Value::String(s)  => try_one(s),
+                // XPath 2.0 §3.10.2 — `instance of` tests the value's
+                // dynamic type; it does NOT cast.  A `Value::String` is
+                // an xs:string (literal) or xs:untypedAtomic (atomized
+                // untyped content); typed values flow through
+                // `Value::Typed`/`Value::Number`.  So it matches only
+                // the string family and the atomic super-types.
+                Value::String(_)  => matches!(name.as_str(),
+                    "string" | "untypedAtomic" | "anyAtomicType" | "anySimpleType"),
                 // A number matches `xs:T` per the XSD subtype lattice
                 // read from its own kind — `xs:integer 1` is an
                 // instance of xs:integer / xs:decimal / xs:anyAtomicType
