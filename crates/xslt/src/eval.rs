@@ -223,6 +223,43 @@ struct XsltBindings<'a, I: DocIndexLike> {
     source_types:         Option<&'a SourceTypes>,
 }
 
+#[cfg(feature = "xsd")]
+impl<'a, I: DocIndexLike> XsltBindings<'a, I> {
+    /// Produce the typed atomic value of `lexical` interpreted as the
+    /// named schema type `(ns, local)` — for atomizing a constructed
+    /// node carrying a `type=` / `xsl:type=` annotation.  Built-in XSD
+    /// target types are tagged with their exact built-in name (so
+    /// `instance of xs:ID` / `xs:integer` match precisely); user types
+    /// resolve against the imported schemas and keep their declared
+    /// name.  Returns `None` if the type is unknown or the lexical
+    /// value doesn't validate (caller falls back to untyped).
+    fn typed_value_for_named_type(&self, ns: &str, local: &str, lexical: &str)
+        -> Option<Value>
+    {
+        use sup_xml_core::xsd::{BuiltinType, SimpleType, QName as XQName, TypeRef};
+        const XSD_NS: &str = "http://www.w3.org/2001/XMLSchema";
+        if ns == XSD_NS {
+            let bt = BuiltinType::from_name(local)?;
+            let xv = SimpleType::of_builtin(bt).validate(lexical).ok()?;
+            // Tag with the exact built-in name (xsd_value_to_xpath only
+            // knows the primitive — e.g. it would render xs:ID as
+            // "string"; the precise name makes the subtype lattice work).
+            return Some(match xsd_value_to_xpath(xv, lexical, None) {
+                Value::Typed(mut t) => { t.kind = bt.name(); Value::Typed(t) }
+                other => other,
+            });
+        }
+        let qn = XQName::new((!ns.is_empty()).then_some(ns), local);
+        for schema in &self.style.schemas {
+            if let Some(TypeRef::Simple(st)) = schema.type_def(&qn) {
+                let xv = st.validate(lexical).ok()?;
+                return Some(xsd_value_to_xpath(xv, lexical, Some((ns, local))));
+            }
+        }
+        None
+    }
+}
+
 /// Does the stylesheet's `version=` attribute select XSLT 3.0 or
 /// higher?  Used to gate XSLT-3-only static-context pre-bindings
 /// (`fn`, `math`, etc.) — XSLT 1.0 / 2.0 leave these unbound and
@@ -517,6 +554,12 @@ impl<'a, I: DocIndexLike> XPathBindings for XsltBindings<'a, I> {
     #[cfg(feature = "xsd")]
     fn node_typed_value(&self, node_id: NodeId, lexical: &str) -> Option<Value> {
         use sup_xml_core::xsd::TypeRef;
+        // Constructed (RTF) nodes built with a `type=` / `xsl:type=`
+        // annotation carry their type in the index's RTF PSVI table;
+        // source nodes carry theirs in the validated-source table.
+        if let Some((ns, local)) = self.idx.rtf_node_type(node_id) {
+            return self.typed_value_for_named_type(&ns, &local, lexical);
+        }
         let nt = self.source_types?.by_node.get(&node_id)?;
         // Only simple-typed (and simple-content) nodes have an
         // atomizable typed value here; complex element-only content
@@ -2766,7 +2809,7 @@ fn copy_result_node(state: &mut EvalState, n: &crate::result_tree::ResultNode) {
         ResultNode::Text { content, dose } => {
             state.builder.push_text(content.clone(), *dose);
         }
-        ResultNode::Element { name, namespaces, attributes, children } => {
+        ResultNode::Element { name, namespaces, attributes, children, .. } => {
             state.builder.open_element(name.clone());
             for (p, u) in namespaces {
                 state.builder.push_namespace_decl(p.clone(), u.clone());
@@ -3172,13 +3215,19 @@ fn eval_instr(
     size:     usize,
 ) -> Result<()> {
     match instr {
-        Instr::LiteralElement { name, attributes, namespaces, use_attribute_sets, body } => {
+        Instr::LiteralElement { name, attributes, namespaces, use_attribute_sets, schema_type, body } => {
             // Apply xsl:namespace-alias before emit (XSLT 1.0
             // §7.1.1) — rewrites the stylesheet-side URI to the
             // result-side URI for both element and attribute
             // namespaces.
             let element_name = apply_namespace_alias(state, name);
             state.builder.open_element(element_name.clone());
+            // XSLT 2.0 §11.2.1 — an `xsl:type=` on the LRE annotates the
+            // constructed element with that schema type, so its typed
+            // value is recoverable by `data()` / `instance of`.
+            if let Some(t) = schema_type {
+                state.builder.set_current_element_type(t.clone());
+            }
             if !element_name.uri.is_empty() {
                 state.builder.push_namespace_decl(element_name.prefix.clone(), element_name.uri.clone());
             }
@@ -6624,6 +6673,14 @@ fn deep_copy_into_builder<I: DocIndexLike>(
                 uri:    idx.namespace_uri(node).to_string(),
             };
             builder.open_element(q);
+            // Preserve a constructed node's schema type across the copy
+            // (XSLT 2.0 §11.9 validation="preserve" — the default when
+            // default-validation="preserve").  Only typed RTF nodes
+            // carry an annotation, so this is a no-op for ordinary
+            // untyped copies.
+            if let Some(t) = idx.rtf_node_type(node) {
+                builder.set_current_element_type(t);
+            }
             for ns_id in idx.ns_range(node) {
                 let prefix = idx.local_name(ns_id);
                 if prefix == "xml" { continue; }
@@ -7362,13 +7419,14 @@ fn add_result_node_and_return_id(
             b.start_attrs(owner);
             Some(b.add_attribute(owner, &qname, &name.uri, prefix, value))
         }
-        ResultNode::Element { name, attributes, namespaces, children } => {
+        ResultNode::Element { name, attributes, namespaces, children, schema_type } => {
             let prefix_str = name.prefix.as_deref();
             let qname = match prefix_str {
                 Some(p) if !p.is_empty() => format!("{p}:{}", name.local),
                 _                        => name.local.clone(),
             };
             let elem = b.add_element(parent, &qname, &name.uri, prefix_str);
+            if let Some(t) = schema_type { b.typed_nodes.push((elem, t.clone())); }
             if !attributes.is_empty() {
                 b.start_attrs(elem);
                 for (aname, value) in attributes {
@@ -7433,13 +7491,14 @@ fn add_result_node(
             };
             b.add_attribute(parent, &qname, &name.uri, prefix, value);
         }
-        ResultNode::Element { name, attributes, namespaces, children } => {
+        ResultNode::Element { name, attributes, namespaces, children, schema_type } => {
             let prefix_str = name.prefix.as_deref();
             let qname = match prefix_str {
                 Some(p) if !p.is_empty() => format!("{p}:{}", name.local),
                 _                        => name.local.clone(),
             };
             let elem = b.add_element(parent, &qname, &name.uri, prefix_str);
+            if let Some(t) = schema_type { b.typed_nodes.push((elem, t.clone())); }
             // Attributes — emitted as a contiguous range before
             // the namespace and content slabs so the source-order
             // `attribute::` axis enumeration is correct.
@@ -7501,8 +7560,13 @@ fn store_rtf(state: &mut EvalState, key: &str, nodes: Vec<ResultNode>) {
 /// by xsl:copy-of when fed an RTF.
 fn copy_result_node_into(state: &mut EvalState, node: &ResultNode) {
     match node {
-        ResultNode::Element { name, namespaces, attributes, children } => {
+        ResultNode::Element { name, namespaces, attributes, children, schema_type } => {
             state.builder.open_element(name.clone());
+            // Preserve the constructed node's schema type across the copy
+            // (validation="preserve" / default-validation="preserve").
+            if let Some(t) = schema_type {
+                state.builder.set_current_element_type((**t).clone());
+            }
             for (p, u) in namespaces {
                 state.builder.push_namespace_decl(p.clone(), u.clone());
             }

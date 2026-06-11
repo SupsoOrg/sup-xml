@@ -90,6 +90,14 @@ pub struct DocIndex<'doc> {
     /// wraps and refuse them as document roots.  Interior-mutable so
     /// the XSLT engine can mark wraps via the `&DocIndex` it holds.
     synthetic_wraps: std::cell::RefCell<std::collections::HashSet<NodeId>>,
+    /// Schema-aware: governing type `(ns, local)` for RTF (constructed-
+    /// tree) nodes built with a `type=` / `xsl:type=` annotation.  Keyed
+    /// by the node's globally-encoded RTF id.  Populated by
+    /// [`finish_rtf`](Self::finish_rtf) draining the builder's
+    /// `typed_nodes`; read back via [`rtf_node_type`](Self::rtf_node_type)
+    /// so `data()` / `instance of` see a constructed node's declared
+    /// type.  Empty unless schema-aware construction occurred.
+    rtf_node_types: std::cell::RefCell<std::collections::HashMap<NodeId, Box<(String, String)>>>,
 }
 
 /// Top-bit-set IDs are EXSLT-synthesised text nodes.  The remaining
@@ -110,6 +118,7 @@ impl<'doc> DocIndex<'doc> {
             synthetic: std::cell::RefCell::new(Vec::new()),
             rtfs:      elsa::FrozenVec::new(),
             synthetic_wraps: std::cell::RefCell::new(std::collections::HashSet::new()),
+            rtf_node_types:  std::cell::RefCell::new(std::collections::HashMap::new()),
         };
         // Node 0: synthetic Document.
         idx.nodes.push(INode {
@@ -491,14 +500,30 @@ impl<'doc> DocIndex<'doc> {
     /// Freeze a populated builder into the host vector.  Returns
     /// the globally-encoded id of the RTF's document node so the
     /// caller can bind a variable directly to it.
-    pub fn finish_rtf(&self, builder: super::rtf::RtfBuilder) -> NodeId {
+    pub fn finish_rtf(&self, mut builder: super::rtf::RtfBuilder) -> NodeId {
         let host_index = builder.host_index;
+        // Drain any schema-type annotations the builder collected for
+        // constructed nodes into the index's PSVI table (the encoded
+        // ids are already global, so they're valid keys regardless of
+        // when the RTF slot is pushed below).
+        if !builder.typed_nodes.is_empty() {
+            let mut tbl = self.rtf_node_types.borrow_mut();
+            for (id, ty) in builder.typed_nodes.drain(..) {
+                tbl.insert(id, ty);
+            }
+        }
         let rtf = builder.build();
         // FrozenVec::push takes shared &self and returns &T with
         // a lifetime tied to the FrozenVec.  Boxes stay put; only
         // the outer vector's tail grows.
         self.rtfs.push(Box::new(rtf));
         super::rtf::encode_rtf_id(host_index, 0)
+    }
+
+    /// Governing type `(ns, local)` recorded for a constructed RTF node,
+    /// if it was built with a `type=` / `xsl:type=` annotation.
+    pub fn rtf_node_type(&self, id: NodeId) -> Option<(String, String)> {
+        self.rtf_node_types.borrow().get(&id).map(|b| (**b).clone())
     }
 
     /// Graft a fully-parsed [`sup_xml_tree::dom::Document`] into the
@@ -691,6 +716,9 @@ impl<'doc> DocIndexLike for DocIndex<'doc> {
     }
     fn finish_rtf(&self, builder: super::rtf::RtfBuilder) -> Option<NodeId> {
         Some(DocIndex::finish_rtf(self, builder))
+    }
+    fn rtf_node_type(&self, id: NodeId) -> Option<(String, String)> {
+        DocIndex::rtf_node_type(self, id)
     }
     fn is_synthetic_wrap(&self, id: NodeId) -> bool {
         DocIndex::is_synthetic_wrap(self, id)

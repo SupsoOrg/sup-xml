@@ -28,6 +28,14 @@ pub enum ResultNode {
         namespaces: Vec<(Option<String>, String)>,
         attributes: Vec<(QName, String)>,
         children:   Vec<ResultNode>,
+        /// Schema-aware: the expanded name `(ns, local)` of the type
+        /// this element was constructed as — from a `type=` / `xsl:type=`
+        /// attribute or a `validation=` mode.  `None` for the ordinary
+        /// untyped case.  Carried through RTF indexing so a constructed
+        /// node's typed value is recoverable by `data()` /
+        /// `instance of` (XSLT 2.0 §5.7.1, annotation-for-constructed-
+        /// element).
+        schema_type: Option<Box<(String, String)>>,
     },
     Text {
         content: String,
@@ -138,10 +146,21 @@ impl ResultBuilder {
             },
             attributes: Vec::new(),
             children:   Vec::new(),
+            schema_type: None,
         });
         // A new element body opens a fresh sequence-constructor scope
         // for atomic-separator purposes.
         self.last_was_atomic = false;
+    }
+
+    /// Record the schema type `(ns, local)` of the element currently
+    /// under construction (the top of the build stack) — set from an
+    /// `xsl:type=` / `type=` attribute (XSLT 2.0 §5.7.1).  No-op when
+    /// no element is open.
+    pub fn set_current_element_type(&mut self, ty: (String, String)) {
+        if let Some(ResultNode::Element { schema_type, .. }) = self.stack.last_mut() {
+            *schema_type = Some(Box::new(ty));
+        }
     }
 
     /// The default namespace currently in scope, walking outwards

@@ -115,7 +115,7 @@ fn serialize_xml_node(
     let xml_11   = opts.version.as_deref() == Some("1.1");
     let enc_cap  = encoding_capability(opts.encoding.as_deref());
     match node {
-        ResultNode::Element { name, namespaces, attributes, children } => {
+        ResultNode::Element { name, namespaces, attributes, children, .. } => {
             let q = name.to_qname_string();
             out.push('<');
             out.push_str(&q);
@@ -365,7 +365,7 @@ pub fn serialize_html(tree: &ResultTree) -> String {
 
 fn serialize_html_node(node: &ResultNode, out: &mut String) {
     match node {
-        ResultNode::Element { name, namespaces, attributes, children } => {
+        ResultNode::Element { name, namespaces, attributes, children, .. } => {
             let local_lc = name.local.to_lowercase();
             let q = name.to_qname_string();
             out.push('<');

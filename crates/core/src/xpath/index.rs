@@ -144,6 +144,12 @@ pub trait DocIndexLike {
     /// [`rtf_builder`](Self::rtf_builder); default returns `None`.
     fn finish_rtf(&self, _builder: super::rtf::RtfBuilder) -> Option<NodeId> { None }
 
+    /// Schema-aware: governing type `(ns, local)` of a constructed RTF
+    /// node built with a `type=` / `xsl:type=` annotation, if any.
+    /// Default `None` — indexes without RTF type tracking report every
+    /// constructed node as untyped.
+    fn rtf_node_type(&self, _id: NodeId) -> Option<(String, String)> { None }
+
     /// True when `id` is a synthetic RTF doc-wrap that holds the
     /// items of a sequence-typed XSLT binding rather than a real
     /// XML / XSLT document tree.  Used by XSLT's XTDE1270 / XTDE1370

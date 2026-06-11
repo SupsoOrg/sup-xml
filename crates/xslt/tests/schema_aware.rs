@@ -72,3 +72,33 @@ fn data_of_schema_typed_source_node_is_typed() {
     assert!(out.contains(r#"is-string="false""#),
         "an xs:integer-typed value is NOT an instance of xs:string, got: {out}");
 }
+
+/// A constructed element carrying `xsl:type="xs:integer"` atomizes to a
+/// typed integer: canonical "3", an instance of xs:integer but not
+/// xs:string.  No schema import needed — the type is built-in.
+#[test]
+fn data_of_constructed_typed_element_is_typed() {
+    let xsl = r#"<xsl:stylesheet version="2.0"
+            xmlns:xsl="http://www.w3.org/1999/XSL/Transform"
+            xmlns:xs="http://www.w3.org/2001/XMLSchema">
+        <xsl:variable name="t"><e xsl:type="xs:integer">003</e></xsl:variable>
+        <xsl:template match="/">
+            <out canonical="{data($t/e)}"
+                 is-int="{data($t/e) instance of xs:integer}"
+                 is-str="{data($t/e) instance of xs:string}"/>
+        </xsl:template>
+    </xsl:stylesheet>"#;
+
+    let style = Stylesheet::compile_str(xsl).expect("compile");
+    let mut opts = ParseOptions::default();
+    opts.namespace_aware = true;
+    let src = parse_str("<doc/>", &opts).unwrap();
+    let out = style.apply(&src).expect("apply").to_string().unwrap();
+
+    assert!(out.contains(r#"canonical="3""#),
+        "constructed xs:integer should atomize to canonical '3', got: {out}");
+    assert!(out.contains(r#"is-int="true""#),
+        "constructed xs:integer-typed value is an instance of xs:integer, got: {out}");
+    assert!(out.contains(r#"is-str="false""#),
+        "constructed xs:integer is NOT an instance of xs:string, got: {out}");
+}

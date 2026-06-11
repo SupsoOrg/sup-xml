@@ -5424,6 +5424,7 @@ fn compile_literal_element(node: &Node) -> Result<Instr, XsltError> {
     }
     let mut attributes = Vec::new();
     let mut use_attribute_sets: Vec<QName> = Vec::new();
+    let mut schema_type: Option<(String, String)> = None;
     for attr in node.attributes() {
         // Skip namespace declarations — they're collected separately
         // below into `namespaces`, not emitted as attribute templates.
@@ -5454,6 +5455,9 @@ fn compile_literal_element(node: &Node) -> Result<Instr, XsltError> {
             }
             if aname.local == "use-attribute-sets" {
                 use_attribute_sets = parse_qname_list(node, attr.value())?;
+            }
+            if aname.local == "type" {
+                schema_type = resolve_type_qname(node, attr.value());
             }
             continue;
         }
@@ -5553,8 +5557,40 @@ fn compile_literal_element(node: &Node) -> Result<Instr, XsltError> {
         attributes,
         namespaces,
         use_attribute_sets,
+        schema_type,
         body: compile_body(node)?,
     })
+}
+
+/// Resolve a QName-valued attribute (e.g. an `xsl:type="xs:integer"`)
+/// against the namespaces in scope on `node`, returning the expanded
+/// `(namespace, local)`.  Walks `node` and its ancestors for the
+/// prefix binding; an unprefixed name resolves to the in-scope default
+/// namespace (or no namespace).  `None` when the prefix is undeclared.
+fn resolve_type_qname(node: &Node, value: &str) -> Option<(String, String)> {
+    let value = value.trim();
+    let (prefix, local) = match value.split_once(':') {
+        Some((p, l)) => (Some(p), l),
+        None         => (None, value),
+    };
+    if prefix == Some("xml") {
+        return Some(("http://www.w3.org/XML/1998/namespace".into(), local.into()));
+    }
+    let mut cur = Some(node);
+    while let Some(n) = cur {
+        for (p, uri) in n.ns_declarations() {
+            match (prefix, p) {
+                (Some(want), Some(got)) if want == got =>
+                    return Some((uri.to_string(), local.to_string())),
+                (None, None) =>
+                    return Some((uri.to_string(), local.to_string())),
+                _ => {}
+            }
+        }
+        cur = n.parent.get();
+    }
+    // Unprefixed with no in-scope default namespace → no namespace.
+    prefix.is_none().then(|| (String::new(), local.to_string()))
 }
 
 /// Read `exclude-result-prefixes` and `extension-element-prefixes`

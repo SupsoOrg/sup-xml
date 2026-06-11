@@ -288,12 +288,18 @@ pub struct RtfBuilder {
     /// construction.
     pub(crate) host_index: usize,
     pub(crate) nodes:      Vec<RtfNode>,
+    /// Schema-aware: `(encoded NodeId, (type-ns, type-local))` for each
+    /// constructed node carrying a `type=` / `xsl:type=` annotation.
+    /// Collected during construction (the builder already encodes ids
+    /// to global form) and drained into the host index's PSVI table by
+    /// [`DocIndex::finish_rtf`](super::context::DocIndex).
+    pub typed_nodes: Vec<(NodeId, Box<(String, String)>)>,
 }
 
 impl RtfBuilder {
     #[allow(dead_code)] // wired through DocIndex::start_rtf in the next step
     pub(crate) fn new(host_index: usize) -> Self {
-        Self { host_index, nodes: Vec::new() }
+        Self { host_index, nodes: Vec::new(), typed_nodes: Vec::new() }
     }
 
     #[inline]

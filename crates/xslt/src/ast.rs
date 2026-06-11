@@ -209,6 +209,11 @@ pub enum Instr {
         /// `xsl:use-attribute-sets` on the LRE — the named attribute
         /// sets to apply before any LRE-declared attributes.
         use_attribute_sets: Vec<QName>,
+        /// Schema-aware: expanded name `(ns, local)` of the type named
+        /// by an `xsl:type=` attribute (XSLT 2.0 §11.2.1).  `None` for
+        /// the ordinary untyped LRE.  Annotates the constructed element
+        /// so its typed value is recoverable.
+        schema_type: Option<(String, String)>,
         body:       Vec<Instr>,
     },
     /// Literal text node — verbatim character content with no
