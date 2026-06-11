@@ -5311,6 +5311,52 @@ fn eval_array_function<I: DocIndexLike>(
             });
             Ok(Value::Array(Box::new(keyed.into_iter().map(|(_, m)| m).collect())))
         }
+        // array:put($array, $position, $member) — a new array with the
+        // member at $position replaced (F&O 3.1 §17.3.6).  $member is a
+        // single member (the whole supplied value, which may itself be a
+        // sequence).  Position must be in 1..size.
+        "put" => {
+            let mut a = as_array(&args[0])?;
+            let pos = value_to_number(&args[1], idx);
+            if pos.fract() == 0.0 && pos >= 1.0 && (pos as usize) <= a.len() {
+                a[pos as usize - 1] = args[2].clone();
+                Ok(Value::Array(Box::new(a)))
+            } else {
+                Err(xpath_err("array:put: position out of bounds (FOAY0001)"))
+            }
+        }
+        // array:insert-before($array, $position, $member) — insert
+        // $member before $position (F&O 3.1 §17.3.7).  Position is in
+        // 1..size+1 (size+1 appends).
+        "insert-before" => {
+            let mut a = as_array(&args[0])?;
+            let pos = value_to_number(&args[1], idx);
+            if pos.fract() == 0.0 && pos >= 1.0 && (pos as usize) <= a.len() + 1 {
+                a.insert(pos as usize - 1, args[2].clone());
+                Ok(Value::Array(Box::new(a)))
+            } else {
+                Err(xpath_err("array:insert-before: position out of bounds (FOAY0001)"))
+            }
+        }
+        // array:remove($array, $positions) — a new array without the
+        // members at the given positions (F&O 3.1 §17.3.8).  $positions
+        // is a sequence of integers, each in 1..size.
+        "remove" => {
+            let a = as_array(&args[0])?;
+            let mut drop: std::collections::HashSet<usize> = std::collections::HashSet::new();
+            for p in items_of(&args[1]) {
+                let n = value_to_number(&p, idx);
+                if n.fract() != 0.0 || n < 1.0 || (n as usize) > a.len() {
+                    return Err(xpath_err("array:remove: position out of bounds (FOAY0001)"));
+                }
+                drop.insert(n as usize);
+            }
+            let out: Vec<Value> = a.into_iter().enumerate()
+                .filter(|(i, _)| !drop.contains(&(i + 1)))
+                .map(|(_, m)| m)
+                .collect();
+            Ok(Value::Array(Box::new(out)))
+        }
         // array:members / array:flatten variants returning the members
         // as a sequence are covered by `flatten`; expose `members`-style
         // access via `subarray`/`get`.

@@ -1023,4 +1023,19 @@ mod arena_tests {
         assert_eq!(eval31("function-arity(function($a,$b){ $a }) "), "2");
         assert_eq!(eval31("apply(concat#3, ['a','b','c'])"), "abc");
     }
+
+    #[test]
+    fn array_put_insert_remove() {
+        // array:put replaces the member at the position (size unchanged).
+        assert_eq!(eval31("array:size(array:put([1,2,3], 2, 9))"), "3");
+        assert_eq!(eval31("array:get(array:put([1,2,3], 2, 9), 2)"), "9");
+        // array:insert-before grows the array; size+1 appends at the end.
+        assert_eq!(eval31("array:size(array:insert-before([1,2,3], 2, 9))"), "4");
+        assert_eq!(eval31("array:get(array:insert-before([1,2,3], 2, 9), 2)"), "9");
+        assert_eq!(eval31("array:get(array:insert-before([1,2,3], 4, 9), 4)"), "9");
+        // array:remove drops every listed position (sequence of indices).
+        assert_eq!(eval31("array:size(array:remove([1,2,3,4], (2,4)))"), "2");
+        assert_eq!(eval31("array:get(array:remove([1,2,3,4], (2,4)), 2)"), "3");
+        assert_eq!(eval31("array:size(array:remove([1,2,3], 2))"), "2");
+    }
 }
