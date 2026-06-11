@@ -134,3 +134,30 @@ fn data_of_constructed_typed_attribute_is_typed() {
     assert!(out.contains(r#"is-str="false""#),
         "constructed xs:integer attribute is NOT an instance of xs:string, got: {out}");
 }
+
+#[test]
+fn number_of_function_item_errors() {
+    let xsl = r#"<xsl:stylesheet version="3.0" xmlns:xsl="http://www.w3.org/1999/XSL/Transform"
+        xmlns:xs="http://www.w3.org/2001/XMLSchema" xmlns:local="http://local/">
+      <xsl:function name="local:f" as="xs:integer"><xsl:param name="x" as="xs:integer"/>
+        <xsl:sequence select="$x + 1"/></xsl:function>
+      <xsl:template match="/"><out><xsl:value-of select="number(local:f#1)"/></out></xsl:template>
+    </xsl:stylesheet>"#;
+    let style = Stylesheet::compile_str(xsl).expect("compile");
+    let mut opts = ParseOptions::default(); opts.namespace_aware = true;
+    let src = parse_str("<doc/>", &opts).unwrap();
+    assert!(style.apply(&src).is_err(), "number() of a function item must error (FOTY0013)");
+}
+
+#[test]
+fn untyped_atomic_arithmetic_is_double() {
+    let xsl = r#"<xsl:stylesheet version="3.0" xmlns:xsl="http://www.w3.org/1999/XSL/Transform"
+        xmlns:xs="http://www.w3.org/2001/XMLSchema">
+      <xsl:template match="/"><out><xsl:value-of select="xs:untypedAtomic('123.456') + 1"/></out></xsl:template>
+    </xsl:stylesheet>"#;
+    let style = Stylesheet::compile_str(xsl).expect("compile");
+    let mut opts = ParseOptions::default(); opts.namespace_aware = true;
+    let src = parse_str("<doc/>", &opts).unwrap();
+    let out = style.apply(&src).unwrap().to_string().unwrap();
+    assert!(out.contains("124.456"), "untypedAtomic+int must be xs:double (124.456), got: {out}");
+}

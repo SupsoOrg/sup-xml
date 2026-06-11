@@ -4697,6 +4697,11 @@ fn integer_result(n: i64, bindings: &dyn XPathBindings) -> Value {
 fn numeric_kind_of(v: &Value) -> Option<&'static str> {
     match v {
         Value::Number(n) => Some(n.kind()),
+        // XPath 2.0 §6.2 — an xs:untypedAtomic operand is cast to
+        // xs:double for arithmetic, so the result promotes as double
+        // (otherwise `untypedAtomic('1.5') + 1` would wrongly yield an
+        // xs:integer and truncate).
+        Value::Typed(t) if t.kind == "untypedAtomic" => Some("double"),
         Value::Typed(t) if t.numeric.is_some() => Some(t.kind),
         Value::IntRange { .. } => Some("integer"),
         _ => None,
@@ -6761,6 +6766,16 @@ fn eval_function<I: DocIndexLike>(name: &str, args: &[Expr], ctx: &EvalCtx<'_>, 
                 check_args!(1);
                 arg!(0)
             };
+            // fn:number atomizes its argument; a function item has no
+            // typed value, so atomizing one is a type error (FOTY0013),
+            // not NaN.
+            if value_is_function(&v)
+                || matches!(&v, Value::Sequence(items) if items.iter().any(value_is_function))
+            {
+                return Err(xpath_err(
+                    "number(): a function item cannot be atomized (FOTY0013)")
+                    .with_xpath_code("FOTY0013"));
+            }
             // libxml2 quirk: `number('-')` returns -0, not NaN.  Per
             // spec § 4.4 the result is NaN for any non-numeric
             // lexical form, but matching libxml2 lets corpora that
