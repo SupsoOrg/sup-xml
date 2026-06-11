@@ -4702,7 +4702,7 @@ fn eval_instr(
             body_r?;
             state.builder.close_element();
         }
-        Instr::Attribute { name, namespace, select, separator, body, in_scope_namespaces } => {
+        Instr::Attribute { name, namespace, select, separator, body, in_scope_namespaces, schema_type } => {
             let name_str = render_avt(state, name, ctx_node, pos, size)?;
             if name_str.trim().is_empty() {
                 return Err(XsltError::InvalidStylesheet(
@@ -4820,6 +4820,11 @@ fn eval_instr(
             let aq = QName { prefix: prefix.clone(), local, uri: resolved_uri };
             if !aq.uri.is_empty() && aq.prefix.is_some() {
                 state.builder.push_namespace_decl(aq.prefix.clone(), aq.uri.clone());
+            }
+            // XSLT 2.0 §11.3 — a `type=` on xsl:attribute annotates the
+            // constructed attribute so its typed value is recoverable.
+            if let Some(t) = schema_type {
+                state.builder.set_current_attr_type(aq.clone(), t.clone());
             }
             state.builder.push_attribute(aq, value);
         }
@@ -6456,7 +6461,7 @@ fn build_function_subtree<I: DocIndexLike>(
                 build_function_subtree(elt_body, bindings, idx, ctx_node, pos, size, builder, static_ctx)?;
                 builder.close_element();
             }
-            Instr::Attribute { name, namespace, select, separator, body: a_body, in_scope_namespaces } => {
+            Instr::Attribute { name, namespace, select, separator, body: a_body, in_scope_namespaces, .. } => {
                 let name_str = render_avt_static(name, bindings, idx, ctx_node, pos, size, static_ctx)?;
                 let explicit_ns = namespace.is_some();
                 let ns_uri = match namespace {
@@ -6695,6 +6700,9 @@ fn deep_copy_into_builder<I: DocIndexLike>(
                     local:  idx.local_name(attr).to_string(),
                     uri:    idx.namespace_uri(attr).to_string(),
                 };
+                if let Some(t) = idx.rtf_node_type(attr) {
+                    builder.set_current_attr_type(aq.clone(), t);
+                }
                 builder.push_attribute(aq, idx.string_value(attr));
             }
             for &child in idx.children(node) {
@@ -7419,7 +7427,7 @@ fn add_result_node_and_return_id(
             b.start_attrs(owner);
             Some(b.add_attribute(owner, &qname, &name.uri, prefix, value))
         }
-        ResultNode::Element { name, attributes, namespaces, children, schema_type } => {
+        ResultNode::Element { name, attributes, namespaces, children, schema_type, attr_types } => {
             let prefix_str = name.prefix.as_deref();
             let qname = match prefix_str {
                 Some(p) if !p.is_empty() => format!("{p}:{}", name.local),
@@ -7435,7 +7443,12 @@ fn add_result_node_and_return_id(
                         Some(p) if !p.is_empty() => format!("{p}:{}", aname.local),
                         _                        => aname.local.clone(),
                     };
-                    b.add_attribute(elem, &aq, &aname.uri, aprefix, value);
+                    let aid = b.add_attribute(elem, &aq, &aname.uri, aprefix, value);
+                    if let Some((_, t)) = attr_types.iter()
+                        .find(|(n, _)| n.uri == aname.uri && n.local == aname.local)
+                    {
+                        b.typed_nodes.push((aid, t.clone()));
+                    }
                 }
             }
             // Same namespace-node logic as [`add_result_node`] — see
@@ -7491,7 +7504,7 @@ fn add_result_node(
             };
             b.add_attribute(parent, &qname, &name.uri, prefix, value);
         }
-        ResultNode::Element { name, attributes, namespaces, children, schema_type } => {
+        ResultNode::Element { name, attributes, namespaces, children, schema_type, attr_types } => {
             let prefix_str = name.prefix.as_deref();
             let qname = match prefix_str {
                 Some(p) if !p.is_empty() => format!("{p}:{}", name.local),
@@ -7510,7 +7523,12 @@ fn add_result_node(
                         Some(p) if !p.is_empty() => format!("{p}:{}", aname.local),
                         _                        => aname.local.clone(),
                     };
-                    b.add_attribute(elem, &aq, &aname.uri, aprefix, value);
+                    let aid = b.add_attribute(elem, &aq, &aname.uri, aprefix, value);
+                    if let Some((_, t)) = attr_types.iter()
+                        .find(|(n, _)| n.uri == aname.uri && n.local == aname.local)
+                    {
+                        b.typed_nodes.push((aid, t.clone()));
+                    }
                 }
             }
             // Namespace nodes — XPath 2.0 §2.5.2 says the
@@ -7560,7 +7578,7 @@ fn store_rtf(state: &mut EvalState, key: &str, nodes: Vec<ResultNode>) {
 /// by xsl:copy-of when fed an RTF.
 fn copy_result_node_into(state: &mut EvalState, node: &ResultNode) {
     match node {
-        ResultNode::Element { name, namespaces, attributes, children, schema_type } => {
+        ResultNode::Element { name, namespaces, attributes, children, schema_type, attr_types } => {
             state.builder.open_element(name.clone());
             // Preserve the constructed node's schema type across the copy
             // (validation="preserve" / default-validation="preserve").
@@ -7571,6 +7589,11 @@ fn copy_result_node_into(state: &mut EvalState, node: &ResultNode) {
                 state.builder.push_namespace_decl(p.clone(), u.clone());
             }
             for (an, v) in attributes {
+                if let Some((_, t)) = attr_types.iter()
+                    .find(|(n, _)| n.uri == an.uri && n.local == an.local)
+                {
+                    state.builder.set_current_attr_type(an.clone(), (**t).clone());
+                }
                 state.builder.push_attribute(an.clone(), v.clone());
             }
             for c in children { copy_result_node_into(state, c); }

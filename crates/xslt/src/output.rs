@@ -452,6 +452,8 @@ mod tests {
             namespaces: Vec::new(),
             attributes: Vec::new(),
             children,
+            schema_type: None,
+            attr_types: Vec::new(),
         }
     }
 
@@ -493,7 +495,9 @@ mod tests {
                 r#"x"&y<z"#.to_string(),
             )],
             children: Vec::new(),
-        }], None);
+            schema_type: None,
+            attr_types: Vec::new(),
+        }],None);
         assert_eq!(t.to_string().unwrap(), r#"<a href="x&quot;&amp;y&lt;z"/>"#);
     }
 
@@ -667,7 +671,9 @@ mod tests {
             ],
             attributes: Vec::new(),
             children: Vec::new(),
-        }], None);
+            schema_type: None,
+            attr_types: Vec::new(),
+        }],None);
         let s = t.to_string().unwrap();
         assert!(s.contains(r#"xmlns:xs="http://www.w3.org/2001/XMLSchema""#), "got: {s}");
         assert!(s.contains(r#"xmlns="http://example.com/default""#), "got: {s}");
@@ -751,7 +757,9 @@ mod tests {
                 "x\ny\tz\rw".to_string(),
             )],
             children: Vec::new(),
-        }], None);
+            schema_type: None,
+            attr_types: Vec::new(),
+        }],None);
         let s = t.to_string().unwrap();
         assert!(s.contains("&#10;"), "got: {s}");
         assert!(s.contains("&#9;"),  "got: {s}");
@@ -821,7 +829,9 @@ mod tests {
             ],
             attributes: Vec::new(),
             children: Vec::new(),
-        }], Some("html"));
+            schema_type: None,
+            attr_types: Vec::new(),
+        }],Some("html"));
         let s = t.to_string().unwrap();
         assert!(s.contains(r#"xmlns:svg="http://www.w3.org/2000/svg""#), "got: {s}");
         assert!(s.contains(r#"xmlns="http://www.w3.org/1999/xhtml""#), "got: {s}");

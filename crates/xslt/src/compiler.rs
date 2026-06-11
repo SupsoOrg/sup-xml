@@ -5280,6 +5280,8 @@ fn compile_attribute(node: &Node) -> Result<Instr, XsltError> {
         separator: read_attribute(node, "separator").map(|s| avt(node, s)).transpose()?,
         body:      compile_body(node)?,
         in_scope_namespaces: collect_in_scope_namespaces(node),
+        schema_type: read_attribute(node, "type")
+            .and_then(|v| resolve_type_qname(node, v)),
     })
 }
 

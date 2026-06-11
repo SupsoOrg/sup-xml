@@ -358,6 +358,11 @@ pub enum Instr {
         /// In-scope namespaces at the `xsl:attribute` source
         /// location, for the same reason `xsl:element` carries them.
         in_scope_namespaces: Vec<(Option<String>, String)>,
+        /// Schema-aware: expanded name `(ns, local)` of the type named
+        /// by a `type=` attribute (XSLT 2.0 §11.3).  `None` for the
+        /// untyped case.  Annotates the constructed attribute so its
+        /// typed value is recoverable by `data()` / `instance of`.
+        schema_type: Option<(String, String)>,
     },
     Comment {
         /// XSLT 2.0 §11.8 `select=` shortcut — comment text is the

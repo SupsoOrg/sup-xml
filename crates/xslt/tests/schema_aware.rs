@@ -102,3 +102,35 @@ fn data_of_constructed_typed_element_is_typed() {
     assert!(out.contains(r#"is-str="false""#),
         "constructed xs:integer is NOT an instance of xs:string, got: {out}");
 }
+
+/// A constructed attribute carrying `type="xs:integer"` atomizes to a
+/// typed integer through `data(@a)` — canonical "3", an instance of
+/// xs:integer but not xs:string.
+#[test]
+fn data_of_constructed_typed_attribute_is_typed() {
+    let xsl = r#"<xsl:stylesheet version="2.0"
+            xmlns:xsl="http://www.w3.org/1999/XSL/Transform"
+            xmlns:xs="http://www.w3.org/2001/XMLSchema">
+        <xsl:variable name="t">
+            <e><xsl:attribute name="n" type="xs:integer">003</xsl:attribute></e>
+        </xsl:variable>
+        <xsl:template match="/">
+            <out canonical="{data($t/e/@n)}"
+                 is-int="{data($t/e/@n) instance of xs:integer}"
+                 is-str="{data($t/e/@n) instance of xs:string}"/>
+        </xsl:template>
+    </xsl:stylesheet>"#;
+
+    let style = Stylesheet::compile_str(xsl).expect("compile");
+    let mut opts = ParseOptions::default();
+    opts.namespace_aware = true;
+    let src = parse_str("<doc/>", &opts).unwrap();
+    let out = style.apply(&src).expect("apply").to_string().unwrap();
+
+    assert!(out.contains(r#"canonical="3""#),
+        "constructed typed attribute should atomize to canonical '3', got: {out}");
+    assert!(out.contains(r#"is-int="true""#),
+        "constructed xs:integer attribute is an instance of xs:integer, got: {out}");
+    assert!(out.contains(r#"is-str="false""#),
+        "constructed xs:integer attribute is NOT an instance of xs:string, got: {out}");
+}

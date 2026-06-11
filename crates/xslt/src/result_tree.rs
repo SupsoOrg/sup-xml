@@ -36,6 +36,13 @@ pub enum ResultNode {
         /// `instance of` (XSLT 2.0 §5.7.1, annotation-for-constructed-
         /// element).
         schema_type: Option<Box<(String, String)>>,
+        /// Schema-aware: governing type `(ns, local)` for any of this
+        /// element's attributes constructed with a `type=` annotation,
+        /// keyed by attribute name.  Sparse — empty for the ordinary
+        /// untyped case.  Recorded into the RTF PSVI table alongside the
+        /// attribute node so `data(@a)` / `@a instance of …` see the
+        /// declared type.
+        attr_types: Vec<(QName, Box<(String, String)>)>,
     },
     Text {
         content: String,
@@ -147,6 +154,7 @@ impl ResultBuilder {
             attributes: Vec::new(),
             children:   Vec::new(),
             schema_type: None,
+            attr_types: Vec::new(),
         });
         // A new element body opens a fresh sequence-constructor scope
         // for atomic-separator purposes.
@@ -160,6 +168,16 @@ impl ResultBuilder {
     pub fn set_current_element_type(&mut self, ty: (String, String)) {
         if let Some(ResultNode::Element { schema_type, .. }) = self.stack.last_mut() {
             *schema_type = Some(Box::new(ty));
+        }
+    }
+
+    /// Record the schema type `(ns, local)` of an attribute named `name`
+    /// on the element currently under construction (from an
+    /// `<xsl:attribute type="…">`).  No-op when no element is open.
+    pub fn set_current_attr_type(&mut self, name: QName, ty: (String, String)) {
+        if let Some(ResultNode::Element { attr_types, .. }) = self.stack.last_mut() {
+            attr_types.retain(|(n, _)| n.uri != name.uri || n.local != name.local);
+            attr_types.push((name, Box::new(ty)));
         }
     }
 
