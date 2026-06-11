@@ -161,3 +161,19 @@ fn untyped_atomic_arithmetic_is_double() {
     let out = style.apply(&src).unwrap().to_string().unwrap();
     assert!(out.contains("124.456"), "untypedAtomic+int must be xs:double (124.456), got: {out}");
 }
+
+#[test]
+fn xsl_text_expand_text_tvt() {
+    // XSLT 3.0 §5.4.2 — xsl:text content is a text value template when
+    // expand-text is in scope (here on xsl:text itself).
+    let xsl = r#"<xsl:stylesheet version="3.0" xmlns:xsl="http://www.w3.org/1999/XSL/Transform">
+      <xsl:template match="/"><out>
+        <xsl:variable name="x" select="42"/>
+        <xsl:text expand-text="yes">value={$x}!</xsl:text>
+      </out></xsl:template></xsl:stylesheet>"#;
+    let style = Stylesheet::compile_str(xsl).expect("compile");
+    let mut o = ParseOptions::default(); o.namespace_aware = true;
+    let src = parse_str("<d/>", &o).unwrap();
+    let out = style.apply(&src).unwrap().to_string().unwrap();
+    assert!(out.contains("value=42!"), "expand-text TVT in xsl:text should expand {{$x}}, got: {out}");
+}

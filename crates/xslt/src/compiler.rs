@@ -5398,11 +5398,35 @@ fn compile_text(node: &Node) -> Result<Instr, XsltError> {
             _ => {}
         }
     }
-    Ok(Instr::LiteralText {
-        text,
-        dose: read_attribute(node, "disable-output-escaping")
-            .map(parse_yesno).unwrap_or(false),
-    })
+    let dose = read_attribute(node, "disable-output-escaping")
+        .map(parse_yesno).unwrap_or(false);
+    // XSLT 3.0 §5.4.2 — when `[xsl:]expand-text` is in scope, the
+    // content of xsl:text is a text value template: `{expr}` is
+    // evaluated.  expand-text declared on xsl:text itself takes
+    // precedence over an ancestor's value (nearest wins).
+    let expand = read_attribute(node, "expand-text")
+        .map(|v| matches!(v.trim(), "yes" | "true" | "1"))
+        .unwrap_or_else(|| expand_text_in_scope(node));
+    if expand && (text.contains('{') || text.contains('}')) {
+        let mut body = Vec::new();
+        for part in avt(node, &text)?.parts {
+            match part {
+                AvtPart::Literal(s) => if !s.is_empty() {
+                    body.push(Instr::LiteralText { text: s, dose });
+                },
+                AvtPart::Expr(e) => body.push(Instr::ValueOf {
+                    select: e, dose, separator: Some(Avt::literal(" ")),
+                }),
+            }
+        }
+        // Emit the parts as one instruction (an unconditional xsl:if),
+        // matching the literal-result-element text-value-template path.
+        return Ok(Instr::If {
+            test: sup_xml_core::xpath::parse_xpath("true()").map_err(XsltError::from)?,
+            body,
+        });
+    }
+    Ok(Instr::LiteralText { text, dose })
 }
 
 fn compile_number(node: &Node) -> Result<Instr, XsltError> {
