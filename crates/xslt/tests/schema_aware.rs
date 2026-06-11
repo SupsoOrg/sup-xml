@@ -134,4 +134,3 @@ fn data_of_constructed_typed_attribute_is_typed() {
     assert!(out.contains(r#"is-str="false""#),
         "constructed xs:integer attribute is NOT an instance of xs:string, got: {out}");
 }
-

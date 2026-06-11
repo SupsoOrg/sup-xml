@@ -1025,12 +1025,17 @@ pub fn compile(doc: &Document) -> Result<StylesheetAst, XsltError> {
     // main compilation pass.
     clear_static_params();
     for child in root.children() {
-        if !child.is_element() || !is_xslt_element(child)
-            || child.local_name() != "param" { continue; }
+        if !child.is_element() || !is_xslt_element(child) { continue; }
+        // XSLT 3.0 §3.5 — both `<xsl:param static="yes">` and
+        // `<xsl:variable static="yes">` are static: evaluated here in
+        // document order so each is in scope (via `use-when` / shadow
+        // attributes) for everything that follows.
+        let ln = child.local_name();
+        if ln != "param" && ln != "variable" { continue; }
         let is_static = read_attribute(child, "static")
             .map(|v| matches!(v, "yes" | "true" | "1")).unwrap_or(false);
         if !is_static { continue; }
-        let name = required_qname_attr(child, "name", "xsl:param")?;
+        let name = required_qname_attr(child, "name", "xsl:variable")?;
         let value = match read_attribute(child, "select") {
             Some(sel) => {
                 let e = parse_xpath_at(child, sel).map_err(XsltError::from)?;
