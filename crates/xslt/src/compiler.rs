@@ -3958,33 +3958,54 @@ fn compile_instr_into(node: &Node, out: &mut Vec<Instr>) -> Result<(), XsltError
         // 2.0 mode; in 1.0 mode it falls through to the
         // forwards-compatible "unknown instruction" handler.
         "sequence" => {
-            // XSLT 2.0 §7.1 — xsl:sequence takes only `select=`.
-            // The `as=` attribute permitted in early drafts was
-            // removed; presence is XTSE0090.
+            // XSLT 3.0 §5.5.2 — the value comes from either a `select=`
+            // attribute or the contained sequence constructor, but not
+            // both.  (The early-draft `as=` attribute is XTSE0090.)
             validate_xslt_only_attributes(node, "xsl:sequence", &["select"])?;
-            let sel = require_attr(node, "select", "xsl:sequence")?;
-            // XSLT 2.0 §7.1 / XTSE0010 — the element body must be
-            // empty except for optional xsl:fallback children.  Any
-            // other content (real instruction, LRE, non-whitespace
-            // text) is a static error.
-            for child in node.children() {
-                if child.is_element() {
-                    let is_fallback = is_xslt_element(child)
-                        && child.local_name() == "fallback";
-                    if !is_fallback {
-                        return Err(XsltError::InvalidStylesheet(format!(
-                            "xsl:sequence body may not contain <{}> \
-                             (only xsl:fallback is allowed — XTSE0010)",
-                            child.name()
-                        )));
+            match read_attribute(node, "select") {
+                Some(sel) => {
+                    // select form: the body may hold only xsl:fallback
+                    // children (XTSE0010); any other content is an error.
+                    for child in node.children() {
+                        if child.is_element() {
+                            let is_fallback = is_xslt_element(child)
+                                && child.local_name() == "fallback";
+                            if !is_fallback {
+                                return Err(XsltError::InvalidStylesheet(format!(
+                                    "xsl:sequence with select= may not also contain <{}> \
+                                     (only xsl:fallback is allowed — XTSE0010)",
+                                    child.name()
+                                )));
+                            }
+                        } else if is_text_like(child) && !child.content().trim().is_empty() {
+                            return Err(XsltError::InvalidStylesheet(
+                                "xsl:sequence with select= may not also contain text content \
+                                 (XTSE0010)".into()));
+                        }
                     }
-                } else if is_text_like(child) && !child.content().trim().is_empty() {
-                    return Err(XsltError::InvalidStylesheet(
-                        "xsl:sequence body may not contain text content \
-                         (XTSE0010)".into()));
+                    Instr::Sequence { select: parse_xpath_at(node, sel).map_err(XsltError::from)? }
+                }
+                // Body form: the value is the result of the contained
+                // sequence constructor.  This is an XSLT 3.0 feature —
+                // in 2.0 the select attribute is mandatory (XTSE0010).
+                None => {
+                    if !in_forwards_compat_mode() {
+                        return Err(XsltError::InvalidStylesheet(
+                            "xsl:sequence requires a select attribute; a contained \
+                             sequence constructor is only permitted in XSLT 3.0 \
+                             (XTSE0010)".into()));
+                    }
+                    // Run the constructor unconditionally — an always-true
+                    // xsl:if is exactly "evaluate this sequence constructor
+                    // in place", reusing the tested body machinery (focus,
+                    // walks, sinks) without a bespoke instruction.
+                    Instr::If {
+                        test: sup_xml_core::xpath::parse_xpath("true()")
+                            .map_err(XsltError::from)?,
+                        body: compile_body(node)?,
+                    }
                 }
             }
-            Instr::Sequence { select: parse_xpath_at(node, sel).map_err(XsltError::from)? }
         }
         "map"            => Instr::Map { body: compile_body(node)? },
         "map-entry"      => {
