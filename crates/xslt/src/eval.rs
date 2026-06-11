@@ -4370,6 +4370,35 @@ fn eval_instr(
                     }
                 }
             }
+            // Function / map / array items have no synthetic-node
+            // representation; iterate with `.` bound to the item itself
+            // (XSLT 3.0 §13 — the focus is the value), so e.g. a
+            // sequence of function items can be invoked with `.()`.
+            let is_fn_item = |it: &Value| matches!(it,
+                Value::Function(_) | Value::Map(_) | Value::Array(_));
+            if is_fn_item(&v)
+                || matches!(&v, Value::Sequence(items) if items.iter().any(is_fn_item))
+            {
+                let items: Vec<Value> = match v {
+                    Value::Sequence(items) => items,
+                    other => vec![other],
+                };
+                let items = sort_items_for_iter(state, items, sort, ctx_node)?;
+                state.variables.enter();
+                let prev_current = state.xslt_current;
+                let prev_apply_imports = state.apply_imports_ctx.take();
+                let total = items.len();
+                let mut result = Ok(());
+                for (i, item) in items.into_iter().enumerate() {
+                    result = sup_xml_core::xpath::eval::with_atomic_context_item(
+                        Some(item), || eval_body(state, body, ctx_node, i + 1, total));
+                    if result.is_err() { break; }
+                }
+                state.xslt_current = prev_current;
+                state.apply_imports_ctx = prev_apply_imports;
+                state.variables.leave();
+                return result;
+            }
             // Mark whether the selected sequence was atomic so the
             // iteration body sees the right context-item flavour
             // (XSLT 2.0 §13.2): an atomic select makes each iteration's
@@ -4444,7 +4473,11 @@ fn eval_instr(
             let _atomic_guard = select_is_atomic.then(AtomicForEachGuard::enter);
             for (i, child) in nodes.iter().enumerate() {
                 state.xslt_current = *child;
-                eval_body(state, body, *child, i + 1, total)?;
+                // Clear any enclosing atomic context item: a node-focused
+                // for-each makes `.` the node, even when nested inside an
+                // atomic / function-item iteration that set one.
+                sup_xml_core::xpath::eval::with_atomic_context_item(
+                    None, || eval_body(state, body, *child, i + 1, total))?;
             }
             state.xslt_current = prev_current;
             state.apply_imports_ctx = prev_apply_imports;
