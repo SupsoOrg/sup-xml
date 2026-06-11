@@ -366,12 +366,21 @@ fn rewrite_base_uri_calls(expr: &mut Expr, base: &str) {
     match expr {
         Expr::FunctionCall(name, args) => {
             let local = name.rsplit_once(':').map(|(_, l)| l).unwrap_or(name);
-            // fn:static-base-uri() with no arguments — drop the call
-            // entirely, replacing it with the literal base URI.
+            // fn:static-base-uri() with no arguments — replace the call
+            // with the call site's (per-node `xml:base`) base URI, cast
+            // to xs:anyURI so the result keeps its declared type
+            // (fn:static-base-uri returns xs:anyURI? — `instance of
+            // xs:anyURI` must hold; a bare string literal would fail
+            // strict instance-of while still serialising identically).
             if (name == "static-base-uri" || local == "static-base-uri" || name == "fn:static-base-uri")
                 && args.is_empty()
             {
-                *expr = Expr::Literal(base.to_string());
+                use sup_xml_core::xpath::ast::{ItemType, Occurrence, SequenceType};
+                *expr = Expr::CastAs(
+                    Box::new(Expr::Literal(base.to_string())),
+                    SequenceType { item: ItemType::Atomic("anyURI".into()),
+                                   occurrence: Occurrence::One },
+                );
                 return;
             }
             // fn:resolve-uri($x) — append the static base URI so the
