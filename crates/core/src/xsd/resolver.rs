@@ -20,7 +20,13 @@ use std::path::{Path, PathBuf};
 ///
 /// Implementations should be cheap to clone — the parser recursively
 /// invokes them while processing nested includes.
-pub trait SchemaResolver: Send + Sync {
+///
+/// The resolver is consumed synchronously by
+/// [`Schema::compile_with`](super::Schema::compile_with) and never
+/// stored or sent across threads, so no `Send`/`Sync` bound is
+/// required — letting a resolver borrow a non-`Sync` loader for the
+/// duration of one compile.
+pub trait SchemaResolver {
     fn resolve(
         &self,
         location: &str,

@@ -2334,10 +2334,28 @@ pub fn compile_with_imports(
     // actually depend on.
     #[cfg(feature = "xsd")]
     {
+        // Bridge the XSLT `Loader` to the XSD `SchemaResolver` so a
+        // schema's own `<xs:import>` / `<xs:include>` directives resolve
+        // through the same loader (relative to the host base).  Using
+        // `compile_with` rather than `compile_str` is what lets
+        // multi-file schemas (e.g. xs:notation schemas that import
+        // others) compile — `compile_str` rejects import/include.
+        struct LoaderResolver<'a> { loader: &'a dyn Loader, base: Option<&'a str> }
+        impl sup_xml_core::xsd::SchemaResolver for LoaderResolver<'_> {
+            fn resolve(&self, location: &str, _ns: Option<&str>)
+                -> std::result::Result<Option<Vec<u8>>, std::io::Error>
+            {
+                // Unresolvable references degrade to "not found" (None)
+                // rather than failing the whole compile — matches the
+                // lenient handling of the top-level import below.
+                Ok(self.loader.load(location, self.base).ok().map(String::into_bytes))
+            }
+        }
         let imports = ast.schema_imports.clone();
         for (_ns, location) in &imports {
             if let Ok(text) = loader.load(location, base) {
-                if let Ok(schema) = sup_xml_core::xsd::Schema::compile_str(&text) {
+                let resolver = LoaderResolver { loader, base };
+                if let Ok(schema) = sup_xml_core::xsd::Schema::compile_with(&text, resolver) {
                     ast.schemas.push(std::sync::Arc::new(schema));
                 }
             }
