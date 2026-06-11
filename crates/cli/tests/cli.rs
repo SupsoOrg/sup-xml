@@ -1451,6 +1451,8 @@ fn license_command_is_not_gated() {
 fn license_command_shows_info_with_a_valid_license() {
     let o = bin().arg("license").output().unwrap();
     assert_eq!(o.status.code(), Some(0), "stderr={}", stderr(&o));
+    // The certificate binds to the `sup-xml` project slug, which the command
+    // prints alongside the organization it was issued to.
     assert!(stdout(&o).contains("sup-xml"), "stdout={}", stdout(&o));
-    assert!(stdout(&o).contains("Acme Corp"), "stdout={}", stdout(&o));
+    assert!(stdout(&o).contains("Test Co"), "stdout={}", stdout(&o));
 }

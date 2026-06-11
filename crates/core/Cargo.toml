@@ -44,9 +44,10 @@ c-abi = ["sup-xml-tree/c-abi"]
 
 [dependencies]
 sup-xml-tree = { path = "../tree", version = "1.0.0" }
-# License gate: every document-parse entry point verifies a license
-# certificate once per process (cached) before producing a tree.
-sup-xml-license = { path = "../license", version = "1.0.0" }
+# License gate: every document-parse entry point verifies a Supso license
+# certificate once per process (cached) before producing a tree.  Offline
+# hybrid (Ed25519 + ML-DSA-44) verification, no network, no C toolchain.
+supso-project = "1.0.0"
 # Logging facade for the license-gate grace-period notice.  Routes to
 # whatever logger the host installed (env_logger, tracing-log, slog, …)
 # and is a silent no-op otherwise — a library must not write to stderr

@@ -552,18 +552,31 @@ fn dispatch(cli: &Cli) -> Result<(), CliError> {
 
 /// Gate for all non-`license` commands: a valid (or grace-period)
 /// license certificate must be present in one of the default locations
-/// (or via `SUPSO_LICENSE_PATH`).  See [`sup_xml_license::License::validate_certificate`].
+/// (or via `SUPSO_LICENSE_PATH`).
 fn require_license() -> Result<(), CliError> {
-    let cert = sup_xml_license::License::validate_certificate()
-        .map_err(|e| CliError::Unlicensed(e.to_string()))?;
-    // A grace-period certificate still licenses the command, but the
-    // lapse is surfaced on stderr so it isn't missed (a CLI rarely has a
-    // `log` subscriber installed to catch the gate's logged notice).
-    if let Some(notice) = cert.grace_notice() {
-        eprintln!("warning: {notice}");
+    use supso_project::{Enforcement, Status, Supso};
+
+    let now = chrono::Utc::now();
+    let status = Supso::project(LICENSE_PROJECT)
+        .enforcement(Enforcement::Silent)
+        .check_at(now);
+    match status {
+        Status::Valid(_) => Ok(()),
+        // A grace-period certificate still licenses the command, but the
+        // lapse is surfaced on stderr so it isn't missed (a CLI rarely has
+        // a `log` subscriber installed to catch the gate's logged notice).
+        Status::Grace { .. } => {
+            if let Some(notice) = status.grace_message(now) {
+                eprintln!("warning: {notice}");
+            }
+            Ok(())
+        }
+        Status::Unlicensed(e) => Err(CliError::Unlicensed(e.to_string())),
     }
-    Ok(())
 }
+
+/// The Supso project slug this build is licensed against.
+const LICENSE_PROJECT: &str = "sup-xml";
 
 // ── error type ────────────────────────────────────────────────────────────────
 
@@ -1459,17 +1472,18 @@ fn run_repair(args: &RepairArgs, g: &GlobalOpts) -> Result<(), CliError> {
 }
 
 fn run_license(args: &LicenseArgs, _g: &GlobalOpts) -> Result<(), CliError> {
-    use sup_xml_license::License;
+    use supso_project::{Enforcement, Supso};
 
-    let result = match &args.path {
-        Some(p) => sup_xml_license::validate_certificate_path(p),
-        None => License::validate_certificate(),
-    };
+    let now = chrono::Utc::now();
+    let mut builder = Supso::project(LICENSE_PROJECT).enforcement(Enforcement::Silent);
+    if let Some(p) = &args.path {
+        builder = builder.certificate_path(p.clone());
+    }
 
-    match result {
-        Ok(cert) => {
-            let lic = &cert.license;
-            match cert.grace_notice() {
+    let status = builder.check_at(now);
+    match status.license() {
+        Some(lic) => {
+            match status.grace_message(now) {
                 Some(notice) => {
                     println!("License: grace period");
                     println!("  {notice}");
@@ -1477,10 +1491,9 @@ fn run_license(args: &LicenseArgs, _g: &GlobalOpts) -> Result<(), CliError> {
                 None => println!("License: valid"),
             }
             println!("  Organization: {} ({})", lic.organization.name, lic.organization.id);
-            println!("  Project:      {}", lic.project.name);
+            println!("  Project:      {} ({})", lic.project.name, lic.project.slug);
             println!("  Order:        {}", lic.order.id);
             println!("  Expires:      {}", lic.order.expires_at);
-            println!("  Source:       {}", cert.path.display());
             // Surface any extra metadata (everything except the project
             // binding, which is shown above), sorted by key.
             for (k, v) in &lic.metadata {
@@ -1491,9 +1504,11 @@ fn run_license(args: &LicenseArgs, _g: &GlobalOpts) -> Result<(), CliError> {
             }
             Ok(())
         }
-        Err(e) => {
+        None => {
             eprintln!("License: not valid");
-            eprintln!("  {e}");
+            if let Some(e) = status.error() {
+                eprintln!("  {e}");
+            }
             Err(CliError::CheckFailed)
         }
     }

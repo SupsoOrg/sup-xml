@@ -3,14 +3,15 @@
 # whole thing" in one place so CI, contributors, and AI agents
 # don't drift on flag combinations.
 
-# Parsing requires a valid license certificate (see crates/license).
-# Point every workspace `cargo` invocation — tests, benches, examples,
-# doctests — at a committed, production-key-signed certificate so the
-# suite can parse.  This is workspace-local config; it is NOT shipped to
-# downstream consumers, so installed / published builds still require a
-# real license.  (The fixture expires 2030-01-01; replace it before then.)
+# Parsing requires a valid Supso license certificate (verified by the
+# `supso-project` crate).  Point every workspace `cargo` invocation —
+# tests, benches, examples, doctests — at a committed, production-key-signed
+# certificate so the suite can parse.  This is workspace-local config; it is
+# NOT shipped to downstream consumers, so installed / published builds still
+# require a real license.  (The fixture expires 2030-01-01; replace it
+# before then.)
 [env]
-SUPSO_LICENSE_PATH = { value = "crates/license/tests/fixtures/valid_certificate.cert", relative = true }
+SUPSO_LICENSE_PATH = { value = "tests/fixtures/license.cert", relative = true }
 
 [alias]
 # `cargo test-all` — runs every test in the workspace with every

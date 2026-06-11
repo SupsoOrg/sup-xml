@@ -24,5 +24,8 @@ path = "src/main.rs"
 # "html" feature here and turn off the CLI's --html / --html-out flags
 # if you need a leaner binary.
 sup-xml = { path = "../api", version = "1.0.0", features = ["xsd", "html", "network-resolver", "xslt"] }
-sup-xml-license = { path = "../license", version = "1.0.0" }
+supso-project = "1.0.0"
 clap = { version = "4", features = ["derive"] }
+# Wall clock for rendering the license grace-period notice. A binary may
+# freely use chrono's `clock`; the library crates avoid it.
+chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }

@@ -10,33 +10,60 @@
 //! Call [`verify_license`] at startup to verify eagerly and fail fast;
 //! otherwise the first document parse triggers the check.
 //!
-//! The certificate is located the same way [`sup_xml_license::License::validate_certificate`]
-//! describes: the `SUPSO_LICENSE_PATH` environment variable, then
+//! The certificate is located the way `supso_project` describes: the
+//! `SUPSO_LICENSE_PATH` environment variable, then
 //! `$HOME/.supso/license_certificates/`, then `./.supso/license_certificates/`.
 
 use crate::error::{ErrorDomain, ErrorLevel, Result, XmlError};
+use chrono::{DateTime, TimeZone, Utc};
 use std::sync::OnceLock;
+use supso_project::{Enforcement, Status, Supso};
+
+/// The Supso project slug this build is licensed against. The certificate's
+/// signed product binding must match this exactly.
+const PROJECT_SLUG: &str = "sup-xml";
 
 /// Cached verdict: `Ok(())` once a valid license has been seen, or the
 /// human-readable reason it failed. `String` (not the borrowed
-/// `CertificateError`) so it can live in a `'static` cache.
+/// `supso_project::Error`) so it can live in a `'static` cache.
 static VERDICT: OnceLock<std::result::Result<(), String>> = OnceLock::new();
 
+/// `DateTime<Utc>` from `SystemTime` without pulling in `iana-time-zone`
+/// (the chrono `clock` feature does). A library must not drag in OS-level
+/// timezone resolution it doesn't need.
+fn now() -> DateTime<Utc> {
+    let dur = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default();
+    DateTime::<Utc>::from_timestamp(dur.as_secs() as i64, dur.subsec_nanos())
+        .unwrap_or_else(|| Utc.timestamp_opt(0, 0).unwrap())
+}
+
 fn verdict() -> &'static std::result::Result<(), String> {
-    VERDICT.get_or_init(|| match sup_xml_license::License::validate_certificate() {
-        Ok(cert) => {
+    VERDICT.get_or_init(|| {
+        let at = now();
+        // `Silent`: this gate routes its grace notice through `log` so it
+        // lands in the host's tracker, rather than letting the library
+        // write to stderr unbidden.
+        let status = Supso::project(PROJECT_SLUG)
+            .enforcement(Enforcement::Silent)
+            .check_at(at);
+        match status {
+            Status::Valid(_) => Ok(()),
             // A certificate honoured under the post-expiry grace period
             // still licenses the process, but the lapse is logged at
             // `error` so it lands in the host's tracker. The day counts
             // in the message change daily, so a fresh alert fires each
             // day the lapse persists rather than one that is silenced
             // after first sight.
-            if let Some(notice) = cert.grace_notice() {
-                log::error!("{notice}");
+            Status::Grace { .. } => {
+                if let Some(notice) = status.grace_message(at) {
+                    log::error!("{notice}");
+                }
+                Ok(())
             }
-            Ok(())
+            Status::Unlicensed(e) => Err(e.to_string()),
         }
-        Err(e) => Err(e.to_string()),
     })
 }
 
