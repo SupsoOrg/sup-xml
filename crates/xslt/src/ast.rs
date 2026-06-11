@@ -507,6 +507,11 @@ pub enum Instr {
         xpath:        Expr,
         context_item: Option<Expr>,
         with_params:  Vec<WithParam>,
+        /// `schema-aware="yes"` (XSLT 3.0 §18.2) — only then may the
+        /// dynamically-evaluated expression reference imported schema
+        /// types.  Default `false`: schema types are not in scope, so a
+        /// reference to one is XPST0051.
+        schema_aware: bool,
     },
     /// `xsl:merge` (XSLT 3.0 §15) — merges several pre-sorted input
     /// sequences into one stream ordered by the merge keys, invoking
@@ -952,6 +957,10 @@ pub struct StylesheetAst {
     /// recorded at parse time and resolved against the loader once the
     /// module tree is assembled.
     pub schema_imports: Vec<(Option<String>, String)>,
+    /// Inline `<xs:schema>` content from `<xsl:import-schema>` elements,
+    /// serialized to XSD text (with in-scope namespaces injected so it
+    /// compiles standalone).  Compiled alongside `schema_imports`.
+    pub inline_schemas: Vec<String>,
     /// Schemas compiled from `schema_imports` (schema-aware processing).
     /// Empty unless the stylesheet imports a schema; consulted by
     /// `castable as` / `cast as` / `instance of` for user-defined types.

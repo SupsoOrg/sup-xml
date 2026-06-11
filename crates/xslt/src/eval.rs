@@ -574,6 +574,8 @@ impl<'a, I: DocIndexLike> XPathBindings for XsltBindings<'a, I> {
         // is an instance of the target user type iff its declared type is
         // the target itself or a member of the target union.
         use sup_xml_core::xsd::{types::Variety, QName as XQName, TypeRef};
+        // A non-schema-aware xsl:evaluate doesn't see imported types.
+        if schema_suppressed() { return None; }
         // Only answer YES, and only for a value with a declared user type:
         // its declared type is the target itself, or a member of the
         // target union.  Anything else falls through to the ordinary
@@ -594,6 +596,7 @@ impl<'a, I: DocIndexLike> XPathBindings for XsltBindings<'a, I> {
     }
     #[cfg(feature = "xsd")]
     fn schema_type_exists(&self, ns: &str, local: &str) -> bool {
+        if schema_suppressed() { return false; }
         use sup_xml_core::xsd::QName as XQName;
         let qn = XQName::new((!ns.is_empty()).then_some(ns), local);
         self.style.schemas.iter().any(|s| s.type_def(&qn).is_some())
@@ -3038,6 +3041,12 @@ thread_local! {
     /// silently using the enclosing focus.
     static CONTEXT_UNDEFINED: std::cell::Cell<bool> =
         const { std::cell::Cell::new(false) };
+    /// XSLT 3.0 §18.2 — true while evaluating a non-`schema-aware`
+    /// `xsl:evaluate` body, where imported schema types are NOT in
+    /// scope.  `XsltBindings`'s schema hooks consult this and report
+    /// no schema types, so a reference to one becomes XPST0051.
+    static SCHEMA_SUPPRESSED: std::cell::Cell<bool> =
+        const { std::cell::Cell::new(false) };
     /// XSLT 2.0 §13.2 — depth counter for `xsl:for-each` iterations
     /// whose `select=` yielded an *atomic* sequence (e.g.
     /// `select="1 to 5"`).  Our engine fabricates a synthetic text
@@ -3089,6 +3098,13 @@ fn in_temporary_output() -> bool {
 /// of silently working off the caller's focus.
 pub(crate) fn is_context_undefined() -> bool {
     CONTEXT_UNDEFINED.with(|c| c.get())
+}
+
+/// True while a non-`schema-aware` `xsl:evaluate` body is being
+/// evaluated — imported schema types are out of scope (XSLT 3.0 §18.2).
+#[cfg(feature = "xsd")]
+fn schema_suppressed() -> bool {
+    SCHEMA_SUPPRESSED.with(|c| c.get())
 }
 
 /// True iff the current iteration is inside an `xsl:for-each` whose
@@ -4213,7 +4229,7 @@ fn eval_instr(
             eval_body(state, body, root, 1, 1)?;
             state.xslt_current = prev_current;
         }
-        Instr::Evaluate { xpath, context_item, with_params } => {
+        Instr::Evaluate { xpath, context_item, with_params, schema_aware } => {
             // The xpath= expression yields the dynamic expression text.
             let xpath_str = value_to_string_styled(
                 &state.xpath_eval(xpath, ctx_node, pos, size)?, state.idx, state.num_style());
@@ -4241,7 +4257,12 @@ fn eval_instr(
             for (name, value, _) in &bound {
                 state.variables.bind(qname_key(name), value.clone());
             }
+            // XSLT 3.0 §18.2 — without schema-aware="yes" the dynamic
+            // expression can't see imported schema types; suppress them
+            // so a reference to one is XPST0051.
+            let prev_suppress = SCHEMA_SUPPRESSED.with(|c| c.replace(!schema_aware));
             let result = state.xpath_eval(&expr, cnode, 1, 1);
+            SCHEMA_SUPPRESSED.with(|c| c.set(prev_suppress));
             state.variables.leave();
             let v = result?;
             if state.sequence_sink_active() {
@@ -5140,7 +5161,9 @@ fn eval_instr(
         Instr::Variable(v) => {
             let mut val = evaluate_variable_value(state, v, ctx_node, pos, size)?;
             if let Some(t) = &v.as_type {
-                if let Some(st) = parse_as_atomic_type(t) {
+                if let Some(typed) = coerce_to_user_schema_type(&val, t, state.style, state.idx) {
+                    val = typed;
+                } else if let Some(st) = parse_as_atomic_type(t) {
                     val = coerce_to_atomic_sequence(val, &st, state.idx)?;
                 }
             }
@@ -5757,10 +5780,21 @@ pub(crate) fn coerce_to_user_schema_type<I: sup_xml_core::xpath::DocIndexLike>(
 ) -> Option<Value> {
     use sup_xml_core::xsd::{QName as XQName, TypeRef};
     let body = as_type.trim().trim_end_matches(['*', '+', '?']).trim();
-    let (prefix, local) = body.split_once(':')?;
-    if prefix == "xs" || prefix == "xsd" { return None; }
-    let ns = style.namespaces.get(prefix)?;
-    let qn = XQName::new(Some(ns.as_str()), local);
+    // Resolve the type name: a prefixed name via the stylesheet
+    // namespaces (skipping the xs:/xsd: built-ins); an unprefixed
+    // non-builtin name as a no-namespace schema type (a
+    // `targetNamespace`-less schema's `as="dateUnion"`).
+    let (ns, local): (String, &str) = match body.split_once(':') {
+        Some((prefix, l)) => {
+            if prefix == "xs" || prefix == "xsd" { return None; }
+            (style.namespaces.get(prefix)?.clone(), l)
+        }
+        None => {
+            if sup_xml_core::xpath::eval::atomic_kind_static(body).is_some() { return None; }
+            (String::new(), body)
+        }
+    };
+    let qn = XQName::new((!ns.is_empty()).then_some(ns.as_str()), local);
     for schema in &style.schemas {
         let Some(TypeRef::Simple(st)) = schema.type_def(&qn) else { continue };
         let s = sup_xml_core::xpath::eval::value_to_string(v, idx);

@@ -583,7 +583,7 @@ fn scan_instr<F: FnMut(&Expr)>(instr: &Instr, scan: &mut F) {
                 for child in &w.body { scan_instr(child, scan); }
             }
         }
-        Evaluate { xpath, context_item, with_params } => {
+        Evaluate { xpath, context_item, with_params, .. } => {
             scan(xpath);
             if let Some(e) = context_item { scan(e); }
             for w in with_params {
@@ -819,7 +819,7 @@ fn walk_instr(i: &Instr, out: &mut Vec<String>) {
         Instr::CallTemplate { with_params, .. } => {
             for w in with_params { collect_with_param(w, out); }
         }
-        Instr::Evaluate { xpath, context_item, with_params } => {
+        Instr::Evaluate { xpath, context_item, with_params, .. } => {
             walk_expr(xpath, out);
             if let Some(e) = context_item { walk_expr(e, out); }
             for w in with_params { collect_with_param(w, out); }

@@ -1686,6 +1686,16 @@ fn compile_top_level(node: &Node, ast: &mut StylesheetAst, pos: u32) -> Result<(
             if let Some(loc) = read_attribute(node, "schema-location") {
                 ast.schema_imports.push((namespace, loc.to_string()));
             }
+            // XSLT 2.0 §3.13 — an inline `<xs:schema>` child is an
+            // alternative to schema-location.  Serialize it (injecting
+            // the in-scope namespaces so xs:/xsd: resolve standalone)
+            // and compile it like any imported schema.
+            if let Some(inline) = node.children().find(|c|
+                matches!(c.kind, sup_xml_tree::dom::NodeKind::Element)
+                && c.name().rsplit(':').next() == Some("schema"))
+            {
+                ast.inline_schemas.push(serialize_inline_schema(inline));
+            }
         }
         "use-package"     => ast.use_packages.push(compile_use_package(node)?),
         "output"          => ast.outputs.push(compile_output(node)?),
@@ -2369,6 +2379,13 @@ pub fn compile_with_imports(
                 }
             }
         }
+        let inline = ast.inline_schemas.clone();
+        for text in &inline {
+            let resolver = LoaderResolver { loader, base };
+            if let Ok(schema) = sup_xml_core::xsd::Schema::compile_with(text, resolver) {
+                ast.schemas.push(std::sync::Arc::new(schema));
+            }
+        }
     }
     Ok(ast)
 }
@@ -2517,6 +2534,7 @@ fn compile_with_imports_inner(
     acc.modes.extend(local.modes);
     acc.accumulators.extend(local.accumulators);
     acc.schema_imports.extend(local.schema_imports);
+    acc.inline_schemas.extend(local.inline_schemas);
     // Decimal-formats merge per-attribute by import precedence (XSLT 2.0
     // §16.4.2): this module is merged at `this_precedence`; its imports
     // recurse below at a lower precedence and cannot override an
@@ -4690,7 +4708,10 @@ fn compile_evaluate(node: &Node) -> Result<Instr, XsltError> {
             with_params.push(compile_with_param(child)?);
         }
     }
-    Ok(Instr::Evaluate { xpath, context_item, with_params })
+    let schema_aware = read_attribute(node, "schema-aware")
+        .map(|s| s.trim() == "yes" || s.trim() == "1" || s.trim() == "true")
+        .unwrap_or(false);
+    Ok(Instr::Evaluate { xpath, context_item, with_params, schema_aware })
 }
 
 /// XSLT 3.0 §15 `xsl:merge` — one or more `xsl:merge-source` children
@@ -5589,6 +5610,39 @@ fn compile_literal_element(node: &Node) -> Result<Instr, XsltError> {
         schema_type,
         body: compile_body(node)?,
     })
+}
+
+/// Serialize an inline `<xs:schema>` subtree to standalone XSD text.
+///
+/// `serialize_node_to_string` emits only the element's *locally*
+/// declared namespaces, but a schema embedded in a stylesheet typically
+/// inherits `xmlns:xs` (and friends) from an ancestor — so the raw
+/// serialization wouldn't compile.  Inject every in-scope ancestor
+/// namespace not already declared on the `<xs:schema>` element into its
+/// start tag.
+fn serialize_inline_schema(schema_node: &Node) -> String {
+    use sup_xml_core::serializer::{serialize_node_to_string, SerializeOptions};
+    let body = serialize_node_to_string(schema_node, &SerializeOptions::default());
+    let mut seen: std::collections::HashSet<Option<String>> =
+        schema_node.ns_declarations().map(|(p, _)| p.map(str::to_owned)).collect();
+    let mut decls = String::new();
+    let mut cur = schema_node.parent.get();
+    while let Some(n) = cur {
+        for (prefix, uri) in n.ns_declarations() {
+            let key = prefix.map(str::to_owned);
+            if !seen.insert(key) || uri.is_empty() { continue; }
+            match prefix {
+                Some(p) => decls.push_str(&format!(" xmlns:{p}=\"{uri}\"")),
+                None    => decls.push_str(&format!(" xmlns=\"{uri}\"")),
+            }
+        }
+        cur = n.parent.get();
+    }
+    if decls.is_empty() { return body; }
+    match body.find([' ', '>', '/']) {
+        Some(pos) => format!("{}{}{}", &body[..pos], decls, &body[pos..]),
+        None      => body,
+    }
 }
 
 /// Resolve a QName-valued attribute (e.g. an `xsl:type="xs:integer"`)
