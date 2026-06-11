@@ -593,6 +593,12 @@ impl<'a, I: DocIndexLike> XPathBindings for XsltBindings<'a, I> {
         None
     }
     #[cfg(feature = "xsd")]
+    fn schema_type_exists(&self, ns: &str, local: &str) -> bool {
+        use sup_xml_core::xsd::QName as XQName;
+        let qn = XQName::new((!ns.is_empty()).then_some(ns), local);
+        self.style.schemas.iter().any(|s| s.type_def(&qn).is_some())
+    }
+    #[cfg(feature = "xsd")]
     fn node_schema_type(&self, node_id: NodeId) -> Option<(String, String)> {
         self.source_types?.by_node.get(&node_id)?.name.clone()
     }

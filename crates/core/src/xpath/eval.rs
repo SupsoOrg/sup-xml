@@ -765,6 +765,14 @@ pub trait XPathBindings {
     ) -> Option<bool> {
         None
     }
+    /// Schema-aware processing: does a simple type with this expanded
+    /// name exist in an in-scope schema?  Lets `instance of` / `cast as`
+    /// distinguish "the type is unknown" (XPST0051) from "the type is
+    /// known but the value isn't of it" (the operator's normal `false` /
+    /// failure).  Default `false` — no schema in scope.
+    fn schema_type_exists(&self, _ns: &str, _local: &str) -> bool {
+        false
+    }
     /// Schema-aware processing: the expanded name `(ns, local)` of the
     /// schema type that governs the source node `node_id`, as recorded
     /// by validating the source document against the in-scope schema
@@ -1524,8 +1532,8 @@ pub fn eval_expr<I: DocIndexLike>(expr: &Expr, ctx: &EvalCtx<'_>, idx: &I) -> Re
                             .map(|(ns, l)| (ns.as_str(), l.as_str())),
                         _ => None,
                     };
-                    // Only intercept when the target is a known schema
-                    // type; otherwise fall through to the ordinary path.
+                    // A known schema type with a typed value answers
+                    // directly.
                     if let Some(matches_type) =
                         ctx.bindings.instance_of_user_type(&uri, local, value_type)
                     {
@@ -1537,6 +1545,18 @@ pub fn eval_expr<I: DocIndexLike>(expr: &Expr, ctx: &EvalCtx<'_>, idx: &I) -> Re
                             _ => false,
                         };
                         return Ok(Value::Boolean(ok));
+                    }
+                    // XPath 2.0 §2.5.4.2 / XPST0051 — a type name resolving
+                    // to a non-XSD namespace (or no namespace) that isn't a
+                    // declared schema type is unknown.  (XSD-namespace names
+                    // are built-ins handled by `value_matches`; this fires
+                    // only for genuine user-type references with no
+                    // in-scope schema definition.)
+                    const XSD_NS: &str = "http://www.w3.org/2001/XMLSchema";
+                    if uri != XSD_NS && !ctx.bindings.schema_type_exists(&uri, local) {
+                        return Err(xpath_err(format!(
+                            "instance of: type {name} is not a known schema type \
+                             (XPST0051)")).with_xpath_code("XPST0051"));
                     }
                 }
             }
@@ -2247,6 +2267,9 @@ impl<'p> XPathBindings for ClosureBindings<'p> {
     fn instance_of_user_type(&self, ns: &str, l: &str, vt: Option<(&str, &str)>) -> Option<bool> {
         self.base.instance_of_user_type(ns, l, vt)
     }
+    fn schema_type_exists(&self, ns: &str, l: &str) -> bool {
+        self.base.schema_type_exists(ns, l)
+    }
     fn cast_to_user_type(&self, ns: &str, l: &str, v: &str) -> Option<Result<Value>> {
         self.base.cast_to_user_type(ns, l, v)
     }
@@ -2458,6 +2481,9 @@ impl<'p> XPathBindings for ScopedBindings<'p> {
     fn instance_of_user_type(&self, ns: &str, l: &str, vt: Option<(&str, &str)>) -> Option<bool> {
         self.parent.instance_of_user_type(ns, l, vt)
     }
+    fn schema_type_exists(&self, ns: &str, l: &str) -> bool {
+        self.parent.schema_type_exists(ns, l)
+    }
     fn cast_to_user_type(&self, ns: &str, l: &str, v: &str) -> Option<Result<Value>> {
         self.parent.cast_to_user_type(ns, l, v)
     }
@@ -2552,6 +2578,9 @@ impl<'p> XPathBindings for ErrBindings<'p> {
     }
     fn instance_of_user_type(&self, ns: &str, l: &str, vt: Option<(&str, &str)>) -> Option<bool> {
         self.parent.instance_of_user_type(ns, l, vt)
+    }
+    fn schema_type_exists(&self, ns: &str, l: &str) -> bool {
+        self.parent.schema_type_exists(ns, l)
     }
     fn cast_to_user_type(&self, ns: &str, l: &str, v: &str) -> Option<Result<Value>> {
         self.parent.cast_to_user_type(ns, l, v)
