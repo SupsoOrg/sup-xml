@@ -1627,6 +1627,7 @@ dependencies = [
  "pkg-config",
  "quick-xml",
  "roxmltree",
+ "simdutf8",
  "sup-xml",
  "sup-xml-core",
  "tendril 0.4.3",

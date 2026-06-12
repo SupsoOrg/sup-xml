@@ -19,6 +19,9 @@ anyxml        = "0.12"
 # own positioning (memory-safe drop-in replacement, full-validation arena DOM).
 xmloxide      = "0.4"
 memchr        = "2"
+# Direct handle on the same SIMD UTF-8 validator the parser's input gates
+# use, so the `validation` bench can A/B it against `std::str::from_utf8`.
+simdutf8      = "0.1"
 libc          = "0.2"
 criterion = { version = "0.5", features = ["html_reports"] }
 # html5ever competitor for the HTML bench — pinned to match what
@@ -35,6 +38,10 @@ mimalloc      = { version = "0.1", default-features = false }
 [build-dependencies]
 pkg-config = "0.3"
 cc         = "1"
+
+[[bench]]
+name    = "validation"
+harness = false
 
 [[bench]]
 name    = "parse"

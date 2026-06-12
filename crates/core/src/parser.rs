@@ -1951,6 +1951,111 @@ mod tests {
         assert_eq!(err.domain, crate::error::ErrorDomain::Encoding);
     }
 
+    // ── simdutf8 ⇄ std::str::from_utf8 equivalence ───────────────
+    //
+    // The input-validation gates (`parse_bytes_in_place`,
+    // `transcode_and_validate`, `XmlBytesReader::from_bytes`) use
+    // `simdutf8::compat::from_utf8` as a drop-in for `std::str::from_utf8`.
+    // The whole correctness claim is that it is *behaviorally identical*:
+    // same accept/reject verdict, and on rejection the same `valid_up_to()`
+    // and `error_len()` — the parser pins error line/col to `valid_up_to()`,
+    // so any divergence would silently shift reported error positions.
+    // These tests pin that equivalence against `std` as the oracle.
+
+    /// Reduce a validation outcome to a comparable shape: `Ok(())` when
+    /// valid, or the error's `(valid_up_to, error_len)` when not.
+    fn std_verdict(b: &[u8]) -> std::result::Result<(), (usize, Option<usize>)> {
+        std::str::from_utf8(b)
+            .map(|_| ())
+            .map_err(|e| (e.valid_up_to(), e.error_len()))
+    }
+
+    fn simd_verdict(b: &[u8]) -> std::result::Result<(), (usize, Option<usize>)> {
+        simdutf8::compat::from_utf8(b)
+            .map(|_| ())
+            .map_err(|e| (e.valid_up_to(), e.error_len()))
+    }
+
+    #[test]
+    fn simdutf8_matches_std_at_chunk_boundaries() {
+        // SIMD validators process vector-width chunks (16/32/64 bytes) then a
+        // scalar tail; bugs hide where a malformed byte straddles that seam.
+        // Sweep a lone 0xFF (never valid UTF-8) across every offset of buffers
+        // sized around the common vector widths, plus the clean buffer.
+        for len in [0usize, 1, 7, 8, 9, 15, 16, 17, 31, 32, 33, 63, 64, 65, 127, 128, 129] {
+            let base = vec![b'a'; len];
+            assert_eq!(std_verdict(&base), simd_verdict(&base), "clean buffer len {len}");
+            for pos in 0..len {
+                let mut bad = base.clone();
+                bad[pos] = 0xFF;
+                assert_eq!(
+                    std_verdict(&bad), simd_verdict(&bad),
+                    "diverged: lone 0xFF at offset {pos} in len {len}",
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn simdutf8_matches_std_on_adversarial_utf8() {
+        // The classic failure modes for hand-rolled UTF-8 validators: truncated
+        // multibyte sequences, overlong encodings, surrogate code points, lone
+        // continuation bytes, and valid→invalid transitions mid-stream.
+        let cases: &[&[u8]] = &[
+            b"",
+            b"hello",
+            &[0xC3, 0xA9],                          // é — valid 2-byte
+            &[0xC3],                                // truncated 2-byte lead
+            &[0xE2, 0x82, 0xAC],                    // € — valid 3-byte
+            &[0xE2, 0x82],                          // truncated 3-byte
+            &[0xF0, 0x9F, 0x98, 0x80],              // 😀 — valid 4-byte
+            &[0xF0, 0x9F, 0x98],                    // truncated 4-byte
+            &[0x80],                                // lone continuation
+            &[0xBF],                                // lone continuation
+            &[0xC0, 0x80],                          // overlong NUL
+            &[0xE0, 0x80, 0x80],                    // overlong 3-byte
+            &[0xF0, 0x80, 0x80, 0x80],              // overlong 4-byte
+            &[0xED, 0xA0, 0x80],                    // lone high surrogate U+D800
+            &[0xED, 0xBF, 0xBF],                    // lone low surrogate U+DFFF
+            &[0xF4, 0x90, 0x80, 0x80],              // above U+10FFFF
+            &[0xFF],
+            &[0xFE],
+            b"caf\xe9",                             // Latin-1 é — invalid as UTF-8
+            &[b'o', b'k', 0xC3, 0xA9, 0xFF, b'x'],  // valid run then invalid byte
+        ];
+        for c in cases {
+            assert_eq!(std_verdict(c), simd_verdict(c), "diverged on {c:02x?}");
+        }
+    }
+
+    #[test]
+    fn simdutf8_matches_std_on_random_bytes() {
+        // Deterministic xorshift corpus — no rng/clock dependency, so failures
+        // reproduce exactly.  Bias one byte in four into the 0x80..=0xFF range
+        // so lead/continuation logic gets exercised, not just ASCII runs.
+        let mut state = 0x9E3779B97F4A7C15u64;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        for _ in 0..20_000 {
+            let len = (next() % 70) as usize;
+            let mut buf = Vec::with_capacity(len);
+            for _ in 0..len {
+                let r = next();
+                let byte = if r & 3 == 0 {
+                    (r >> 8) as u8 | 0x80
+                } else {
+                    (r >> 8) as u8 & 0x7F
+                };
+                buf.push(byte);
+            }
+            assert_eq!(std_verdict(&buf), simd_verdict(&buf), "diverged on {buf:02x?}");
+        }
+    }
+
     #[test]
     fn in_place_decodes_builtin_entities() {
         // Slow-path exercise: text content with `&amp;` triggers entity

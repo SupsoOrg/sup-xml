@@ -47,3 +47,27 @@ jobs:
 
       - name: cargo test
         run: cargo test --workspace --exclude sup-xml-bench --all-features -- --test-threads=1 --nocapture
+
+  # The `simdutf8::compat::from_utf8` ⇄ `std::str::from_utf8` equivalence
+  # tests (parser.rs) run on every matrix entry above: the x86_64
+  # Linux/Windows runners exercise simdutf8's runtime-dispatched AVX2/SSE4.2
+  # paths, and the aarch64 macOS runner exercises NEON.  Only the scalar
+  # fallback is never selected on real hardware — so this job forces it by
+  # disabling NEON at compile time (simdutf8 gates its aarch64 path on
+  # `target_feature = "neon"`), pinning the scalar validator against `std`
+  # as the oracle too.
+  simd-scalar-fallback:
+    name: simdutf8 scalar fallback
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install stable Rust
+        run: rustup toolchain install stable --profile minimal
+
+      - name: cargo test (NEON disabled → scalar dispatch)
+        env:
+          # Replaces the workflow-level `-D warnings`; disabling a baseline
+          # aarch64 feature would otherwise trip the warnings-as-errors gate.
+          RUSTFLAGS: "-C target-feature=-neon"
+        run: cargo test -p sup-xml-core --lib simdutf8_matches -- --nocapture
