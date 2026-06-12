@@ -1509,6 +1509,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "simdutf8"
+version = "0.1.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e3a9fe34e3e7a50316060351f37187a3f546bce95496156754b601a5fa71b76e"
+
+[[package]]
 name = "siphasher"
 version = "1.0.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1599,6 +1605,7 @@ name = "sup-xml"
 version = "1.0.0"
 dependencies = [
  "serde",
+ "simdutf8",
  "sup-xml-core",
  "sup-xml-tree",
  "sup-xml-xslt",
@@ -1624,6 +1631,7 @@ dependencies = [
  "sup-xml-core",
  "tendril 0.4.3",
  "xml-rs",
+ "xmloxide",
 ]
 
 [[package]]
@@ -1665,6 +1673,7 @@ dependencies = [
  "regex",
  "rust_decimal",
  "rustc-hash",
+ "simdutf8",
  "sup-xml-tree",
  "supso-project",
  "unicode-properties",
@@ -2276,6 +2285,16 @@ name = "xml-rs"
 version = "0.8.28"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3ae8337f8a065cfc972643663ea4279e04e7256de865aa66fe25cec5fb912d3f"
+
+[[package]]
+name = "xmloxide"
+version = "0.4.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a44f46eed58c1d9456ee3bd6d7c20693695dca77b6764d15c065c4d8764de906"
+dependencies = [
+ "clap",
+ "encoding_rs",
+]
 
 [[package]]
 name = "yoke"

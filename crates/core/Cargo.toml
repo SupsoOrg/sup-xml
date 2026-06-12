@@ -59,6 +59,12 @@ log = "0.4"
 # parser otherwise — the arena flows through `DocumentBuilder`.
 bumpalo = "3"
 memchr = "2"
+# SIMD-accelerated UTF-8 validation for the upfront input-validation gate
+# (`from_bytes` / `transcode_and_validate`).  `compat::from_utf8` is a drop-in
+# for `std::str::from_utf8` — same `Utf8Error::valid_up_to()` API for error
+# positioning — with runtime CPU dispatch (AVX2/SSE4.2/NEON) and a scalar
+# fallback, so behavior is identical and only the happy path gets faster.
+simdutf8 = "0.1"
 # EXSLT `regexp:test` / `regexp:replace` (XPath function family at
 # http://exslt.org/regular-expressions).  Perl-style semantics —
 # matches what libexslt/libxml2 ship, modulo backreferences in

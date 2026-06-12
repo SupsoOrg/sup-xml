@@ -353,7 +353,7 @@ pub fn parse_bytes_in_place(buf: Vec<u8>, opts: &ParseOptions) -> Result<Documen
         // We still validate before parsing to keep the unsafe boundary
         // tight; the arena's name/text fields are `&str`, so we must
         // know the bytes are valid UTF-8 before we point at them.
-        std::str::from_utf8(&buf).map_err(|e| {
+        simdutf8::compat::from_utf8(&buf).map_err(|e| {
             XmlError::new(
                 ErrorDomain::Encoding,
                 ErrorLevel::Fatal,
@@ -405,7 +405,7 @@ fn transcode_and_validate(input: &[u8], opts: &ParseOptions) -> Result<Box<[u8]>
     } else {
         input.to_vec()
     };
-    std::str::from_utf8(&owned).map_err(|e| {
+    simdutf8::compat::from_utf8(&owned).map_err(|e| {
         // `valid_up_to` is the byte index of the first ill-formed
         // sequence in the post-transcode buffer — identical to the
         // caller's input byte index when input was already UTF-8.

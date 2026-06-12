@@ -251,6 +251,18 @@ fn run_roxmltree(bytes: &[u8]) {
     std::hint::black_box(n);
 }
 
+/// xmloxide (Document::parse_bytes):  a pure-Rust libxml2 reimplementation.
+/// Detects encoding, transcodes to UTF-8, runs a full W3C XML 1.0 (5th ed.)
+/// well-formedness parse, expands the builtin entities, and builds an
+/// arena-allocated owned DOM — the same validation contract as libxml2 and
+/// sup-xml's default path.  The descendants walk + count keeps the optimiser
+/// honest (the parse has to produce a tree we then traverse).
+fn run_xmloxide(bytes: &[u8]) {
+    let doc = xmloxide::Document::parse_bytes(bytes).expect("xmloxide parse failed");
+    let n = doc.descendants(doc.root()).count();
+    std::hint::black_box(n);
+}
+
 fn run_quick_xml_raw(bytes: &[u8]) {
     use quick_xml::Reader;
     use quick_xml::events::Event;
@@ -460,9 +472,6 @@ fn mb_per_sec(bytes: usize, t: std::time::Duration) -> f64 {
 
 // ── one head-to-head table ───────────────────────────────────────────────────
 
-/// `competitor_supports` — return `false` to print "-" for fixtures the
-/// competitor can't handle (e.g. roxmltree on DTDs without `allow_dtd`).
-/// For everything we currently bench all four return `true`.
 struct Pair {
     title:       &'static str,
     explanation: &'static [&'static str],  // paragraph, one element per line
@@ -473,6 +482,11 @@ struct Pair {
     default_fn:  fn(&[u8]),
     other_fn:    fn(&[u8]),
     accepts_non_utf8: bool,
+    /// Return `false` to print "-" in the competitor + ratio columns for a
+    /// fixture the competitor genuinely can't handle (e.g. xmloxide rejecting
+    /// a document that exceeds its 10000-entity-expansion cap).  sup-xml's own
+    /// columns are still timed and shown.  `None` means "handles everything".
+    other_supports: Option<fn(&[u8]) -> bool>,
 }
 
 fn print_pair(pair: &Pair, fixtures: &[(String, Vec<u8>)], iters: usize) {
@@ -504,16 +518,22 @@ fn print_pair(pair: &Pair, fixtures: &[(String, Vec<u8>)], iters: usize) {
             println!();
             continue;
         }
+        let other_ok = pair.other_supports.is_none_or(|supports| supports(bytes));
         let t_matched = time_best_of(pair.matched_fn, bytes, iters);
-        let t_other   = time_best_of(pair.other_fn,   bytes, iters);
         let t_default = time_best_of(pair.default_fn, bytes, iters);
         let m = mb_per_sec(bytes.len(), t_matched);
-        let o = mb_per_sec(bytes.len(), t_other);
         let d = mb_per_sec(bytes.len(), t_default);
-        let ratio = if o > 0.0 { m / o } else { 0.0 };
         print!("  {:>17.0} MB/s", m);
-        print!("  {:>17.0} MB/s", o);
-        print!("  {:>9.2}x", ratio);
+        if other_ok {
+            let t_other = time_best_of(pair.other_fn, bytes, iters);
+            let o = mb_per_sec(bytes.len(), t_other);
+            let ratio = if o > 0.0 { m / o } else { 0.0 };
+            print!("  {:>17.0} MB/s", o);
+            print!("  {:>9.2}x", ratio);
+        } else {
+            print!("  {:>22}", "-");
+            print!("  {:>10}", "-");
+        }
         print!("  {:>17.0} MB/s", d);
         println!();
     }
@@ -552,6 +572,33 @@ fn main() {
         default_fn:  run_sup_xml_arena_default,
         other_fn:    run_libxml2,
         accepts_non_utf8: false,
+        other_supports: None,
+    }, &fixtures, iters);
+
+    print_pair(&Pair {
+        title: "sup-xml DOM (arena)  vs  xmloxide",
+        explanation: &[
+            "xmloxide (Document::parse_bytes):  a pure-Rust reimplementation of",
+            "libxml2, positioned — like sup-xml — as a memory-safe drop-in",
+            "replacement.  Detects encoding, transcodes to UTF-8, runs a full",
+            "W3C XML 1.0 (5th ed.) well-formedness parse, expands the builtin",
+            "entities, and builds an arena-allocated owned DOM.  Its contract",
+            "matches libxml2 and sup-xml's default, so 'matched' = 'default'.",
+            "",
+            "This is the most apples-to-apples Rust comparison we have: both",
+            "sides are full-validation arena-DOM parsers with the same goal.",
+            "Both columns use sup-xml's bumpalo arena DOM (crates/tree/src/arena.rs).",
+        ],
+        matched_col: "sup-xml (arena)",
+        default_col: "sup-xml (arena)",
+        other_col:   "xmloxide",
+        matched_fn:  run_sup_xml_arena_default,
+        default_fn:  run_sup_xml_arena_default,
+        other_fn:    run_xmloxide,
+        accepts_non_utf8: false,
+        // xmloxide caps entity expansion at 10000 and rejects documents that
+        // exceed it (e.g. chinese1.xml), which libxml2 and sup-xml both accept.
+        other_supports: Some(|b| xmloxide::Document::parse_bytes(b).is_ok()),
     }, &fixtures, iters);
 
     print_pair(&Pair {
@@ -576,6 +623,7 @@ fn main() {
         default_fn:  run_sup_xml_arena_default,
         other_fn:    run_pugixml,
         accepts_non_utf8: false,
+        other_supports: None,
     }, &fixtures, iters);
 
     // Apples-to-apples take: sup-xml's arena DOM dialled down to pugixml's
@@ -603,6 +651,7 @@ fn main() {
         default_fn:  run_sup_xml_arena_default,
         other_fn:    run_pugixml,
         accepts_non_utf8: false,
+        other_supports: None,
     }, &fixtures, iters);
 
     print_pair(&Pair {
@@ -625,6 +674,7 @@ fn main() {
         default_fn:  run_sup_xml_default,
         other_fn:    run_roxmltree,
         accepts_non_utf8: false,
+        other_supports: None,
     }, &fixtures, iters);
 
     print_pair(&Pair {
@@ -649,6 +699,7 @@ fn main() {
         default_fn:  run_sup_xml_sax_default,
         other_fn:    run_quick_xml_raw,
         accepts_non_utf8: false,
+        other_supports: None,
     }, &fixtures, iters);
 
     print_pair(&Pair {
@@ -672,6 +723,7 @@ fn main() {
         default_fn:  run_sup_xml_sax_default,
         other_fn:    run_quick_xml_raw,
         accepts_non_utf8: false,
+        other_supports: None,
     }, &fixtures, iters);
 
     print_pair(&Pair {
@@ -693,6 +745,7 @@ fn main() {
         default_fn:  run_sup_xml_sax_default,
         other_fn:    run_quick_xml_trim,
         accepts_non_utf8: false,
+        other_supports: None,
     }, &fixtures, iters);
 
     print_pair(&Pair {
@@ -712,6 +765,7 @@ fn main() {
         default_fn:  run_sup_xml_sax_default,
         other_fn:    run_quick_xml_validated,
         accepts_non_utf8: false,
+        other_supports: None,
     }, &fixtures, iters);
 
     print_pair(&Pair {
@@ -728,6 +782,7 @@ fn main() {
         default_fn:  run_sup_xml_sax_default,
         other_fn:    run_xml_rs,
         accepts_non_utf8: false,
+        other_supports: None,
     }, &fixtures, iters);
 
     print_pair(&Pair {
@@ -749,6 +804,7 @@ fn main() {
         default_fn:  run_sup_xml_sax_default,
         other_fn:    run_anyxml,
         accepts_non_utf8: false,
+        other_supports: None,
     }, &fixtures, iters);
 
     println!();

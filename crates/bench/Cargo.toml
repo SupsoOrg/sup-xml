@@ -15,6 +15,9 @@ xml-rs        = "0.8"
 quick-xml     = "0.37"
 roxmltree     = "0.20"
 anyxml        = "0.12"
+# Pure-Rust libxml2 reimplementation — the closest competitor to sup-xml's
+# own positioning (memory-safe drop-in replacement, full-validation arena DOM).
+xmloxide      = "0.4"
 memchr        = "2"
 libc          = "0.2"
 criterion = { version = "0.5", features = ["html_reports"] }

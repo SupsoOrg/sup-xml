@@ -19,7 +19,7 @@ workspace = true
 # of XML directly into Rust values via Serde.  Adds a `serde` dependency;
 # disabled by default so users who only want the event/DOM API don't pay
 # the compile-time cost.
-serde = ["dep:serde"]
+serde = ["dep:serde", "dep:simdutf8"]
 # Pull in the XSD (XML Schema 1.0) validator under `sup_xml::xsd::*`.
 # Adds `rust_decimal` and `regex` via `sup-xml-core`'s `xsd` feature.
 xsd = ["sup-xml-core/xsd"]
@@ -47,6 +47,10 @@ sup-xml-tree = { path = "../tree", version = "1.0.0" }
 sup-xml-xslt = { path = "../xslt", version = "1.0.0", optional = true }
 serde = { version = "1", optional = true }
 tokio = { version = "1", optional = true, default-features = false, features = ["io-util"] }
+# SIMD-accelerated UTF-8 validation for the serde `from_bytes` entry — the
+# same `compat::from_utf8` drop-in the core parser's input gates use.  Only
+# the serde path needs it directly, so it rides the `serde` feature.
+simdutf8 = { version = "0.1", optional = true }
 
 [dev-dependencies]
 serde = { version = "1", features = ["derive"] }

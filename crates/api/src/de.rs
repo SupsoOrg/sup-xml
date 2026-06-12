@@ -88,7 +88,7 @@ pub fn from_str_opts<'de, T: Deserialize<'de>>(s: &'de str, opts: DeOptions) -> 
 
 /// Like [`from_bytes`], with caller-supplied [`DeOptions`].
 pub fn from_bytes_opts<'de, T: Deserialize<'de>>(b: &'de [u8], opts: DeOptions) -> Result<T, DeError> {
-    let s = std::str::from_utf8(b).map_err(|e| DeError::custom(format!("invalid UTF-8: {e}")))?;
+    let s = simdutf8::compat::from_utf8(b).map_err(|e| DeError::custom(format!("invalid UTF-8: {e}")))?;
     from_str_opts(s, opts)
 }
 

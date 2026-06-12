@@ -921,7 +921,7 @@ impl<'src> XmlBytesReader<'src> {
     /// Create a reader from a byte slice.  Returns an error if the bytes are
     /// not valid UTF-8.
     pub fn from_bytes(src: &'src [u8]) -> Result<Self> {
-        std::str::from_utf8(src).map_err(|e| {
+        simdutf8::compat::from_utf8(src).map_err(|e| {
             // `valid_up_to` is the offset of the first ill-formed
             // byte; attach it so callers get the same location info
             // they get from any other parse failure.
