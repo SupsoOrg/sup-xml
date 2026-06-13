@@ -48,5 +48,10 @@ jobs:
           rustup override set nightly
           cargo miri setup
 
+      # `--lib` restricts Miri to each crate's in-crate unit tests, where all
+      # of our `unsafe` lives.  The `tests/*.rs` integration binaries are the
+      # disk-backed conformance suites (W3C XML catalog, XSD Test Suite, QT3) —
+      # thousands of pure-safe-Rust cases that Miri would interpret op-by-op
+      # for tens of hours (past GitHub's 6h cap) while finding no UB.
       - name: Run Miri on the workspace
-        run: cargo miri test --workspace --exclude sup-xml-bench
+        run: cargo miri test --workspace --exclude sup-xml-bench --lib
