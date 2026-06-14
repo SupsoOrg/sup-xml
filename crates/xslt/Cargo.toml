@@ -1,6 +1,7 @@
 [package]
 name = "sup-xml-xslt"
 description = "XSLT 1.0 transformation engine built on sup-xml's XPath core"
+readme = "README.md"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -20,8 +21,8 @@ default = []
 xsd = ["sup-xml-core/xsd"]
 
 [dependencies]
-sup-xml-core = { path = "../core", version = "1.0.0" }
-sup-xml-tree = { path = "../tree", version = "1.0.0" }
+sup-xml-core = { path = "../core", version = "1.1.0" }
+sup-xml-tree = { path = "../tree", version = "1.1.0" }
 # Date/time arithmetic for the XSLT-added `format-number`,
 # `current-dateTime`-style functions and any time-based output
 # behaviour.  Same minimal-feature-set as `sup-xml-core` — see

@@ -42,9 +42,9 @@ xslt = ["dep:sup-xml-xslt"]
 tokio = ["dep:tokio"]
 
 [dependencies]
-sup-xml-core = { path = "../core", version = "1.0.0" }
-sup-xml-tree = { path = "../tree", version = "1.0.0" }
-sup-xml-xslt = { path = "../xslt", version = "1.0.0", optional = true }
+sup-xml-core = { path = "../core", version = "1.1.0" }
+sup-xml-tree = { path = "../tree", version = "1.1.0" }
+sup-xml-xslt = { path = "../xslt", version = "1.1.0", optional = true }
 serde = { version = "1", optional = true }
 tokio = { version = "1", optional = true, default-features = false, features = ["io-util"] }
 # SIMD-accelerated UTF-8 validation for the serde `from_bytes` entry — the

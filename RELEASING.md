@@ -116,9 +116,6 @@ gh release create v<version> --generate-notes
 
 ## Notes
 
-- `crates/core`, `crates/tree`, and `crates/xslt` have no `readme`
-  key; crates.io emits a cosmetic warning on publish but does not
-  reject them.
 - This process is manual. If releases become frequent, a tool such as
   `cargo-release` or `release-plz` automates the version bump, lockstep
   pin update, tag, and ordered publish — including the unpublished-

@@ -1602,7 +1602,7 @@ checksum = "13c2bddecc57b384dee18652358fb23172facb8a2c51ccc10d74c157bdea3292"
 
 [[package]]
 name = "sup-xml"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "serde",
  "simdutf8",
@@ -1614,7 +1614,7 @@ dependencies = [
 
 [[package]]
 name = "sup-xml-bench"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "anyxml",
  "cc",
@@ -1637,7 +1637,7 @@ dependencies = [
 
 [[package]]
 name = "sup-xml-cli"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "chrono",
  "clap",
@@ -1647,7 +1647,7 @@ dependencies = [
 
 [[package]]
 name = "sup-xml-compat"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "bumpalo",
  "libc",
@@ -1660,7 +1660,7 @@ dependencies = [
 
 [[package]]
 name = "sup-xml-core"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "bitflags",
  "bumpalo",
@@ -1683,14 +1683,14 @@ dependencies = [
 
 [[package]]
 name = "sup-xml-tree"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "bumpalo",
 ]
 
 [[package]]
 name = "sup-xml-xslt"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "chrono",
  "rustc-hash",

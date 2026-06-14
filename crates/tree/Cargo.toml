@@ -1,6 +1,7 @@
 [package]
 name = "sup-xml-tree"
 description = "Idiomatic Rust tree types and string dictionary"
+readme = "README.md"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

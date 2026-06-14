@@ -23,7 +23,7 @@ path = "src/main.rs"
 # CLI you almost certainly want `sup-xml --html` to work.  Drop the
 # "html" feature here and turn off the CLI's --html / --html-out flags
 # if you need a leaner binary.
-sup-xml = { path = "../api", version = "1.0.0", features = ["xsd", "html", "network-resolver", "xslt"] }
+sup-xml = { path = "../api", version = "1.1.0", features = ["xsd", "html", "network-resolver", "xslt"] }
 supso-project = "1.0.0"
 clap = { version = "4", features = ["derive"] }
 # Wall clock for rendering the license grace-period notice. A binary may

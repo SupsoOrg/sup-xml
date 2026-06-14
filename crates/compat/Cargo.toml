@@ -64,9 +64,9 @@ fuzzing = []
 # feature on this crate (above) is what activates them; without it
 # the shim won't compile (the byte-exact ABI types it exports don't
 # exist in the lean build).
-sup-xml-core = { path = "../core", version = "1.0.0", features = ["html", "xsd"] }
-sup-xml-tree = { path = "../tree", version = "1.0.0" }
-sup-xml-xslt = { path = "../xslt", version = "1.0.0" }
+sup-xml-core = { path = "../core", version = "1.1.0", features = ["html", "xsd"] }
+sup-xml-tree = { path = "../tree", version = "1.1.0" }
+sup-xml-xslt = { path = "../xslt", version = "1.1.0" }
 # Used by the native EXSLT regexp family (regexp:test / replace /
 # match) in `xpath::exslt_regexp_dispatch`.  libxslt's own
 # implementation lives in libexslt and needs deeper context state
