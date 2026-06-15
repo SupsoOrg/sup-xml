@@ -361,6 +361,13 @@ struct XsltArgs {
     /// trailing positional input file isn't accidentally consumed.
     #[arg(long, value_name = "NAME=VALUE")]
     param: Vec<String>,
+
+    /// Indent the result for readability (XML output method only),
+    /// as if the stylesheet declared `<xsl:output indent="yes"/>`.
+    /// Overrides the stylesheet's `indent` setting.  Elements with
+    /// mixed content are left unformatted so text is preserved.
+    #[arg(long)]
+    pretty: bool,
 }
 
 #[derive(Args)]
@@ -1256,11 +1263,17 @@ fn run_xslt(args: &XsltArgs, g: &GlobalOpts) -> Result<(), CliError> {
     }
     // Apply with the same loader so document(...) calls reach
     // adjacent files.
-    let result = if params.is_empty() {
+    let mut result = if params.is_empty() {
         style.apply_with_loader(&doc, &loader, Some(&base))
     } else {
         style.apply_with_params(&doc, &loader, Some(&base), &params)
     }.map_err(|e| xslt_err("apply", format!("{e:?}")))?;
+
+    // `--pretty` forces indentation regardless of the stylesheet's
+    // own `xsl:output indent`; it only affects the XML output method.
+    if args.pretty {
+        result.output.indent = Some(true);
+    }
 
     let out = result
         .to_string()

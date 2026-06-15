@@ -81,10 +81,25 @@ pub fn serialize_xml(tree: &ResultTree) -> String {
             }
         }
     }
+    // `indent="yes"` (XSLT 1.0 §16.1): pretty-print element-only
+    // content. Mixed content (any text-node child) suppresses
+    // formatting for that element and its whole subtree so text is
+    // preserved verbatim.
+    let format = tree.output.indent == Some(true);
     for child in &tree.children {
-        serialize_xml_node(child, &mut out, &tree.output, "", &tree.character_map);
+        serialize_xml_node(child, &mut out, &tree.output, "", &tree.character_map, format, 0);
+    }
+    if format && !out.ends_with('\n') {
+        out.push('\n');
     }
     out
+}
+
+/// Two spaces per nesting level — libxslt's default indent step.
+fn push_indent(out: &mut String, level: usize) {
+    for _ in 0..level {
+        out.push_str("  ");
+    }
 }
 
 fn should_emit_xml_decl(output: &OutputSpec) -> bool {
@@ -111,6 +126,8 @@ fn serialize_xml_node(
     opts:        &OutputSpec,
     parent_default_ns: &str,
     cmap:        &[(char, String)],
+    format:      bool,
+    level:       usize,
 ) {
     let xml_11   = opts.version.as_deref() == Some("1.1");
     let enc_cap  = encoding_capability(opts.encoding.as_deref());
@@ -164,7 +181,16 @@ fn serialize_xml_node(
             // wrapped in <![CDATA[...]]> rather than escaped.
             let is_cdata = opts.cdata_section_elements.iter()
                 .any(|q| q.uri == name.uri && q.local == name.local);
+            // Only element-only content is indented; the presence of a
+            // text child collapses formatting for this element so its
+            // character data round-trips unchanged.
+            let child_format = format
+                && !children.iter().any(|c| matches!(c, ResultNode::Text { .. }));
             for c in children {
+                if child_format {
+                    out.push('\n');
+                    push_indent(out, level + 1);
+                }
                 if is_cdata {
                     if let ResultNode::Text { content, .. } = c {
                         out.push_str("<![CDATA[");
@@ -173,7 +199,11 @@ fn serialize_xml_node(
                         continue;
                     }
                 }
-                serialize_xml_node(c, out, opts, child_default_ns, cmap);
+                serialize_xml_node(c, out, opts, child_default_ns, cmap, child_format, level + 1);
+            }
+            if child_format {
+                out.push('\n');
+                push_indent(out, level);
             }
             out.push_str("</");
             out.push_str(&q);
@@ -359,11 +389,15 @@ pub fn serialize_html(tree: &ResultTree) -> String {
             let _ = writeln!(out, r#"<!DOCTYPE {root} PUBLIC "{pubid}">"#);
         }
     }
-    for c in &tree.children { serialize_html_node(c, &mut out); }
+    let format = tree.output.indent == Some(true);
+    for c in &tree.children { serialize_html_node(c, &mut out, format, 0); }
+    if format && !out.ends_with('\n') {
+        out.push('\n');
+    }
     out
 }
 
-fn serialize_html_node(node: &ResultNode, out: &mut String) {
+fn serialize_html_node(node: &ResultNode, out: &mut String, format: bool, level: usize) {
     match node {
         ResultNode::Element { name, namespaces, attributes, children, .. } => {
             let local_lc = name.local.to_lowercase();
@@ -388,14 +422,27 @@ fn serialize_html_node(node: &ResultNode, out: &mut String) {
             out.push('>');
             let raw_text = name.uri.is_empty()
                 && RAW_TEXT_ELEMENTS.iter().any(|v| *v == local_lc);
+            // As for XML, only element-only content is indented; a text
+            // child (including the unescaped body of script/style)
+            // collapses formatting so content round-trips unchanged.
+            let child_format = format
+                && !children.iter().any(|c| matches!(c, ResultNode::Text { .. }));
             for c in children {
+                if child_format {
+                    out.push('\n');
+                    push_indent(out, level + 1);
+                }
                 if raw_text {
                     if let ResultNode::Text { content, .. } = c {
                         out.push_str(content);
                         continue;
                     }
                 }
-                serialize_html_node(c, out);
+                serialize_html_node(c, out, child_format, level + 1);
+            }
+            if child_format {
+                out.push('\n');
+                push_indent(out, level);
             }
             out.push_str("</");
             out.push_str(&q);
@@ -510,6 +557,44 @@ mod tests {
         assert_eq!(t.to_string().unwrap(), "<p><raw/></p>");
     }
 
+    fn tree_indented(nodes: Vec<ResultNode>) -> ResultTree {
+        let mut spec = OutputSpec::default();
+        spec.omit_xml_declaration = Some(true);
+        spec.indent = Some(true);
+        ResultTree { children: nodes, output: spec, character_map: Vec::new(), secondary: Vec::new() }
+    }
+
+    #[test]
+    fn xml_indent_yes_pretty_prints_element_only_content() {
+        let t = tree_indented(vec![elt("root", vec![
+            elt("a", vec![elt("b", vec![])]),
+            elt("c", vec![]),
+        ])]);
+        assert_eq!(
+            t.to_string().unwrap(),
+            "<root>\n  <a>\n    <b/>\n  </a>\n  <c/>\n</root>\n",
+        );
+    }
+
+    #[test]
+    fn xml_indent_yes_preserves_mixed_content() {
+        // An element with a text child is left untouched, and that
+        // collapses formatting for its whole subtree.
+        let t = tree_indented(vec![elt("root", vec![
+            elt("p", vec![text("hello "), elt("b", vec![text("world")])]),
+        ])]);
+        assert_eq!(
+            t.to_string().unwrap(),
+            "<root>\n  <p>hello <b>world</b></p>\n</root>\n",
+        );
+    }
+
+    #[test]
+    fn xml_indent_off_by_default() {
+        let t = tree_of(vec![elt("root", vec![elt("a", vec![])])], None);
+        assert_eq!(t.to_string().unwrap(), "<root><a/></root>");
+    }
+
     // ── HTML ────────────────────────────────────────────────
 
     #[test]
@@ -544,6 +629,48 @@ mod tests {
         // HTML default emits `<br>` not `<br/>`.
         assert!(s.contains("<br>"), "got: {s}");
         assert!(!s.contains("<br/>"));
+    }
+
+    fn tree_indented_method(nodes: Vec<ResultNode>, method: &str) -> ResultTree {
+        let mut spec = OutputSpec::default();
+        spec.method = Some(method.into());
+        spec.indent = Some(true);
+        ResultTree { children: nodes, output: spec, character_map: Vec::new(), secondary: Vec::new() }
+    }
+
+    #[test]
+    fn html_indent_yes_pretty_prints_element_only_content() {
+        let t = tree_indented_method(vec![
+            elt("html", vec![
+                elt("head", vec![elt("meta", vec![])]),
+                elt("body", vec![elt("p", vec![text("hi")])]),
+            ]),
+        ], "html");
+        assert_eq!(
+            t.to_string().unwrap(),
+            "<html>\n  <head>\n    <meta>\n  </head>\n  <body>\n    <p>hi</p>\n  </body>\n</html>\n",
+        );
+    }
+
+    #[test]
+    fn html_indent_yes_preserves_mixed_content_and_raw_text() {
+        let t = tree_indented_method(vec![
+            elt("body", vec![
+                elt("p", vec![text("a "), elt("b", vec![text("c")]), text(" d")]),
+                elt("script", vec![text("if (a < b) x();")]),
+            ]),
+        ], "html");
+        assert_eq!(
+            t.to_string().unwrap(),
+            "<body>\n  <p>a <b>c</b> d</p>\n  <script>if (a < b) x();</script>\n</body>\n",
+        );
+    }
+
+    #[test]
+    fn html_indent_off_by_default() {
+        let t = tree_of(vec![elt("html", vec![elt("body", vec![elt("br", vec![])])])],
+            Some("html"));
+        assert_eq!(t.to_string().unwrap(), "<html><body><br></body></html>");
     }
 
     // ── text ────────────────────────────────────────────────

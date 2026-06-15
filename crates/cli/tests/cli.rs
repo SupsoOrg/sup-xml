@@ -1456,3 +1456,83 @@ fn license_command_shows_info_with_a_valid_license() {
     assert!(stdout(&o).contains("sup-xml"), "stdout={}", stdout(&o));
     assert!(stdout(&o).contains("Test Co"), "stdout={}", stdout(&o));
 }
+
+// ── xslt ────────────────────────────────────────────────────────────────────────
+
+/// A stylesheet that emits element-only content, so indentation is
+/// observable.  Literal whitespace between the result elements is
+/// stripped by XSLT, leaving a compact tree by default.
+const XSLT_NESTED: &str = "\
+<?xml version=\"1.0\"?>\n\
+<xsl:stylesheet version=\"1.0\" xmlns:xsl=\"http://www.w3.org/1999/XSL/Transform\">\n\
+  <xsl:output method=\"xml\" omit-xml-declaration=\"yes\"/>\n\
+  <xsl:template match=\"/\"><root><a><b/></a><c/></root></xsl:template>\n\
+</xsl:stylesheet>\n";
+
+#[test]
+fn xslt_default_output_is_compact() {
+    let s = write_tmp("compact.xsl", XSLT_NESTED);
+    let o = run_stdin(
+        &[OsStr::new("xslt"), OsStr::new("-s"), s.as_os_str()],
+        "<x/>",
+    );
+    ok(&o, "xslt compact");
+    assert_eq!(stdout(&o), "<root><a><b/></a><c/></root>");
+}
+
+#[test]
+fn xslt_pretty_flag_indents_output() {
+    let s = write_tmp("pretty.xsl", XSLT_NESTED);
+    let o = run_stdin(
+        &[OsStr::new("xslt"), OsStr::new("-s"), s.as_os_str(), OsStr::new("--pretty")],
+        "<x/>",
+    );
+    ok(&o, "xslt --pretty");
+    assert_eq!(
+        stdout(&o),
+        "<root>\n  <a>\n    <b/>\n  </a>\n  <c/>\n</root>\n",
+    );
+}
+
+/// `xsl:output indent="yes"` declared in the stylesheet itself takes
+/// effect without any CLI flag.
+#[test]
+fn xslt_stylesheet_indent_yes_takes_effect() {
+    let sheet = "\
+<?xml version=\"1.0\"?>\n\
+<xsl:stylesheet version=\"1.0\" xmlns:xsl=\"http://www.w3.org/1999/XSL/Transform\">\n\
+  <xsl:output method=\"xml\" omit-xml-declaration=\"yes\" indent=\"yes\"/>\n\
+  <xsl:template match=\"/\"><root><a><b/></a><c/></root></xsl:template>\n\
+</xsl:stylesheet>\n";
+    let s = write_tmp("indent_yes.xsl", sheet);
+    let o = run_stdin(
+        &[OsStr::new("xslt"), OsStr::new("-s"), s.as_os_str()],
+        "<x/>",
+    );
+    ok(&o, "xslt stylesheet indent=yes");
+    assert_eq!(
+        stdout(&o),
+        "<root>\n  <a>\n    <b/>\n  </a>\n  <c/>\n</root>\n",
+    );
+}
+
+/// `--pretty` indents HTML output too, not just the XML method.
+#[test]
+fn xslt_pretty_flag_indents_html_output() {
+    let sheet = "\
+<?xml version=\"1.0\"?>\n\
+<xsl:stylesheet version=\"1.0\" xmlns:xsl=\"http://www.w3.org/1999/XSL/Transform\">\n\
+  <xsl:output method=\"html\"/>\n\
+  <xsl:template match=\"/\"><html><body><p>hi</p></body></html></xsl:template>\n\
+</xsl:stylesheet>\n";
+    let s = write_tmp("pretty_html.xsl", sheet);
+    let o = run_stdin(
+        &[OsStr::new("xslt"), OsStr::new("-s"), s.as_os_str(), OsStr::new("--pretty")],
+        "<x/>",
+    );
+    ok(&o, "xslt --pretty html");
+    assert_eq!(
+        stdout(&o),
+        "<html>\n  <body>\n    <p>hi</p>\n  </body>\n</html>\n",
+    );
+}
