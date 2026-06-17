@@ -3300,12 +3300,35 @@ fn validate_expose(node: &Node) -> Result<(), XsltError> {
                 "xsl:expose visibility='{v}' is not a valid visibility (XTSE0020)")));
         }
     }
-    if let Some(c) = read_attribute(node, "component") {
-        if !matches!(c.trim(),
+    let component = read_attribute(node, "component").map(|c| c.trim().to_string());
+    if let Some(c) = &component {
+        if !matches!(c.as_str(),
             "template" | "function" | "attribute-set" | "variable" | "mode" | "*")
         {
             return Err(XsltError::InvalidStylesheet(format!(
                 "xsl:expose component='{c}' is not a valid component type (XTSE0020)")));
+        }
+    }
+    // XTSE3025 — an xsl:expose that would make a component abstract is an
+    // error unless that component is already abstract.  Components are
+    // declared abstract on their own declaration, never via xsl:expose;
+    // since no component reachable here is declared abstract (only
+    // functions/variables track declared visibility, and none use it),
+    // exposing as abstract is always the error condition.
+    if read_attribute(node, "visibility").map(str::trim) == Some("abstract") {
+        return Err(XsltError::InvalidStylesheet(
+            "xsl:expose cannot make a component abstract (XTSE3025)".into()));
+    }
+    // XTSE3022 — component='*' (all kinds) requires names= to be a
+    // wildcard; naming specific components across all kinds is an error.
+    if component.as_deref() == Some("*") {
+        if let Some(names) = read_attribute(node, "names") {
+            let all_wild = names.split_whitespace().all(|t|
+                t == "*" || t.starts_with("*:") || t.ends_with(":*"));
+            if !all_wild {
+                return Err(XsltError::InvalidStylesheet(
+                    "xsl:expose component='*' requires a wildcard names= (XTSE3022)".into()));
+            }
         }
     }
     if let Some(names) = read_attribute(node, "names") {
