@@ -1693,6 +1693,7 @@ name = "sup-xml-xslt"
 version = "1.2.0"
 dependencies = [
  "chrono",
+ "regex",
  "rustc-hash",
  "sup-xml-core",
  "sup-xml-tree",

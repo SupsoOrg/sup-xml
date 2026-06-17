@@ -1635,11 +1635,22 @@ fn check_expectation_against(
         Expectation::SerializationMatches { pattern, ci } => match result {
             A::Ok(rt) => match rt.to_string() {
                 Ok(got) => {
-                    let pat = if *ci { format!("(?i){pattern}") } else { pattern.clone() };
-                    match sup_xml_core::regex::Pattern::compile(&pat) {
-                        Ok(re) if re.find_match(&got) => Ok(()),
-                        _ => Err(FailReason::WrongOutput),
-                    }
+                    // Mirror `fn:matches`: the no-flags path uses the
+                    // native XPath-dialect engine (find_match needs the
+                    // NFA body, so compile with Dialect::Xpath rather
+                    // than the XSD default, which may take the linear
+                    // whole-string fast path); the case-insensitive
+                    // path routes through the `regex` crate, exactly as
+                    // the engine's own flag handling does.
+                    let matched = if *ci {
+                        regex::Regex::new(&format!("(?i){pattern}"))
+                            .map(|re| re.is_match(&got)).unwrap_or(false)
+                    } else {
+                        sup_xml_core::regex::Pattern::compile_with(
+                            pattern, sup_xml_core::regex::Dialect::Xpath,
+                        ).map(|re| re.find_match(&got)).unwrap_or(false)
+                    };
+                    if matched { Ok(()) } else { Err(FailReason::WrongOutput) }
                 }
                 Err(_) => Err(FailReason::Serialise),
             },

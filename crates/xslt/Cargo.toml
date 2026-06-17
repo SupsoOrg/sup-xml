@@ -29,3 +29,10 @@ sup-xml-tree = { path = "../tree", version = "1.2.0" }
 # crates/core/Cargo.toml's chrono dep for rationale.
 chrono = { version = "0.4", default-features = false, features = ["std"] }
 rustc-hash.workspace = true
+
+[dev-dependencies]
+# The W3C conformance harness's `serialization-matches` assertion
+# mirrors `fn:matches`: the no-flags path uses the native XPath-dialect
+# engine, and the case-insensitive path routes through this crate, just
+# as the engine's own flag handling does.
+regex = "1"
