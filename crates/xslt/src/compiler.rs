@@ -3466,6 +3466,7 @@ fn compile_output(node: &Node) -> Result<OutputSpec, XsltError> {
     });
     out.escape_uri_attributes  = read_attribute(node, "escape-uri-attributes").map(parse_yesno);
     out.include_content_type   = read_attribute(node, "include-content-type").map(parse_yesno);
+    out.byte_order_mark        = read_attribute(node, "byte-order-mark").map(parse_yesno);
     out.media_type             = read_attribute(node, "media-type").map(str::to_string);
     out.doctype_public         = read_attribute(node, "doctype-public").map(str::to_string);
     out.doctype_system         = read_attribute(node, "doctype-system").map(str::to_string);

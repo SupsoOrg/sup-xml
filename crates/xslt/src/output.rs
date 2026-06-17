@@ -68,14 +68,20 @@ impl ResultTree {
             &self.children
         };
 
-        Ok(match method {
+        let mut out = match method {
             "html"  => serialize_html(children, &self.output, indent, escape_uri),
             "text"  => serialize_text(children),
             // The xhtml output method uses XML syntax with the
             // html-family parameter defaults applied above.
             _       => serialize_xml(children, &self.output, &self.character_map,
                                      indent, escape_uri),
-        })
+        };
+        // `byte-order-mark="yes"` (XSLT 2.0 §20) prefixes the output
+        // with U+FEFF, ahead of any XML declaration.
+        if self.output.byte_order_mark == Some(true) {
+            out.insert(0, '\u{feff}');
+        }
+        Ok(out)
     }
 
     /// Write the serialised result to any [`io::Write`] sink.

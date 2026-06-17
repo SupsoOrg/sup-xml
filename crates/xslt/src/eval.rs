@@ -3218,6 +3218,7 @@ fn overlay_output_into(base: &mut crate::ast::OutputSpec, ov: &crate::ast::Outpu
     if ov.standalone.is_some() { base.standalone = ov.standalone; }
     if ov.escape_uri_attributes.is_some() { base.escape_uri_attributes = ov.escape_uri_attributes; }
     if ov.include_content_type.is_some() { base.include_content_type = ov.include_content_type; }
+    if ov.byte_order_mark.is_some() { base.byte_order_mark = ov.byte_order_mark; }
     if ov.media_type.is_some() { base.media_type = ov.media_type.clone(); }
     if ov.doctype_public.is_some() { base.doctype_public = ov.doctype_public.clone(); }
     if ov.doctype_system.is_some() { base.doctype_system = ov.doctype_system.clone(); }

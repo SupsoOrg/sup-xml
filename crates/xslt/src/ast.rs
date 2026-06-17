@@ -921,6 +921,10 @@ pub struct OutputSpec {
     /// as the first child of the `head` element, replacing any
     /// existing content-type meta.
     pub include_content_type:   Option<bool>,
+    /// XSLT 2.0 §20: `byte-order-mark="yes|no"`; default `no`.  When
+    /// `yes`, the serialized output is prefixed with a U+FEFF byte
+    /// order mark.
+    pub byte_order_mark:        Option<bool>,
     /// XSLT 2.0 §20: `use-character-maps="qname …"`.  Each name
     /// resolves to an `xsl:character-map` declaration in the
     /// stylesheet; their `output-character` substitutions are
