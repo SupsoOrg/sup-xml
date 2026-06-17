@@ -610,6 +610,25 @@ pub unsafe extern "C" fn xmlCtxtGetPrivate(
     usize::from_ne_bytes(bytes) as *mut std::os::raw::c_void
 }
 
+/// Store a function pointer at `base + off` keeping its provenance.
+///
+/// A `to_ne_bytes`/`from_ne_bytes` round-trip strips provenance, and
+/// `transmute::<usize, _>` of the result is not a dereferenceable pointer
+/// — calling it is undefined behavior.  `-Zmiri-permissive-provenance`
+/// only re-synthesizes provenance for *data* integer-to-pointer casts, not
+/// for function pointers, so callback slots must be stored and loaded as
+/// real `Option<fn>` values (`None` == the zeroed/cleared slot).
+#[inline]
+unsafe fn store_fn_ptr<F: Copy>(base: *mut u8, off: usize, f: Option<F>) {
+    unsafe { std::ptr::write_unaligned(base.add(off).cast::<Option<F>>(), f); }
+}
+
+/// Load a function pointer stored by [`store_fn_ptr`].
+#[inline]
+unsafe fn load_fn_ptr<F: Copy>(base: *const u8, off: usize) -> Option<F> {
+    unsafe { std::ptr::read_unaligned(base.add(off).cast::<Option<F>>()) }
+}
+
 /// libxml2 `xmlCtxtSetResourceLoader(ctxt, loader, vctxt)` — register a
 /// callback the parser invokes to load external resources (external
 /// DTDs / parsed entities).  The pair is stored on the context; the
@@ -625,12 +644,15 @@ pub unsafe extern "C" fn xmlCtxtSetResourceLoader(
     if ctxt.is_null() {
         return;
     }
-    let loader_bits = loader.map_or(0usize, |f| f as usize);
-    let vctxt_bits  = vctxt as usize;
+    let vctxt_bits = vctxt as usize;
     unsafe {
-        let p = (ctxt as *mut u8).add(CTXT_RESOURCE_LOADER_OFFSET);
-        std::ptr::copy_nonoverlapping(loader_bits.to_ne_bytes().as_ptr(), p, 8);
-        std::ptr::copy_nonoverlapping(vctxt_bits.to_ne_bytes().as_ptr(), p.add(8), 8);
+        let base = ctxt as *mut u8;
+        store_fn_ptr(base, CTXT_RESOURCE_LOADER_OFFSET, loader);
+        std::ptr::copy_nonoverlapping(
+            vctxt_bits.to_ne_bytes().as_ptr(),
+            base.add(CTXT_RESOURCE_LOADER_OFFSET + 8),
+            8,
+        );
     }
 }
 
@@ -642,20 +664,13 @@ unsafe fn read_ctxt_resource_loader(
     if ctxt.is_null() {
         return None;
     }
-    let (mut lb, mut vb) = ([0u8; 8], [0u8; 8]);
-    unsafe {
-        let p = (ctxt as *const u8).add(CTXT_RESOURCE_LOADER_OFFSET);
-        std::ptr::copy_nonoverlapping(p, lb.as_mut_ptr(), 8);
-        std::ptr::copy_nonoverlapping(p.add(8), vb.as_mut_ptr(), 8);
-    }
-    let loader_bits = usize::from_ne_bytes(lb);
-    if loader_bits == 0 {
-        return None;
-    }
-    // SAFETY: loader_bits round-trips a real XmlResourceLoader fn
-    // pointer stored by xmlCtxtSetResourceLoader (same width).
-    let loader: crate::parse::XmlResourceLoader =
-        unsafe { std::mem::transmute::<usize, crate::parse::XmlResourceLoader>(loader_bits) };
+    let mut vb = [0u8; 8];
+    let loader = unsafe {
+        let base = ctxt as *const u8;
+        let loader = load_fn_ptr::<crate::parse::XmlResourceLoader>(base, CTXT_RESOURCE_LOADER_OFFSET);
+        std::ptr::copy_nonoverlapping(base.add(CTXT_RESOURCE_LOADER_OFFSET + 8), vb.as_mut_ptr(), 8);
+        loader
+    }?;
     Some((loader, usize::from_ne_bytes(vb)))
 }
 
@@ -672,12 +687,15 @@ pub unsafe extern "C" fn xmlCtxtSetErrorHandler(
     if ctxt.is_null() {
         return;
     }
-    let h_bits = handler.map_or(0usize, |f| f as usize);
     let d_bits = if handler.is_some() { data as usize } else { 0 };
     unsafe {
-        let p = (ctxt as *mut u8).add(CTXT_ERROR_HANDLER_OFFSET);
-        std::ptr::copy_nonoverlapping(h_bits.to_ne_bytes().as_ptr(), p, 8);
-        std::ptr::copy_nonoverlapping(d_bits.to_ne_bytes().as_ptr(), p.add(8), 8);
+        let base = ctxt as *mut u8;
+        store_fn_ptr(base, CTXT_ERROR_HANDLER_OFFSET, handler);
+        std::ptr::copy_nonoverlapping(
+            d_bits.to_ne_bytes().as_ptr(),
+            base.add(CTXT_ERROR_HANDLER_OFFSET + 8),
+            8,
+        );
     }
 }
 
@@ -688,20 +706,13 @@ unsafe fn read_ctxt_error_handler(
     if ctxt.is_null() {
         return None;
     }
-    let (mut hb, mut db) = ([0u8; 8], [0u8; 8]);
-    unsafe {
-        let p = (ctxt as *const u8).add(CTXT_ERROR_HANDLER_OFFSET);
-        std::ptr::copy_nonoverlapping(p, hb.as_mut_ptr(), 8);
-        std::ptr::copy_nonoverlapping(p.add(8), db.as_mut_ptr(), 8);
-    }
-    let h = usize::from_ne_bytes(hb);
-    if h == 0 {
-        return None;
-    }
-    // SAFETY: round-trips a real StructuredErrorFn fn pointer stored by
-    // xmlCtxtSetErrorHandler (same width).
-    let handler: crate::error::StructuredErrorFn =
-        unsafe { std::mem::transmute::<usize, crate::error::StructuredErrorFn>(h) };
+    let mut db = [0u8; 8];
+    let handler = unsafe {
+        let base = ctxt as *const u8;
+        let handler = load_fn_ptr::<crate::error::StructuredErrorFn>(base, CTXT_ERROR_HANDLER_OFFSET);
+        std::ptr::copy_nonoverlapping(base.add(CTXT_ERROR_HANDLER_OFFSET + 8), db.as_mut_ptr(), 8);
+        handler
+    }?;
     Some((handler, usize::from_ne_bytes(db) as *mut std::os::raw::c_void))
 }
 
@@ -755,17 +766,9 @@ unsafe fn read_ctxt_sax_serror(
     if sax == 0 {
         return None;
     }
-    let mut hb = [0u8; 8];
-    unsafe {
-        std::ptr::copy_nonoverlapping(
-            (sax as *const u8).add(SAX_SERROR_OFFSET), hb.as_mut_ptr(), 8);
-    }
-    let h = usize::from_ne_bytes(hb);
-    if h == 0 {
-        return None;
-    }
-    // SAFETY: round-trips a real xmlStructuredErrorFunc pointer.
-    Some(unsafe { std::mem::transmute::<usize, crate::error::StructuredErrorFn>(h) })
+    // Load the `serror` slot as a real `Option<fn>` so the handler keeps
+    // its provenance (an integer round-trip would make it uncallable).
+    unsafe { load_fn_ptr::<crate::error::StructuredErrorFn>(sax as *const u8, SAX_SERROR_OFFSET) }
 }
 
 /// libxml2 `xmlCtxtSetMaxAmplification(ctxt, maxAmpl)` — limit entity
@@ -883,13 +886,15 @@ pub unsafe extern "C" fn xmlCtxtSetCharEncConvImpl(
     if ctxt.is_null() {
         return;
     }
-    let i_bits = imp.map_or(0usize, |f| f as usize);
     let v_bits = if imp.is_some() { vctxt as usize } else { 0 };
     unsafe {
-        let p = (ctxt as *mut u8).add(CTXT_CONV_IMPL_OFFSET);
-        std::ptr::copy_nonoverlapping(i_bits.to_ne_bytes().as_ptr(), p, 8);
-        let q = (ctxt as *mut u8).add(CTXT_CONV_VCTXT_OFFSET);
-        std::ptr::copy_nonoverlapping(v_bits.to_ne_bytes().as_ptr(), q, 8);
+        let base = ctxt as *mut u8;
+        store_fn_ptr(base, CTXT_CONV_IMPL_OFFSET, imp);
+        std::ptr::copy_nonoverlapping(
+            v_bits.to_ne_bytes().as_ptr(),
+            base.add(CTXT_CONV_VCTXT_OFFSET),
+            8,
+        );
     }
 }
 
@@ -900,21 +905,13 @@ unsafe fn read_ctxt_conv_impl(
     if ctxt.is_null() {
         return None;
     }
-    let (mut ib, mut vb) = ([0u8; 8], [0u8; 8]);
-    unsafe {
-        std::ptr::copy_nonoverlapping(
-            (ctxt as *const u8).add(CTXT_CONV_IMPL_OFFSET), ib.as_mut_ptr(), 8);
+    let mut vb = [0u8; 8];
+    let imp = unsafe {
+        let imp = load_fn_ptr::<XmlCharEncConvImpl>(ctxt as *const u8, CTXT_CONV_IMPL_OFFSET);
         std::ptr::copy_nonoverlapping(
             (ctxt as *const u8).add(CTXT_CONV_VCTXT_OFFSET), vb.as_mut_ptr(), 8);
-    }
-    let i = usize::from_ne_bytes(ib);
-    if i == 0 {
-        return None;
-    }
-    // SAFETY: round-trips a real XmlCharEncConvImpl fn pointer stored by
-    // xmlCtxtSetCharEncConvImpl (same width).
-    let imp: XmlCharEncConvImpl =
-        unsafe { std::mem::transmute::<usize, XmlCharEncConvImpl>(i) };
+        imp
+    }?;
     Some((imp, usize::from_ne_bytes(vb) as *mut c_void))
 }
 

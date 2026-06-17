@@ -634,19 +634,6 @@ pub unsafe extern "C" fn xmlSplitQName2(
 // `node->name` by *pointer* against these globals to identify text
 // kinds, so the symbols must point at stable storage.
 
-// xmlStringText / xmlStringTextNoenc are defined in sup-xml-tree
-// (with `#[no_mangle]`) so the tree builder can pin Text-node names
-// to them at construction.  Since this crate links tree statically,
-// the cdylib exports them once — no duplicate-symbol risk.  See
-// `crates/tree/src/dom.rs`.
-//
-// The unit tests below still reference the symbols by name; pull
-// them in via an `extern "C"` declaration.
-unsafe extern "C" {
-    pub static xmlStringText:      [u8; 5];
-    pub static xmlStringTextNoenc: [u8; 10];
-}
-
 
 // ── name validators (XML 1.0 § 2.3) ────────────────────────────────────────
 
@@ -1068,13 +1055,11 @@ mod tests {
     #[test]
     fn xml_string_text_constants_are_null_terminated() {
         // The libxml2-shared constants used as text-node names — bare
-        // bytes, NUL-terminated, addressable as `xmlChar*`.  Now
-        // defined in `sup-xml-tree`; we re-import via `extern "C"`
-        // so the unit test needs an unsafe block.
-        unsafe {
-            assert_eq!(&xmlStringText, b"text\0");
-            assert_eq!(&xmlStringTextNoenc, b"textnoenc\0");
-        }
+        // bytes, NUL-terminated, addressable as `xmlChar*`.  Referenced
+        // through the `sup-xml-tree` Rust statics (not an `extern "C"`
+        // re-import, which Miri can't resolve).
+        assert_eq!(&sup_xml_tree::dom::xmlStringText, b"text\0");
+        assert_eq!(&sup_xml_tree::dom::xmlStringTextNoenc, b"textnoenc\0");
     }
 
     #[test]

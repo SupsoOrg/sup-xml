@@ -173,17 +173,42 @@ const _: () = {
     assert!(offset_of!(xmlEntity, system_id) == 104);
 };
 
+/// Owns the heap-allocated, libxml2-shaped declaration nodes for one DTD.
+///
+/// The nodes are stored as raw pointers — not `Box` — because construction
+/// threads them into sibling / parent / `nexth` / content linked lists by
+/// writing through independent raw pointers (`link_sibling`, etc.).  A live
+/// `Box` asserts unique access to its allocation, which those aliasing raw
+/// writes would invalidate (a Stacked-Borrows violation that surfaces as UB
+/// at deallocation).  Ownership is realized only in `Drop`, where each
+/// pointer is briefly reconstituted as a `Box` to free it — at which point
+/// no aliasing writes remain.
 #[derive(Default)]
 struct DeclStore {
-    elements:   Vec<Box<xmlElement>>,
-    attributes: Vec<Box<xmlAttribute>>,
-    entities:   Vec<Box<xmlEntity>>,
-    contents:   Vec<Box<xmlElementContent>>,
-    enums:      Vec<Box<xmlEnumeration>>,
+    elements:   Vec<*mut xmlElement>,
+    attributes: Vec<*mut xmlAttribute>,
+    entities:   Vec<*mut xmlEntity>,
+    contents:   Vec<*mut xmlElementContent>,
+    enums:      Vec<*mut xmlEnumeration>,
     strings:    Vec<CString>,
     /// Node pointers this store registered in [`DECL_SOURCES`], so they
     /// can be evicted when the store is dropped.
     source_keys: Vec<usize>,
+}
+
+impl Drop for DeclStore {
+    fn drop(&mut self) {
+        // SAFETY: every pointer came from `Box::into_raw` during
+        // `materialize` and is owned solely by this store.  No raw aliases
+        // are written during teardown, so the transient `Box` is sound.
+        unsafe {
+            for p in self.elements.drain(..)   { drop(Box::from_raw(p)); }
+            for p in self.attributes.drain(..) { drop(Box::from_raw(p)); }
+            for p in self.entities.drain(..)   { drop(Box::from_raw(p)); }
+            for p in self.contents.drain(..)   { drop(Box::from_raw(p)); }
+            for p in self.enums.drain(..)      { drop(Box::from_raw(p)); }
+        }
+    }
 }
 
 impl DeclStore {
@@ -240,7 +265,7 @@ pub(crate) unsafe fn materialize(dtd: *mut xmlDtd, doc: *mut c_void, model: &Dtd
                 register_source(&mut store, el as *mut c_void, serialize_element(name, &d.content));
                 link_sibling(&mut head, &mut tail, el as *mut c_void);
                 elem_nodes.insert(name.clone(), el);
-                store.elements.push(unsafe { Box::from_raw(el) });
+                store.elements.push(el);
             }
             DeclRef::Attlist(name) => {
                 let Some(atts) = model.attlists.get(name) else { continue };
@@ -249,7 +274,7 @@ pub(crate) unsafe fn materialize(dtd: *mut xmlDtd, doc: *mut c_void, model: &Dtd
                     register_source(&mut store, a as *mut c_void, serialize_attribute(name, att));
                     link_sibling(&mut head, &mut tail, a as *mut c_void);
                     elem_attrs.entry(name.clone()).or_default().push(a);
-                    store.attributes.push(unsafe { Box::from_raw(a) });
+                    store.attributes.push(a);
                 }
             }
             DeclRef::Entity(idx) => {
@@ -257,7 +282,7 @@ pub(crate) unsafe fn materialize(dtd: *mut xmlDtd, doc: *mut c_void, model: &Dtd
                 let e = build_entity(&mut store, dtd, doc, ent);
                 register_source(&mut store, e as *mut c_void, serialize_entity(ent));
                 link_sibling(&mut head, &mut tail, e as *mut c_void);
-                store.entities.push(unsafe { Box::from_raw(e) });
+                store.entities.push(e);
             }
         }
     }
@@ -347,7 +372,7 @@ fn alloc_content(
     }));
     if !c1.is_null() { unsafe { (*c1).parent = node; } }
     if !c2.is_null() { unsafe { (*c2).parent = node; } }
-    store.contents.push(unsafe { Box::from_raw(node) });
+    store.contents.push(node);
     node
 }
 
@@ -464,7 +489,7 @@ fn build_enum(store: &mut DeclStore, vals: &[String]) -> *mut xmlEnumeration {
         if head.is_null() { head = node; }
         if !tail.is_null() { unsafe { (*tail).next = node; } }
         tail = node;
-        store.enums.push(unsafe { Box::from_raw(node) });
+        store.enums.push(node);
     }
     head
 }

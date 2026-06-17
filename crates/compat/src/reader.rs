@@ -86,7 +86,12 @@ struct ReaderState {
     /// Holders for any const strings we've handed out — kept alive
     /// until the next state change.  libxml2's `xmlTextReaderConst*`
     /// pointers are stable until the next `Read()`.
-    string_holders: Vec<CString>,
+    ///
+    /// Stored as [`OwnedCStr`] (a raw pointer), not `CString`: a
+    /// `Vec<CString>` moves each string when it grows, and under Stacked
+    /// Borrows moving a `CString` retags its heap buffer — invalidating a
+    /// `*const c_char` handed out earlier.  A raw pointer doesn't retag.
+    string_holders: Vec<OwnedCStr>,
     /// Simple (non-structured) error callback registered via
     /// [`xmlTextReaderSetErrorHandler`] and returned verbatim by
     /// [`xmlTextReaderGetErrorHandler`].  `None` until a handler is set.
@@ -572,6 +577,46 @@ pub unsafe extern "C" fn xmlTextReaderConstLocalName(reader: *mut xmlTextReader)
     name_of_current(reader, true)
 }
 
+/// Owns a C string's heap buffer as a raw pointer.  Stored in
+/// [`ReaderState::string_holders`] so the reader can hand out a stable
+/// `*const c_char` into it; see that field for why a raw pointer (rather
+/// than `CString`) is required.
+struct OwnedCStr(*mut c_char);
+
+impl OwnedCStr {
+    #[inline]
+    fn new(cs: CString) -> Self {
+        OwnedCStr(cs.into_raw())
+    }
+    #[inline]
+    fn as_ptr(&self) -> *const c_char {
+        self.0
+    }
+}
+
+impl Drop for OwnedCStr {
+    fn drop(&mut self) {
+        // SAFETY: `self.0` came from `CString::into_raw` and is reclaimed
+        // exactly once, here.
+        unsafe { let _ = CString::from_raw(self.0); }
+    }
+}
+
+/// Stash `cs` in `reader`'s holders and return a pointer into it that
+/// stays valid until the holders are cleared.  Returns null when there is
+/// no reader to take ownership (the string would otherwise dangle).
+fn stash_string(reader: *mut xmlTextReader, cs: CString) -> *const c_char {
+    match unsafe { reader.as_ref() } {
+        Some(r) => {
+            let holder = OwnedCStr::new(cs);
+            let ptr = holder.as_ptr();
+            r.state.borrow_mut().string_holders.push(holder);
+            ptr
+        }
+        None => ptr::null(),
+    }
+}
+
 fn name_of_current(reader: *mut xmlTextReader, local_only: bool) -> *const c_char {
     let cur = match unsafe { current(reader) } { Some(c) => c, None => return ptr::null() };
     let s: String = match cur {
@@ -598,12 +643,7 @@ fn name_of_current(reader: *mut xmlTextReader, local_only: bool) -> *const c_cha
         CurKind::Eof => return ptr::null(),
     };
     let cs = match CString::new(s) { Ok(c) => c, Err(_) => return ptr::null() };
-    let ptr = cs.as_ptr();
-    // Stash for lifetime stability.
-    if let Some(r) = unsafe { reader.as_ref() } {
-        r.state.borrow_mut().string_holders.push(cs);
-    }
-    ptr
+    stash_string(reader, cs)
 }
 
 fn local_tail(s: &str) -> &str {
@@ -631,11 +671,7 @@ pub unsafe extern "C" fn xmlTextReaderConstValue(reader: *mut xmlTextReader) -> 
     };
     if s.is_empty() { return ptr::null(); }
     let cs = match CString::new(s) { Ok(c) => c, Err(_) => return ptr::null() };
-    let ptr = cs.as_ptr();
-    if let Some(r) = unsafe { reader.as_ref() } {
-        r.state.borrow_mut().string_holders.push(cs);
-    }
-    ptr
+    stash_string(reader, cs)
 }
 
 /// `xmlTextReaderConstNamespaceUri` — namespace URI of the current node.
@@ -656,11 +692,7 @@ pub unsafe extern "C" fn xmlTextReaderConstNamespaceUri(reader: *mut xmlTextRead
     match ns_str {
         Some(s) if !s.is_empty() => {
             let cs = match CString::new(s) { Ok(c) => c, Err(_) => return ptr::null() };
-            let ptr = cs.as_ptr();
-            if let Some(r) = unsafe { reader.as_ref() } {
-                r.state.borrow_mut().string_holders.push(cs);
-            }
-            ptr
+            stash_string(reader, cs)
         }
         _ => ptr::null(),
     }
@@ -684,11 +716,7 @@ pub unsafe extern "C" fn xmlTextReaderConstPrefix(reader: *mut xmlTextReader) ->
     match name {
         Some(s) => {
             let cs = match CString::new(s) { Ok(c) => c, Err(_) => return ptr::null() };
-            let ptr = cs.as_ptr();
-            if let Some(r) = unsafe { reader.as_ref() } {
-                r.state.borrow_mut().string_holders.push(cs);
-            }
-            ptr
+            stash_string(reader, cs)
         }
         None => ptr::null(),
     }
@@ -755,7 +783,7 @@ pub unsafe extern "C" fn xmlTextReaderGetParserLineNumber(
     if node_ptr.is_null() { return 0; }
     // SAFETY: node lives in the doc's arena which the reader keeps alive.
     let n = unsafe { &*node_ptr };
-    n.line as c_int
+    n.line.get() as c_int
 }
 
 /// `xmlTextReaderGetParserColumnNumber` — column of the current node.
@@ -1643,11 +1671,7 @@ fn lookup_ns_in_scope(start: *const Node<'static>, want_prefix: Option<&str>) ->
 /// stack and return its raw pointer (valid until the next state change).
 fn static_string_for_reader(reader: *mut xmlTextReader, s: &str) -> *const c_char {
     let cs = match CString::new(s) { Ok(c) => c, Err(_) => return ptr::null() };
-    let ptr = cs.as_ptr();
-    if let Some(r) = unsafe { reader.as_ref() } {
-        r.state.borrow_mut().string_holders.push(cs);
-    }
-    ptr
+    stash_string(reader, cs)
 }
 
 /// Minimal in-place XML serializer used by the reader's
@@ -2052,6 +2076,11 @@ mod tests {
     }
 
     #[test]
+    // Compares function-pointer identity (`f as *const ()`).  The handler
+    // round-trips faithfully through a plain `Option<fn>` field, but Miri
+    // doesn't give a reified `fn` pointer a stable address to compare, so
+    // the equality check can't hold under Miri.
+    #[cfg_attr(miri, ignore = "fn-pointer identity not stable under Miri")]
     fn error_handler_round_trips() {
         let r = open(b"<r/>");
         let ctx = 0xABCD_usize as *mut c_void;

@@ -597,7 +597,7 @@ unsafe fn visit(
             // callbacks must yield that same dict address or tag-filtering
             // silently drops every event.
             #[cfg(feature = "c-abi")]
-            let local_ptr = node.name.as_ptr() as *const c_char;
+            let local_ptr = node.name.get().as_ptr() as *const c_char;
             #[cfg(not(feature = "c-abi"))]
             let _: () = compile_error!(
                 "sup-xml-compat must be built with the `c-abi` feature \
@@ -850,7 +850,7 @@ unsafe fn visit_sax1(
             // Element name — local part (HTML is namespace-free); the
             // c-abi `Node::name` is a NUL-terminated dict pointer.
             #[cfg(feature = "c-abi")]
-            let name_ptr = node.name.as_ptr() as *const c_char;
+            let name_ptr = node.name.get().as_ptr() as *const c_char;
             // Flatten attributes into libxml2's [name0, val0, …, NULL]
             // array.  The CStrings own the bytes for the call's duration.
             let mut owned: Vec<std::ffi::CString> = Vec::new();

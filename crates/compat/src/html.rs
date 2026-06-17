@@ -823,23 +823,24 @@ pub unsafe extern "C" fn htmlSetMetaEncoding(
     } else {
         unsafe { std::ffi::CStr::from_ptr(encoding) }.to_bytes()
     };
-    // Write into the doc's `encoding` slot (offset 112).  Leak a
-    // CString so the pointer remains valid for the doc's lifetime;
-    // xmlFreeDoc reclaims it via the same path it does for `url`.
-    let cs = match std::ffi::CString::new(enc_bytes) {
-        Ok(c)  => c,
-        Err(_) => return -1,
+    // Write into the doc's `encoding` slot.  An empty encoding clears it
+    // back to libxml2's NULL sentinel (`None`); otherwise leak a CString
+    // so the pointer stays valid for the doc's lifetime (the slot is not
+    // reclaimed on free — a bounded one-time leak per explicit set).
+    let new_enc = if enc_bytes.is_empty() {
+        None
+    } else {
+        let cs = match std::ffi::CString::new(enc_bytes) {
+            Ok(c)  => c,
+            Err(_) => return -1,
+        };
+        // SAFETY: into_raw yields a NUL-terminated UTF-8 pointer the doc
+        // now owns; ArenaCStr requires non-null, which into_raw guarantees.
+        Some(unsafe { sup_xml_tree::dom::ArenaCStr::from_raw(cs.into_raw() as *const u8) })
     };
-    let p = cs.into_raw();
-    // SAFETY: doc is live; field write through &mut is safe given
-    // the caller's exclusive-access contract.
-    unsafe {
-        let d = &mut *doc;
-        // Reclaim any previously-installed encoding to avoid a leak
-        // on repeated calls.  ArenaCStr's pointer slot follows the
-        // libxml2 layout — overwrite directly.
-        d.encoding = sup_xml_tree::dom::ArenaCStr::from_raw(p as *const u8);
-    }
+    // SAFETY: doc is a live XmlDoc; assign the field through the raw
+    // pointer's place expression (no `&mut` reborrow of the whole doc).
+    unsafe { (*doc).encoding = new_enc; }
     0
 }
 

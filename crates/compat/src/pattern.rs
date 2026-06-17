@@ -61,10 +61,25 @@ pub unsafe extern "C" fn xmlPatternMatch(
         return -1;
     }
     // SAFETY: comp came from Box::into_raw in xmlPatterncompile.
-    // node is a raw libxml2-shape pointer the caller asserts is valid.
     let pat = unsafe { &*comp };
-    let n   = unsafe { &*node };
-    if pat.inner.matches(n) { 1 } else { 0 }
+    // Read the node-type discriminant through the raw pointer (offset 8,
+    // shared by the node and attribute layouts) without forming an
+    // `&Node`.  A libxml2 consumer may pass an `xmlAttr*` here as an
+    // `xmlNode*`; an attribute is a distinct type whose layout differs
+    // from `Node`, so reinterpreting it as `&Node` would be UB.
+    // SAFETY: `node` is non-null and points at a node-shaped header.
+    let kind = unsafe { (*node).kind };
+    let matched = if matches!(kind, sup_xml_tree::dom::NodeKind::Attribute) {
+        // SAFETY: the discriminant says this is an attribute; view it as
+        // the `Attribute` it actually is and match by name + owner chain.
+        let a = unsafe { &*(node as *const sup_xml_tree::dom::Attribute<'static>) };
+        pat.inner.matches_attribute(a.name(), a.parent.get())
+    } else {
+        // SAFETY: a real node; the caller asserts the pointer is valid.
+        let n = unsafe { &*node };
+        pat.inner.matches(n)
+    };
+    if matched { 1 } else { 0 }
 }
 
 /// libxml2 `xmlFreePattern(comp)` — drop a compiled pattern.

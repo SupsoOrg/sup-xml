@@ -183,20 +183,14 @@ pub unsafe extern "C" fn xmlNewDoc(version: *const c_char) -> *mut XmlDoc {
     let doc = b.build();
     let xml_doc = doc.into_xml_doc();
     // Reset children to NULL — libxml2's xmlNewDoc returns an empty
-    // doc (no root element until xmlDocSetRootElement is called).
-    // Also NULL the encoding pointer at offset 112 to match
-    // libxml2's "doc->encoding is NULL until explicitly set"
-    // contract; serializers omit the encoding attribute on output
-    // in that case.
+    // doc (no root element until xmlDocSetRootElement is called).  The
+    // encoding slot is already NULL: `into_xml_doc` leaves it `None` when
+    // the source carried no encoding (as here), matching libxml2's
+    // "doc->encoding is NULL until explicitly set" contract.
     // SAFETY: xml_doc is a freshly allocated boxed XmlDoc.
     unsafe {
         (*xml_doc).children.set(ptr::null_mut());
         (*xml_doc).last.set(ptr::null_mut());
-        let enc_ptr = (xml_doc as *mut u8).add(112) as *mut *const c_char;
-        let current = *enc_ptr;
-        if !current.is_null() && *(current as *const u8) == 0 {
-            *enc_ptr = ptr::null();
-        }
     }
     xml_doc
 }
@@ -1120,19 +1114,14 @@ pub unsafe extern "C" fn xmlNodeSetName(
     //   * `node` points at a live `Node<'doc>` (caller contract).
     //   * `new_name_ptr` is a NUL-terminated UTF-8 slice in the
     //     doc's arena that lives as long as the doc.
-    //   * `addr_of_mut!` takes the place expression's address without
-    //     forming any reference, so no aliasing-with-&Node issue.
-    //   * `Node.name` is `ArenaCStr` (8 bytes, single ptr); we write
-    //     a fresh `ArenaCStr::from_raw` value over it.  The previous
-    //     pointer is overwritten — bumpalo retains the bytes, so any
-    //     C caller that cached the old pointer is unaffected.
+    //   * `Node.name` is a `Cell<ArenaCStr>` (8 bytes, single ptr).
+    //     Nodes are reached only through shared `&Node` references, so
+    //     the rename goes through the `Cell` — a plain field write would
+    //     be UB against the outstanding shared borrow.  The previous
+    //     pointer is overwritten; bumpalo retains the bytes, so any C
+    //     caller that cached the old pointer is unaffected.
     unsafe {
-        let name_field: *mut sup_xml_tree::dom::ArenaCStr<'static> =
-            std::ptr::addr_of_mut!((*node).name);
-        std::ptr::write(
-            name_field,
-            sup_xml_tree::dom::ArenaCStr::from_raw(new_name_ptr),
-        );
+        (*node).name.set(sup_xml_tree::dom::ArenaCStr::from_raw(new_name_ptr));
     }
 }
 

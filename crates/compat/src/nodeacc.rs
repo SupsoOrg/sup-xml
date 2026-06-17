@@ -38,8 +38,8 @@ unsafe fn node_ref<'a>(n: *const Node<'static>) -> Option<&'a Node<'a>> {
 #[cfg_attr(feature = "cdylib-exports", unsafe(no_mangle))]
 pub unsafe extern "C" fn xmlGetLineNo(node: *const Node<'static>) -> c_long {
     match unsafe { node_ref(node) } {
-        Some(n) if n.full_line != 0 => n.full_line as c_long,
-        Some(n) => n.line as c_long,
+        Some(n) if n.full_line.get() != 0 => n.full_line.get() as c_long,
+        Some(n) => n.line.get() as c_long,
         None => -1,
     }
 }

@@ -596,7 +596,11 @@ pub struct Node<'doc> {
     pub _private:        Cell<*mut std::os::raw::c_void>,            //   0
     pub kind:            NodeKind,                  // xmlElementType //   8
     _pad_kind:           u32,                                        //  12
-    pub name:            ArenaCStr<'doc>,                          //  16
+    /// The element/PI/etc. name (`xmlChar*` at offset 16).  A `Cell`
+    /// because `xmlNodeSetName` renames a node in place, and nodes are
+    /// only ever reached through shared `&Node` references — mutation of a
+    /// bare field through such a reference is undefined behavior.
+    pub name:            Cell<ArenaCStr<'doc>>,                    //  16
     pub first_child:     Cell<Option<&'doc Node<'doc>>>,         //  24
     pub last_child:      Cell<Option<&'doc Node<'doc>>>,         //  32
     pub parent:          Cell<Option<&'doc Node<'doc>>>,         //  40
@@ -608,7 +612,10 @@ pub struct Node<'doc> {
     pub first_attribute: Cell<Option<&'doc Attribute<'doc>>>,    //  88
     pub ns_def:          Cell<Option<&'doc Namespace<'doc>>>,    //  96
     pub psvi:            Cell<*mut std::os::raw::c_void>,            // 104
-    pub line:            u16,                                        // 112
+    /// Source line (`xmlChar`-era `unsigned short`, offset 112).  A `Cell`
+    /// because the push parser back-patches it after the node is created,
+    /// and nodes are only reached through shared `&Node` references.
+    pub line:            Cell<u16>,                                  // 112
     pub extra:           u16,                                        // 114
     _pad_extra:          [u8; 4],                                    // 116..120
     // ── sup-xml-only tail (NOT part of ABI window) ──
@@ -624,7 +631,7 @@ pub struct Node<'doc> {
     /// `line`.  libxml2 instead stashes big lines in `psvi` on text nodes
     /// and recurses in `xmlGetLineNo`; a dedicated field is exact (no
     /// neighbour-line guessing for childless nodes like `<br/>`).
-    pub full_line:       u32,
+    pub full_line:       Cell<u32>,
     /// 0-based byte offset of the opening tag's name in the source
     /// buffer.  0 for nodes not produced by the parser.  Saturates at
     /// `u32::MAX` for inputs past 4 GiB.  Outside the libxml2 ABI
@@ -751,7 +758,19 @@ impl<'doc> Node<'doc> {
         #[cfg(not(feature = "c-abi"))]
         { self.name }
         #[cfg(feature = "c-abi")]
-        { self.name.as_str() }
+        { self.name.get().as_str() }
+    }
+
+    /// Source line number as recorded by the parser (`0` for nodes built
+    /// through the tree API).  Abstracts the per-config storage: a plain
+    /// `u32` on the lean build, a `Cell<u16>` (libxml2's `unsigned short`)
+    /// on the `c-abi` build — so callers don't reach into the field.
+    #[inline]
+    pub fn line_no(&self) -> u32 {
+        #[cfg(not(feature = "c-abi"))]
+        { self.line }
+        #[cfg(feature = "c-abi")]
+        { self.line.get() as u32 }
     }
 
     /// Text payload for `Text`/`CData`/`Comment`/`Pi` nodes; `""` for
@@ -1375,7 +1394,7 @@ impl DocumentBuilder {
                 _private:        Cell::new(std::ptr::null_mut()),
                 kind,
                 _pad_kind:       0,
-                name:            name_c,
+                name:            Cell::new(name_c),
                 first_child:     Cell::new(None),
                 last_child:      Cell::new(None),
                 parent:          Cell::new(None),
@@ -1387,11 +1406,11 @@ impl DocumentBuilder {
                 first_attribute: Cell::new(None),
                 ns_def:          Cell::new(None),
                 psvi:            Cell::new(std::ptr::null_mut()),
-                line:            0,
+                line:            Cell::new(0),
                 extra:           0,
                 _pad_extra:      [0u8; 4],
                 last_attribute:  Cell::new(None),
-                full_line:       0,
+                full_line:       Cell::new(0),
                 source_offset:   0,
             })
         }
@@ -2577,7 +2596,7 @@ impl Document {
                 _private:        Cell::new(std::ptr::null_mut()),
                 kind,
                 _pad_kind:       0,
-                name:            name_c,
+                name:            Cell::new(name_c),
                 first_child:     Cell::new(None),
                 last_child:      Cell::new(None),
                 parent:          Cell::new(None),
@@ -2589,11 +2608,11 @@ impl Document {
                 first_attribute: Cell::new(None),
                 ns_def:          Cell::new(None),
                 psvi:            Cell::new(std::ptr::null_mut()),
-                line:            0,
+                line:            Cell::new(0),
                 extra:           0,
                 _pad_extra:      [0u8; 4],
                 last_attribute:  Cell::new(None),
-                full_line:       0,
+                full_line:       Cell::new(0),
                 source_offset:   0,
             })
         }
@@ -2707,7 +2726,14 @@ pub struct XmlDoc {
     /// rare in modern XML, kept for ABI fidelity; we never populate it.
     pub old_ns:      *mut std::os::raw::c_void,                  //  96
     pub version:     ArenaCStr<'static>,                         // 104
-    pub encoding:    ArenaCStr<'static>,                         // 112
+    /// libxml2's `xmlDoc.encoding` is `NULL` when the source carried no
+    /// `<?xml encoding="…"?>` declaration; serializers omit the encoding
+    /// attribute on output in that case.  We model that NULL explicitly as
+    /// `None` (niche-optimized into the single `xmlChar*` slot) rather than
+    /// punning a null into a non-null `ArenaCStr`, and set the final value
+    /// at construction so no post-construction write into this slot — which
+    /// a `&Node` view of the document would freeze — is ever needed.
+    pub encoding:    Option<ArenaCStr<'static>>,                 // 112
     pub ids:         *mut std::os::raw::c_void,                  // 120
     pub refs:        *mut std::os::raw::c_void,                  // 128
     pub url:         *const std::os::raw::c_char,                // 136
@@ -2848,23 +2874,31 @@ impl Document {
         // Allocate version + encoding inside the embedded bump via a
         // temporary borrow.  After this, no more allocations happen in
         // the bump.
+        // The encoding slot mirrors libxml2's NULL-when-undeclared
+        // convention: an empty source encoding yields `None` (a null
+        // `xmlChar*`), never an allocated empty string.  Building it here
+        // — before the document is reinterpreted as a `&Node` to stamp
+        // top-level parents — means the slot is never written again, so a
+        // shared `&Node` view can't be invalidated by a later raw store.
         let (version_c, encoding_c) = {
             let bytes_v = version_str.as_bytes();
-            let bytes_e = encoding_str.as_bytes();
             let dst_v: &mut [u8] = self.bump.alloc_slice_fill_with(bytes_v.len() + 1, |i| {
                 if i < bytes_v.len() { bytes_v[i] } else { 0 }
             });
-            let dst_e: &mut [u8] = self.bump.alloc_slice_fill_with(bytes_e.len() + 1, |i| {
-                if i < bytes_e.len() { bytes_e[i] } else { 0 }
-            });
+            let encoding_c = if encoding_str.is_empty() {
+                None
+            } else {
+                let bytes_e = encoding_str.as_bytes();
+                let dst_e: &mut [u8] = self.bump.alloc_slice_fill_with(bytes_e.len() + 1, |i| {
+                    if i < bytes_e.len() { bytes_e[i] } else { 0 }
+                });
+                // SAFETY: NUL-terminated UTF-8, lifetime tied to the bump
+                // which moves into `_doc` (heap-pinned via Pin<Box<Bump>>).
+                Some(unsafe { ArenaCStr::from_raw(dst_e.as_ptr()) })
+            };
             // SAFETY: NUL-terminated UTF-8, lifetime tied to the bump
             // which moves into `_doc` (heap-pinned via Pin<Box<Bump>>).
-            unsafe {
-                (
-                    ArenaCStr::from_raw(dst_v.as_ptr()),
-                    ArenaCStr::from_raw(dst_e.as_ptr()),
-                )
-            }
+            (unsafe { ArenaCStr::from_raw(dst_v.as_ptr()) }, encoding_c)
         };
 
         let boxed = Box::new(XmlDoc {

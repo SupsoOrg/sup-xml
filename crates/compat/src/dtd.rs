@@ -77,7 +77,7 @@ fn first_element_line<'a>(node: &'a sup_xml_tree::dom::Node<'a>, name: &str) -> 
     use sup_xml_tree::dom::NodeKind;
     if node.kind == NodeKind::Element {
         if node.name() == name {
-            return Some(node.line as u32);
+            return Some(node.line_no());
         }
         for child in node.children() {
             if let Some(l) = first_element_line(child, name) {
@@ -229,12 +229,30 @@ pub struct xmlDtd {
     pub external_id: *mut c_char,            // 104  xmlChar *ExternalID
     pub system_id:   *mut c_char,            // 112  xmlChar *SystemID
     pub(crate) pentities: *mut c_void,       // 120
+    // ── sup-xml-only tail (past libxml2's 128-byte ABI window) ──
+    // A DTD spliced into the document's sibling chain is reinterpreted as
+    // a `&Node` (it shares the node header and reports `NodeKind::Dtd`, so
+    // every walker skips it).  Our `Node` carries fields past libxml2's ABI
+    // window, making it larger than `_xmlDtd`; without this pad, forming
+    // that `&Node` would run past the allocation's end — instant UB.  These
+    // bytes are never read by libxml2/lxml consumers (offsets ≥ 128).
+    _node_tail:      [u8; 16],               // 128
 }
 
 const _: () = {
     use std::mem::offset_of;
-    assert!(std::mem::size_of::<xmlDtd>() == 128,
-            "xmlDtd must be 128 bytes to match libxml2's _xmlDtd on 64-bit");
+    // The first 128 bytes match libxml2's `_xmlDtd` byte-exact (the ABI
+    // window consumers read); the allocation is then padded to at least
+    // `sizeof(Node)` so the DTD can be safely reinterpreted as a `&Node`
+    // when spliced into a sibling chain.
+    assert!(std::mem::size_of::<xmlDtd>() >= 128,
+            "xmlDtd ABI window must be at least libxml2's 128 bytes");
+    assert!(std::mem::size_of::<xmlDtd>()
+            >= std::mem::size_of::<sup_xml_tree::dom::Node<'static>>(),
+            "xmlDtd must be at least sizeof(Node) so the DTD-as-Node splice \
+             reference stays in-bounds");
+    assert!(offset_of!(xmlDtd, _node_tail) == 128,
+            "xmlDtd ABI window ends at offset 128");
     // Per-field offsets — guards against accidental field reorder
     // that the size check alone wouldn't catch.  Match libxml2's
     // tree.h layout for `_xmlDtd`.
@@ -292,6 +310,7 @@ fn alloc_dtd_with_ids(
         external_id,
         system_id:   system_id_p,
         pentities:   ptr::null_mut(),
+        _node_tail:  [0u8; 16],
     }))
 }
 
@@ -309,15 +328,15 @@ pub(crate) unsafe fn plant_int_subset(
     system_id: Option<&str>,
 ) -> *mut xmlDtd {
     let dtd = alloc_dtd_with_ids(Some(name), public_id, system_id);
-    // SAFETY: dtd is a freshly boxed, valid handle.
+    // SAFETY: dtd is a freshly boxed, valid handle; doc is a valid XmlDoc.
+    // A direct typed store into `int_subset` (offset 80) preserves the
+    // DTD pointer's provenance — our splice/serializer code reads it back
+    // and reinterprets it as a `&Node`, which a provenance-stripped value
+    // (e.g. one written through an integer round-trip) cannot satisfy.
     unsafe {
-        (*dtd).parent = doc as *mut c_void;
-        (*dtd).doc    = doc as *mut c_void;
-    }
-    let bytes = (dtd as usize).to_ne_bytes();
-    // SAFETY: doc is a valid XmlDoc; intSubset lives at offset 80.
-    unsafe {
-        std::ptr::copy_nonoverlapping(bytes.as_ptr(), (doc as *mut u8).add(80), bytes.len());
+        (*dtd).parent     = doc as *mut c_void;
+        (*dtd).doc        = doc as *mut c_void;
+        (*doc).int_subset = dtd as *mut c_void;
     }
     dtd
 }
@@ -351,18 +370,13 @@ pub unsafe extern "C" fn xmlCreateIntSubset(
     let public_id = cstr_opt(external_id);
     let system_id_s = cstr_opt(system_id);
     let dtd = alloc_dtd_with_ids(Some(&name_str), public_id.as_deref(), system_id_s.as_deref());
-    // Plant on doc.int_subset (offset 80 — see XmlDoc layout in
-    // sup-xml-tree/src/dom.rs:1608).  libxml2's `_xmlDoc::intSubset`
-    // sits at the same byte offset; consumers like lxml's
-    // `docinfo.internalDTD` read directly via the layout.
-    let off = 80usize;
-    let bytes = (dtd as usize).to_ne_bytes();
+    // Plant on doc.int_subset (offset 80, matching libxml2's
+    // `_xmlDoc::intSubset`, which lxml's `docinfo.internalDTD` reads via
+    // the layout).  A direct typed store preserves the DTD pointer's
+    // provenance, which our own splice/serializer code relies on when it
+    // reinterprets the handle as a `&Node`.
     unsafe {
-        std::ptr::copy_nonoverlapping(
-            bytes.as_ptr(),
-            (doc as *mut u8).add(off),
-            bytes.len(),
-        );
+        (*doc).int_subset = dtd as *mut c_void;
         // Parent the subset on its document (libxml2 sets both), so
         // consumers that walk `dtd->doc` — lxml's `_copyDtd`, the
         // serializer's `xmlNodeDumpOutput` — resolve the owning arena.
@@ -488,6 +502,12 @@ pub unsafe extern "C" fn xmlFreeDtd(dtd: *mut xmlDtd) {
         let boxed = Box::from_raw(dtd);
         if !boxed.name.is_null() {
             drop(std::ffi::CString::from_raw(boxed.name));
+        }
+        // libxml2's xmlFreeDtd releases the DTD's hash tables; we only ever
+        // populate `pentities` (an empty hash materialize plants so lxml's
+        // serializer emits the `[ … ]` subset block).  Free it to match.
+        if !boxed.pentities.is_null() {
+            crate::hash::xmlHashFree(boxed.pentities as *mut _, None);
         }
         drop(boxed);
     }

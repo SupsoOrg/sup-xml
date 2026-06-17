@@ -393,25 +393,9 @@ pub(crate) unsafe fn xml_read_memory_with_dict_extras(
             }
             let raw = doc.into_xml_doc();
             plant_doc_url(raw, url);
-            // libxml2 convention: doc->encoding is NULL when the
-            // source had no `<?xml encoding="…"?>` declaration.
-            // Serializers (libxslt's xsltSaveResultToString, etc.)
-            // omit the encoding attribute on output in that case.
-            // Our Rust-side `Document::encoding` defaults to empty;
-            // when the parser didn't see a declaration, we need to
-            // NULL out the C-shape pointer at offset 112 so
-            // libxml2-ABI consumers see the expected sentinel.
-            unsafe {
-                let enc_ptr = (raw as *mut u8).add(112) as *mut *const c_char;
-                let current = *enc_ptr;
-                if !current.is_null() {
-                    // Read the first byte; if NUL, the string is
-                    // empty → treat as undeclared.
-                    if *(current as *const u8) == 0 {
-                        *enc_ptr = ptr::null();
-                    }
-                }
-            }
+            // `into_xml_doc` already mirrors libxml2's NULL-when-undeclared
+            // encoding convention (an empty source encoding becomes a null
+            // `xmlChar*` slot), so no fixup is needed here.
             // Attach the internal-subset record whenever the parser
             // saw a <!DOCTYPE …> — even if its body was empty.  The
             // root name comes from the doctype header, not from the
@@ -578,6 +562,19 @@ pub unsafe extern "C" fn xmlFreeDoc(doc: *mut XmlDoc) {
     if !doc.is_null() {
         crate::dtd::forget_dtd(doc);
         crate::idindex::free_doc_id_table(doc);
+        // Release the internal-subset DTD handle (and its declaration
+        // store / pentities hash) the same way libxml2's xmlFreeDoc frees
+        // `doc->intSubset`.  NULL the slot first so the teardown can't be
+        // re-entered for the same handle.
+        // SAFETY: `int_subset`, when non-null, is an xmlDtd planted by
+        // xmlCreateIntSubset / plant_int_subset and owned by this doc.
+        unsafe {
+            let int_subset = (*doc).int_subset as *mut crate::dtd::xmlDtd;
+            if !int_subset.is_null() {
+                (*doc).int_subset = ptr::null_mut();
+                crate::dtd::xmlFreeDtd(int_subset);
+            }
+        }
     }
     unsafe { XmlDoc::free(doc); }
 }
@@ -711,10 +708,14 @@ pub unsafe extern "C" fn xml_free_impl(ptr: *mut c_void) {
     // contain interior NULs (UTF-16 buffers, raw byte dumps) so
     // CString::from_raw would size them off `strlen` and leak.
     if let Some(total) = crate::alloc::take_binary_alloc(ptr as *const u8) {
-        // SAFETY: pointer was produced by Box::into_raw of a
-        // Box<[u8]> of length `total` in alloc_registered_buffer.
+        // SAFETY: pointer was produced by alloc_registered_buffer with
+        // size `total` and BINARY_ALLOC_ALIGN alignment; free with the
+        // same Layout.
         unsafe {
-            let _ = Box::from_raw(std::slice::from_raw_parts_mut(ptr as *mut u8, total));
+            let layout = std::alloc::Layout::from_size_align(
+                total, crate::alloc::BINARY_ALLOC_ALIGN,
+            ).expect("buffer layout is valid");
+            std::alloc::dealloc(ptr as *mut u8, layout);
         }
         return;
     }
@@ -1324,6 +1325,9 @@ mod tests {
     /// `xmlReadFd` parses from a file descriptor (slurp + xmlReadMemory)
     /// without closing the caller's fd.
     #[test]
+    // Exercises real-OS file-descriptor semantics (seek/read byte counts);
+    // Miri's I/O shim doesn't reproduce them, so skip it under Miri.
+    #[cfg_attr(miri, ignore = "fd I/O semantics not modeled by Miri")]
     fn read_fd_parses_and_leaves_fd_open() {
         use crate::rawfd::testfd;
 

@@ -1381,7 +1381,7 @@ fn locate_unexpected_child<'a>(
                     .collect();
                 let next = child_deriv(&current, &cns, cl, &catts, &cchildren, defs);
                 if matches!(&*next, Pattern::NotAllowed) {
-                    return Some((cl.to_string(), c.line as u32));
+                    return Some((cl.to_string(), c.line_no()));
                 }
                 current = next;
             }

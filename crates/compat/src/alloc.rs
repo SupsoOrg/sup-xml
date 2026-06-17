@@ -108,19 +108,37 @@ pub fn alloc_registered_cstring(s: &[u8]) -> *mut std::os::raw::c_char {
 /// uses `strlen` to size the Drop, which would silently leak past the
 /// first interior NUL.
 pub fn alloc_registered_buffer(s: &[u8]) -> *mut std::os::raw::c_char {
-    let len = s.len();
-    let mut v: Vec<u8> = Vec::with_capacity(len + 1);
-    v.extend_from_slice(s);
-    v.push(0); // trailing NUL — libxml2's xmlChar* contract
-    let boxed: Box<[u8]> = v.into_boxed_slice();
-    let total = boxed.len();
-    let raw = Box::into_raw(boxed) as *mut u8;
+    let total = s.len() + 1; // trailing NUL — libxml2's xmlChar* contract
+    // Allocate with pointer alignment rather than a `Box<[u8]>`
+    // (alignment 1): some of these buffers are pointer arrays — e.g.
+    // `xmlGetNsList` returns an `xmlNs*[]` the caller walks as `*mut`
+    // values — and reading a pointer out of a 1-aligned allocation is
+    // undefined behavior.  `xml_free_impl` reconstructs the same Layout.
+    let layout = std::alloc::Layout::from_size_align(total, BINARY_ALLOC_ALIGN)
+        .expect("ns-list/buffer layout is valid");
+    // SAFETY: `total >= 1`, so the layout has non-zero size.
+    let raw = unsafe { std::alloc::alloc(layout) };
+    if raw.is_null() {
+        std::alloc::handle_alloc_error(layout);
+    }
+    // SAFETY: `raw` owns `total` bytes; we write exactly `s.len()` body
+    // bytes followed by the trailing NUL.
+    unsafe {
+        std::ptr::copy_nonoverlapping(s.as_ptr(), raw, s.len());
+        *raw.add(s.len()) = 0;
+    }
     binary_registry()
         .lock()
         .expect("binary alloc registry poisoned")
         .insert(raw as usize, total);
     raw as *mut std::os::raw::c_char
 }
+
+/// Alignment of allocations from [`alloc_registered_buffer`].  Pointer-
+/// wide so buffers that hold `*mut T` arrays (e.g. `xmlGetNsList`) can be
+/// dereferenced soundly.  [`crate::parse::xml_free_impl`] frees with the
+/// matching [`std::alloc::Layout`].
+pub const BINARY_ALLOC_ALIGN: usize = std::mem::align_of::<*mut std::os::raw::c_void>();
 
 /// If `p` was registered as a binary-safe allocation, return its
 /// total size (including the trailing NUL) and remove it from the

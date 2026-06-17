@@ -579,6 +579,9 @@ mod tests {
     }
 
     #[test]
+    // Exercises real-OS file-descriptor semantics (write/seek byte counts);
+    // Miri's I/O shim doesn't reproduce them, so skip it under Miri.
+    #[cfg_attr(miri, ignore = "fd I/O semantics not modeled by Miri")]
     fn save_to_fd_writes_and_does_not_close_fd() {
         use crate::rawfd::testfd;
         // Use a temp file, get its fd, ensure xmlSaveClose doesn't

@@ -835,17 +835,21 @@ fn drive(
                     // in the lean build (no ABI constraint, so we can
                     // handle large files better).
                     // Saturate when narrowing to u16.
+                    // c-abi stores the line in a saturating `Cell<u16>`;
+                    // the lean build keeps a plain `u32`.  `el` is the
+                    // freshly-built `&mut Node`, so either write is sound.
                     #[cfg(feature = "c-abi")]
-                    let line: u16 = raw_line.min(u16::MAX as u32) as u16;
+                    el.line.set(raw_line.min(u16::MAX as u32) as u16);
                     #[cfg(not(feature = "c-abi"))]
-                    let line: u32 = raw_line;
-                    el.line = line;
+                    {
+                        el.line = raw_line;
+                    }
                     // Keep the uncapped line for files past 65535 lines;
                     // `xmlGetLineNo` returns it in preference to the
                     // saturated `line`.
                     #[cfg(feature = "c-abi")]
                     {
-                        el.full_line = raw_line;
+                        el.full_line.set(raw_line);
                     }
                     // Byte offset of the element name — the ground truth
                     // from which line/column are derived on demand
@@ -1597,9 +1601,9 @@ mod tests {
             if n.is_element() { Some(n) } else { n.next_sibling.get() }
         ).unwrap();
 
-        assert_eq!(root.line, 1, "root <r> on line 1");
-        assert_eq!(a.line,    2, "<a/> on line 2");
-        assert_eq!(b.line,    3, "<b/> on line 3");
+        assert_eq!(root.line_no(), 1, "root <r> on line 1");
+        assert_eq!(a.line_no(),    2, "<a/> on line 2");
+        assert_eq!(b.line_no(),    3, "<b/> on line 3");
     }
 
     /// Regression guard: a previous implementation called
@@ -1621,14 +1625,14 @@ mod tests {
         src.push_str("</root>\n");
 
         let doc = parse(&src);
-        assert_eq!(doc.root().line, 1);
+        assert_eq!(doc.root().line_no(), 1);
 
         let mut expected: u32 = 2;
         let mut walked = 0u32;
         for child in doc.root().children().filter(|n| n.is_element()) {
             // line is u16 in c-abi mode, u32 in lean — both fit < 65535 here.
-            assert_eq!(child.line as u32, expected,
-                "child #{walked}: expected line {expected}, got {}", child.line);
+            assert_eq!(child.line_no(), expected,
+                "child #{walked}: expected line {expected}, got {}", child.line_no());
             walked += 1;
             expected += 1;
         }

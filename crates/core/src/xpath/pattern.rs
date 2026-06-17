@@ -123,17 +123,80 @@ impl Pattern {
     pub fn matches(&self, node: &Node<'_>) -> bool {
         self.branches.iter().any(|b| b.matches(node))
     }
+
+    /// Like [`matches`](Self::matches), but for an attribute candidate.
+    ///
+    /// Attributes are a distinct node type in this tree, so they cannot be
+    /// reinterpreted as an `&Node` to feed [`matches`](Self::matches) — the
+    /// two have different layouts.  The caller supplies the attribute's
+    /// name and owner element; the leftmost (`@name` / `@*`) step is
+    /// matched against the name and the rest of the pattern against the
+    /// owner-element ancestor chain.
+    pub fn matches_attribute(&self, attr_name: &str, parent: Option<&Node<'_>>) -> bool {
+        self.branches.iter().any(|b| b.matches_attribute(attr_name, parent))
+    }
 }
 
 // ── matching ────────────────────────────────────────────────────────────
 
 impl Branch {
     fn matches(&self, node: &Node<'_>) -> bool {
-        // `cursor` starts on the candidate node.  After matching step 0
-        // we use links[0] to move up to the node matching step 1, etc.
-        let Some(mut cursor) = Some(node) else { return false; };
+        self.run_from(0, node)
+    }
 
-        for (i, step) in self.steps.iter().enumerate() {
+    /// Match an attribute candidate: step 0 (which must be an attribute
+    /// test) against `attr_name`, then the remaining steps against the
+    /// owner-element chain rooted at `parent`.
+    fn matches_attribute(&self, attr_name: &str, parent: Option<&Node<'_>>) -> bool {
+        let Some(step0) = self.steps.first() else { return false; };
+        let test_ok = match &step0.test {
+            Test::Attribute(name) => name.as_str() == attr_name,
+            Test::AnyAttribute    => true,
+            _                     => false,
+        };
+        if !test_ok {
+            return false;
+        }
+        // A predicate on the attribute step would need the attribute's own
+        // node view, which this safe path deliberately doesn't form;
+        // decline rather than evaluate it against a partial picture.
+        if !step0.predicates.is_empty() {
+            return false;
+        }
+        match self.links.first() {
+            // A lone `@foo` / `@*` step matches unless anchored at the
+            // document root, which an element-owned attribute never is.
+            None => !self.absolute,
+            // `…/@foo`: the immediate parent must match the next step.
+            Some(Link::Parent) => match parent {
+                Some(p) => self.run_from(1, p),
+                None    => false,
+            },
+            // `…//@foo`: some ancestor must match the next step.
+            Some(Link::Ancestor) => {
+                let (Some(next_step), Some(p)) = (self.steps.get(1), parent) else {
+                    return false;
+                };
+                let mut up = Some(p);
+                while let Some(anc) = up {
+                    if next_step.test.matches(anc) && predicates_hold(&next_step.predicates, anc) {
+                        return self.run_from(1, anc);
+                    }
+                    up = anc.parent.get();
+                }
+                false
+            }
+        }
+    }
+
+    /// Run the pattern's steps `[start..]` against `start_cursor` and its
+    /// ancestor chain.  `matches` enters at step 0; the attribute path
+    /// enters at step 1 after handling the attribute step itself.
+    fn run_from(&self, start: usize, start_cursor: &Node<'_>) -> bool {
+        let mut cursor = start_cursor;
+
+        for i in start..self.steps.len() {
+            let step = &self.steps[i];
             // Step's test applies to whatever the cursor currently points at.
             if !step.test.matches(cursor) {
                 return false;

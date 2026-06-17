@@ -78,8 +78,8 @@ unsafe fn build_element(
     // `Element.sourceline` — the c-abi node stores the line in a u16;
     // `full_line` keeps the uncapped value for files past 65535 lines.
     unsafe {
-        (*elem).line = line.min(u16::MAX as u32) as u16;
-        (*elem).full_line = line;
+        (*elem).line.set(line.min(u16::MAX as u32) as u16);
+        (*elem).full_line.set(line);
     }
     let parent_node = if parent.is_null() { doc as *mut Node<'static> } else { parent };
     unsafe { crate::mutate::xmlAddChild(parent_node, elem); }

@@ -3874,21 +3874,24 @@ mod tests {
     fn empty_document_uri_reads_via_ctx_extra() {
         let stylesheet_doc = parse(b"<stylesheet><test>marker</test></stylesheet>");
 
-        // Fake xsltStylesheet: zero-init, write doc pointer at offset 32.
-        let mut style: Vec<u8> = vec![0u8; 64];
-        style[32..40].copy_from_slice(&(stylesheet_doc as usize).to_ne_bytes());
-        let style_box = style.into_boxed_slice();
-        let style_ptr = Box::into_raw(style_box) as *mut u8;
+        // Fake xsltStylesheet — `u64`-backed so it's 8-aligned like the
+        // real heap struct; the document() path reads pointer fields at
+        // 8-byte offsets, which is UB against a 1-aligned `[u8]` buffer.
+        // Store the stylesheet doc pointer (with provenance) at offset 32.
+        const STYLE_U64: usize = 8; // 64 bytes
+        let style_ptr = Box::into_raw(vec![0u64; STYLE_U64].into_boxed_slice()) as *mut u8;
+        unsafe {
+            std::ptr::write(style_ptr.add(32) as *mut *mut c_void, stylesheet_doc as *mut c_void);
+        }
 
-        // Fake xsltTransformContext: zero-init, write style pointer at offset 0.
-        // Must be large enough to cover every field the document() path reads
-        // — including the `sec` access-control pointer at offset 272 that the
-        // security gate dereferences before the empty-URI branch.
-        const TCTX_LEN: usize = 320;
-        let mut tctx: Vec<u8> = vec![0u8; TCTX_LEN];
-        tctx[0..8].copy_from_slice(&(style_ptr as usize).to_ne_bytes());
-        let tctx_box = tctx.into_boxed_slice();
-        let tctx_ptr = Box::into_raw(tctx_box) as *mut u8;
+        // Fake xsltTransformContext — likewise 8-aligned, large enough to
+        // cover the `sec` access-control pointer at offset 272 the security
+        // gate reads (left null here) plus the stylesheet pointer at offset 0.
+        const TCTX_U64: usize = 40; // 320 bytes
+        let tctx_ptr = Box::into_raw(vec![0u64; TCTX_U64].into_boxed_slice()) as *mut u8;
+        unsafe {
+            std::ptr::write(tctx_ptr as *mut *mut c_void, style_ptr as *mut c_void);
+        }
 
         let primary = parse(b"<src/>");
         let ctx = unsafe { xmlXPathNewContext(primary) };
@@ -3913,8 +3916,8 @@ mod tests {
             // Reclaim the fake structs.  Lengths match the Vecs we
             // allocated above; from_raw_parts reconstructs them as
             // slices for Box::drop.
-            drop(Box::from_raw(std::slice::from_raw_parts_mut(tctx_ptr, TCTX_LEN)));
-            drop(Box::from_raw(std::slice::from_raw_parts_mut(style_ptr, 64)));
+            drop(Box::from_raw(std::slice::from_raw_parts_mut(tctx_ptr as *mut u64, TCTX_U64)));
+            drop(Box::from_raw(std::slice::from_raw_parts_mut(style_ptr as *mut u64, STYLE_U64)));
         }
     }
 
