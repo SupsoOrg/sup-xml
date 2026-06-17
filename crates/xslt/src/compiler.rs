@@ -2347,8 +2347,13 @@ fn desugar_one(ins: &Instr) -> Option<sup_xml_core::xpath::ast::Expr> {
     use sup_xml_core::xpath::ast::Expr;
     match ins {
         Instr::Sequence { select } => Some(select.clone()),
-        Instr::ValueOf { select, .. } => Some(Expr::FunctionCall(
-            "string".into(), vec![select.clone()])),
+        // `string(select)` only reproduces xsl:value-of when the result
+        // is a single item.  With a separator (the XSLT 2.0 default for
+        // select=), value-of joins a sequence — which `string()` would
+        // silently drop — so leave it in instruction form for the eval
+        // path to join correctly.
+        Instr::ValueOf { select, separator, .. } if separator.is_none() =>
+            Some(Expr::FunctionCall("string".into(), vec![select.clone()])),
         Instr::CopyOf { select, .. } => Some(select.clone()),
         Instr::If { test, body } => {
             let then_e = desugar_tail(body)?;
