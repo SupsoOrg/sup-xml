@@ -664,6 +664,12 @@ fn scan_instr<F: FnMut(&Expr)>(instr: &Instr, scan: &mut F) {
             if let Some(a) = terminate { scan_avt(a, scan); }
             for child in body { scan_instr(child, scan); }
         }
+        Assert { test, select, body, error_code } => {
+            scan(test);
+            if let Some(e) = select { scan(e); }
+            if let Some(a) = error_code { scan_avt(a, scan); }
+            for child in body { scan_instr(child, scan); }
+        }
         Fallback { body } => for child in body { scan_instr(child, scan); }
         Sequence { select } => scan(select),
         NextMatch { with_params } => {
@@ -893,6 +899,12 @@ fn walk_instr(i: &Instr, out: &mut Vec<String>) {
         Instr::Variable(v) => collect_variable(v, out),
         Instr::Message { terminate, body } => {
             if let Some(a) = terminate { walk_avt(a, out); }
+            walk_instrs(body, out);
+        }
+        Instr::Assert { test, select, body, error_code } => {
+            walk_expr(test, out);
+            if let Some(e) = select { walk_expr(e, out); }
+            if let Some(a) = error_code { walk_avt(a, out); }
             walk_instrs(body, out);
         }
         Instr::Fallback { body } => walk_instrs(body, out),

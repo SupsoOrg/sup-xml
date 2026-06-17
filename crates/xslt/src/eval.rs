@@ -1332,7 +1332,7 @@ fn eval_function_body<I: DocIndexLike>(
                 for (i, n) in numbers.iter_mut().enumerate() {
                     let off = if value.is_some() { start_offsets.first() }
                               else { start_offsets.get(i) };
-                    if let Some(off) = off { *n += off; }
+                    if let Some(off) = off { *n = n.saturating_add(*off); }
                 }
                 let mut s = crate::number::format_list_opts(&numbers, &fmt, &opts);
                 if let Some((sep, sz)) = &group {
@@ -1496,6 +1496,7 @@ fn instr_kind_name(i: &crate::ast::Instr) -> &'static str {
     use crate::ast::Instr;
     match i {
         Instr::Sequence { .. }            => "xsl:sequence",
+        Instr::Assert { .. }              => "xsl:assert",
         Instr::Map { .. }                 => "xsl:map",
         Instr::MapEntry { .. }            => "xsl:map-entry",
         Instr::Variable(_)                => "xsl:variable",
@@ -2669,12 +2670,17 @@ pub fn apply_stylesheet_full_with_params_and_initial(
     // Merge xsl:output specs into one — last wins for scalar
     // fields; cdata_section_elements concatenates.
     let mut output = crate::ast::OutputSpec::default();
-    for o in &style.outputs {
+    // Only the principal (unnamed) output declarations merge into the
+    // effective output; named definitions are resolved separately by
+    // xsl:result-document format=.
+    for o in style.outputs.iter().filter(|o| o.name.is_none()) {
         if o.method.is_some() { output.method = o.method.clone(); }
         if o.encoding.is_some() { output.encoding = o.encoding.clone(); }
         if o.indent.is_some() { output.indent = o.indent; }
         if o.omit_xml_declaration.is_some() { output.omit_xml_declaration = o.omit_xml_declaration; }
         if o.standalone.is_some() { output.standalone = o.standalone; }
+        if o.escape_uri_attributes.is_some() { output.escape_uri_attributes = o.escape_uri_attributes; }
+        if o.include_content_type.is_some() { output.include_content_type = o.include_content_type; }
         if o.media_type.is_some() { output.media_type = o.media_type.clone(); }
         if o.doctype_public.is_some() { output.doctype_public = o.doctype_public.clone(); }
         if o.doctype_system.is_some() { output.doctype_system = o.doctype_system.clone(); }
@@ -5090,7 +5096,7 @@ fn eval_instr(
                     // single start-at integer offsets every entry.
                     let off = if value.is_some() { start_offsets.first() }
                               else { start_offsets.get(i) };
-                    if let Some(off) = off { *n += off; }
+                    if let Some(off) = off { *n = n.saturating_add(*off); }
                 }
             };
             let ordinal_str = match ordinal {
@@ -5287,6 +5293,27 @@ fn eval_instr(
             eprintln!("xsl:message: {s}");
             if terminate_yes {
                 return Err(XsltError::Terminated(s));
+            }
+        }
+        Instr::Assert { test, select, body, error_code } => {
+            // XSLT 3.0 §6.4 — when the test is effectively false, raise
+            // a terminating dynamic error (default err:XTMM9001) whose
+            // message comes from `select` or the body.
+            let cond = state.xpath_eval(test, ctx_node, pos, size)?;
+            if !value_to_bool(&cond) {
+                let msg = match select {
+                    Some(e) => {
+                        let v = state.xpath_eval(e, ctx_node, pos, size)?;
+                        sup_xml_core::xpath::eval::value_to_string(&v, state.idx)
+                    }
+                    None => stringify_into_string(state, body, ctx_node, pos, size)?,
+                };
+                let code = match error_code {
+                    Some(a) => render_avt(state, a, ctx_node, pos, size)?,
+                    None    => "XTMM9001".to_string(),
+                };
+                return Err(XsltError::Xpath(
+                    sup_xml_core::xpath::eval::xpath_err(msg).with_xpath_code(&code)));
             }
         }
         Instr::Fallback { .. } => {

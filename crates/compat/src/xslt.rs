@@ -83,12 +83,17 @@ pub struct XsltStylesheetShim {
 
 impl XsltStylesheetShim {
     fn new(stylesheet: Stylesheet, source_doc: *mut XmlDoc) -> Self {
+        // Only the principal (unnamed) output declarations describe the
+        // default output method/version; named definitions (used by
+        // xsl:result-document format=) are independent.
         let method_str = stylesheet.ast.outputs.iter()
+            .filter(|o| o.name.is_none())
             .find_map(|o| o.method.clone())
             .unwrap_or_else(|| "xml".to_string());
         let is_html = if method_str == "html" { 1 } else { 0 };
         let method  = CString::new(method_str).unwrap().into_raw();
         let version = stylesheet.ast.outputs.iter()
+            .filter(|o| o.name.is_none())
             .find_map(|o| o.version.clone())
             .map(|s| CString::new(s).unwrap().into_raw())
             .unwrap_or(ptr::null_mut());
@@ -108,10 +113,17 @@ impl XsltStylesheetShim {
 impl Drop for XsltStylesheetShim {
     fn drop(&mut self) {
         // Reclaim the C strings we leaked into the libxslt-shape
-        // fields.  The Box<Stylesheet> drops automatically.
+        // fields.  The Box<Stylesheet> drops automatically and owns its
+        // compiled AST outright (no borrow into the source document).
         unsafe {
             if !self.method.is_null()  { let _ = CString::from_raw(self.method);  }
             if !self.version.is_null() { let _ = CString::from_raw(self.version); }
+            // Free the originating stylesheet document, mirroring libxslt's
+            // `xsltFreeStylesheet`, which owns and frees `style->doc`.
+            let doc = self.doc.get();
+            if !doc.is_null() {
+                crate::parse::xmlFreeDoc(doc);
+            }
         }
     }
 }
@@ -822,7 +834,9 @@ mod tests {
 
         unsafe {
             let _ = CString::from_raw(buf);  // reclaim the alloc
-            xsltFreeStylesheet(style);
+            crate::parse::xmlFreeDoc(result);
+            crate::parse::xmlFreeDoc(src_doc);
+            xsltFreeStylesheet(style); // also frees the stylesheet's own doc
         }
     }
 
@@ -851,7 +865,12 @@ mod tests {
         let mut len: c_int = 0;
         unsafe { xsltSaveResultToString(&mut buf, &mut len, result, style); }
         let out = unsafe { std::ffi::CStr::from_ptr(buf) }.to_str().unwrap().to_string();
-        unsafe { let _ = CString::from_raw(buf); xsltFreeStylesheet(style); }
+        unsafe {
+            let _ = CString::from_raw(buf);
+            crate::parse::xmlFreeDoc(result);
+            crate::parse::xmlFreeDoc(src_doc);
+            xsltFreeStylesheet(style); // also frees the stylesheet's own doc
+        }
         assert!(out.contains("<x"), "for-each select=. at doc node should iterate: {out:?}");
     }
 
@@ -902,6 +921,9 @@ mod tests {
             xmlSchematronFreeValidCtxt(valid_ctxt);
             xmlSchematronFree(compiled);
             xmlSchematronFreeParserCtxt(parser);
+            crate::parse::xmlFreeDoc(good_doc);
+            crate::parse::xmlFreeDoc(bad_doc);
+            crate::parse::xmlFreeDoc(schema_doc);
         }
     }
 
@@ -916,6 +938,8 @@ mod tests {
         };
         let style = unsafe { xsltParseStylesheetDoc(doc) };
         assert!(style.is_null());
+        // Compile failed, so ownership of `doc` stays with us.
+        unsafe { crate::parse::xmlFreeDoc(doc); }
     }
 
     #[test]

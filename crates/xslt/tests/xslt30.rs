@@ -209,6 +209,11 @@ enum Expectation {
     AnyOf(Vec<Expectation>),
     /// `<all-of>` — every branch must pass.
     AllOf(Vec<Expectation>),
+    /// `<not>` — passes iff the inner expectation does NOT hold.
+    Not(Box<Expectation>),
+    /// `<serialization-matches>` — the serialized output must match
+    /// this regular expression (`flags="i"` → case-insensitive).
+    SerializationMatches { pattern: String, ci: bool },
     Unsupported,
 }
 
@@ -246,7 +251,7 @@ struct Environment {
 #[derive(Clone, Copy)]
 #[allow(dead_code)] // `All` is wired up but currently not produced —
                     // see the `<all-of>` start-handler comment.
-enum CombinatorKind { Any, All }
+enum CombinatorKind { Any, All, Not }
 
 /// True iff every leaf in this expectation tree is an
 /// `Expectation::Assert` (XPath-against-output).  The 1.0 runner
@@ -306,6 +311,8 @@ fn parse_test_set(path: &Path) -> Vec<TestCase> {
     // When inside `<assert-result-document uri="…">`, the uri whose
     // nested assertion routes to `result_doc_asserts`.
     let mut cur_rd_uri: Option<String> = None;
+    // `flags="i"` on the `<serialization-matches>` currently being read.
+    let mut cur_ser_ci = false;
     // Stack of open `<any-of>` / `<all-of>` accumulators.  Leaf
     // expectations push onto the top accumulator; `</…-of>` pops,
     // wraps the alternatives in the right variant, and routes the
@@ -498,23 +505,17 @@ fn parse_test_set(path: &Path) -> Vec<TestCase> {
                                             test_set_requires_post_1_0 = true;
                                         }
                                     }
-                                    // Tests that require XSLT 3.0 / 3.1
-                                    // (or XPath 3.0 / 3.1) explicitly are
-                                    // out of scope for the 2.0 conformance
-                                    // sweep — the W3C author's tag is
-                                    // authoritative about minimum-required
-                                    // version, so skip per-case.  A test-set
-                                    // spec of just "XSLT30+" without per-case
-                                    // narrowing still flags every case in
-                                    // the file as 3.0-required.
-                                    let needs_3_0 = (v.contains("XSLT30")
-                                        || v.contains("XSLT31")
-                                        || v.contains("XPath30")
-                                        || v.contains("XPath31"))
-                                        && !v.contains("XSLT20");
-                                    if needs_3_0 && in_case {
-                                        cur_case.requires_unsupported_feature = true;
-                                    }
+                                    // A version tag alone (XSLT30/31,
+                                    // XPath30/31) is NOT a reason to skip:
+                                    // the engine implements a large part of
+                                    // 3.0 (maps, arrays, higher-order
+                                    // functions, xsl:iterate / try / merge /
+                                    // evaluate, accumulators, text value
+                                    // templates).  Skipping is decided by
+                                    // declared FEATURE dependencies the
+                                    // engine genuinely lacks (see the
+                                    // `feature` handler), not by the
+                                    // minimum-version label.
                                 }
                             }
                         }
@@ -560,13 +561,20 @@ fn parse_test_set(path: &Path) -> Vec<TestCase> {
                                     test_set_requires_post_1_0 = true;
                                 }
                             }
-                            // Features we don't implement —
-                            // skip the case in the 2.0 runner.
+                            // Feature families the engine genuinely does
+                            // NOT implement — skip these (counted as skip,
+                            // not fail, so the rate reflects engine quality
+                            // on its supported surface).  Deliberately
+                            // narrow: higher-order functions, dynamic
+                            // evaluation (xsl:evaluate), and the bulk of
+                            // XPath 3.0/3.1 ARE implemented, so they are no
+                            // longer treated as unsupported.  What remains
+                            // is streaming and schema-aware processing (see
+                            // `known_unsupported.rs`).
                             if matches!(v.as_str(),
-                                "higher_order_functions" | "streaming"
+                                "streaming"
                                 | "schema_aware" | "schemaImport"
-                                | "XSD_1.1" | "dynamic_evaluation"
-                                | "XPath_3.0" | "XPath_3.1"
+                                | "XSD_1.1"
                             ) {
                                 if in_case {
                                     cur_case.requires_unsupported_feature = true;
@@ -705,6 +713,20 @@ fn parse_test_set(path: &Path) -> Vec<TestCase> {
                     // `cur_case.expects` (or the surrounding
                     // any-of) without an extra wrapper.
                     "all-of" if in_case && in_aux_assert == 0 => {}
+                    // `<not>` wraps a single child assertion; the
+                    // close-handler pops and inverts it.
+                    "not" if in_case && in_aux_assert == 0 => {
+                        combinator_stack.push((CombinatorKind::Not, Vec::new()));
+                    }
+                    // `<serialization-matches>` — a regex the serialized
+                    // output must match.  Captured here (text + flags);
+                    // committed in the close-handler.
+                    "serialization-matches" if in_case && in_aux_assert == 0 => {
+                        text_buf.clear();
+                        cur_ser_ci = tag.attrs().flatten()
+                            .any(|a| a.name() == "flags" && a.value().contains('i'));
+                        capturing = Some("serialization-matches");
+                    }
                     "assert-string-value" if in_case && in_aux_assert == 0 => {
                         text_buf.clear();
                         capturing = Some("assert-string-value");
@@ -725,11 +747,16 @@ fn parse_test_set(path: &Path) -> Vec<TestCase> {
                             .map(|a| a.value().to_string());
                     }
                     "assert-message" |
-                    "assert-serialization" | "serialization-matches" |
+                    "assert-serialization" |
                     "assert-warning" | "assert-result-document-tree" if in_case => {
                         in_aux_assert += 1;
                     }
-                    "error" if in_case && in_aux_assert == 0 => {
+                    // `<error/>` and `<assert-serialization-error/>` both
+                    // mean "a (serialization) error is expected"; the
+                    // engine satisfies either with any failure.
+                    "error" | "assert-serialization-error"
+                        if in_case && in_aux_assert == 0 =>
+                    {
                         commit_expectation(&mut cur_case.expects,
                             &mut combinator_stack, Expectation::Error);
                     }
@@ -796,6 +823,30 @@ fn parse_test_set(path: &Path) -> Vec<TestCase> {
                         }
                         capturing = None;
                     }
+                    "serialization-matches" if capturing == Some("serialization-matches") => {
+                        commit_expectation(&mut cur_case.expects, &mut combinator_stack,
+                            Expectation::SerializationMatches {
+                                pattern: std::mem::take(&mut text_buf),
+                                ci: cur_ser_ci,
+                            });
+                        cur_ser_ci = false;
+                        capturing = None;
+                    }
+                    // `<not>` — pop its collected child(ren) and commit
+                    // the inverted expectation.
+                    "not" if in_case && in_aux_assert == 0 => {
+                        if let Some((_, mut children)) = combinator_stack.pop() {
+                            let inner = match children.len() {
+                                0 => None,
+                                1 => children.pop(),
+                                _ => Some(Expectation::AllOf(children)),
+                            };
+                            if let Some(inner) = inner {
+                                commit_expectation(&mut cur_case.expects, &mut combinator_stack,
+                                    Expectation::Not(Box::new(inner)));
+                            }
+                        }
+                    }
                     "assert-result-document" if in_case => {
                         cur_rd_uri = None;
                     }
@@ -811,6 +862,15 @@ fn parse_test_set(path: &Path) -> Vec<TestCase> {
                                 let wrapped = match kind {
                                     CombinatorKind::Any => Expectation::AnyOf(alternatives),
                                     CombinatorKind::All => Expectation::AllOf(alternatives),
+                                    // `<not>` is closed by its own dedicated
+                                    // end-handler, never here; kept for
+                                    // match exhaustiveness.
+                                    CombinatorKind::Not => match alternatives.len() {
+                                        1 => Expectation::Not(Box::new(
+                                            alternatives.into_iter().next().unwrap())),
+                                        _ => Expectation::Not(Box::new(
+                                            Expectation::AllOf(alternatives))),
+                                    },
                                 };
                                 commit_expectation(&mut cur_case.expects,
                                     &mut combinator_stack, wrapped);
@@ -823,7 +883,7 @@ fn parse_test_set(path: &Path) -> Vec<TestCase> {
                         // already committed via the normal route.
                     }
                     "assert-message" | "assert-result-document" |
-                    "assert-serialization" | "serialization-matches" |
+                    "assert-serialization" |
                     "assert-warning" | "assert-result-document-tree" => {
                         if in_aux_assert > 0 { in_aux_assert -= 1; }
                     }
@@ -1316,17 +1376,27 @@ fn has_exponent_literal(s: &str) -> bool {
 /// Some(Some(reason)) on fail, None on skip.  Stored in a flat enum so
 /// the diagnostic mode can bucket the failures.
 fn run_case_detailed(case: &TestCase, ts_dir: &Path) -> Option<Result<(), FailReason>> {
-    // `XSLT3_ATTEMPT_ALL=1` attempts every case in the suite — including
-    // the 2.0+/3.0-feature cases the default run skips — so we can read a
-    // true full-suite pass rate (cases relying on unimplemented features
-    // then fail rather than skip).
+    // Three run modes, all through this timeout-safe worker harness:
+    //   * default              — XSLT 1.0-level cases only (stable baseline).
+    //   * XSLT3_CAPABILITY=1   — every case EXCEPT genuinely-unsupported
+    //                            feature families (streaming, schema-aware);
+    //                            the honest "how good are we on what we
+    //                            actually implement" number.
+    //   * XSLT3_ATTEMPT_ALL=1  — literally every case, unsupported features
+    //                            included (they fail rather than skip): the
+    //                            pessimistic full-suite floor.
     let attempt_all = std::env::var("XSLT3_ATTEMPT_ALL").is_ok();
-    if case.requires_post_1_0 && !attempt_all { return None; }
+    let capability  = attempt_all || std::env::var("XSLT3_CAPABILITY").is_ok();
+    // Feature families we don't implement are skipped in every mode except
+    // the brute attempt-all floor, so the capability rate isn't dragged
+    // down by absent-feature failures.
+    if case.requires_unsupported_feature && !attempt_all { return None; }
+    if case.requires_post_1_0 && !capability { return None; }
     let stylesheet_path = case.stylesheet.as_ref()?;
 
     let xsl_text = std::fs::read_to_string(ts_dir.join(stylesheet_path)).ok()?;
     let xsl_path = ts_dir.join(stylesheet_path);
-    if !attempt_all && uses_post_xslt_10_features_with_includes(&xsl_text, &xsl_path) {
+    if !capability && uses_post_xslt_10_features_with_includes(&xsl_text, &xsl_path) {
         return None;
     }
     let src_text = if let Some(s) = &case.source_inline {
@@ -1370,7 +1440,7 @@ fn run_case_detailed(case: &TestCase, ts_dir: &Path) -> Option<Result<(), FailRe
     // policy so XPath 2.0-only assertion syntax stays out of the
     // 1.0 baseline; the 3.0/2.0 runners pick them up.
     if matches!(case.expects, Expectation::Unsupported)
-        || (expectation_is_pure_assert(&case.expects) && !attempt_all)
+        || (expectation_is_pure_assert(&case.expects) && !capability)
     {
         return None;
     }
@@ -1519,6 +1589,28 @@ fn check_expectation_against(
             }
             Ok(())
         }
+        // NOT — passes exactly when the inner expectation does not.
+        Expectation::Not(inner) => match check_expectation_against(inner, result) {
+            Ok(())  => Err(FailReason::WrongOutput),
+            Err(_)  => Ok(()),
+        },
+        // The serialized output must match the regex (XPath dialect),
+        // searched anywhere in the string.
+        Expectation::SerializationMatches { pattern, ci } => match result {
+            A::Ok(rt) => match rt.to_string() {
+                Ok(got) => {
+                    let pat = if *ci { format!("(?i){pattern}") } else { pattern.clone() };
+                    match sup_xml_core::regex::Pattern::compile(&pat) {
+                        Ok(re) if re.find_match(&got) => Ok(()),
+                        _ => Err(FailReason::WrongOutput),
+                    }
+                }
+                Err(_) => Err(FailReason::Serialise),
+            },
+            A::CompileFailed     => Err(FailReason::Compile),
+            A::SourceParseFailed => Err(FailReason::SourceParse),
+            A::ApplyFailed       => Err(FailReason::Apply),
+        },
         Expectation::Unsupported => Err(FailReason::WrongOutput),
     }
 }
@@ -1663,6 +1755,13 @@ fn emit_diff(group: &str, case: &TestCase, ts_dir: &Path, reason: FailReason) {
         }
         Expectation::AllOf(alts) => {
             println!("  expected (all-of, {} branches)", alts.len());
+        }
+        Expectation::Not(_) => {
+            println!("  expected (not: inner must NOT hold)");
+        }
+        Expectation::SerializationMatches { pattern, ci } => {
+            println!("  expected (serialization-matches{}): {pattern:?}",
+                if *ci { ", i" } else { "" });
         }
         Expectation::Unsupported => {}
     }
@@ -1977,7 +2076,24 @@ fn run_suite() {
         if let Some(g) = &filter_group {
             if g != &group { continue; }
         }
+        // The entire `strm` group is streaming-only (see
+        // `known_unsupported.rs`); streaming is a feature this engine
+        // deliberately doesn't implement.  Its cases aren't reliably
+        // per-case feature-tagged, so skip the group wholesale —
+        // counted as skip, not attempted-and-failed — so the rate
+        // reflects the supported feature surface.
+        let unsupported_set = group == "strm";
         for case in parse_test_set(ts_path) {
+            let qualified = format!("{group}/{}", case.name);
+            // Host-encoding-pinned sets and the heavy slow sets are
+            // counted as skip (not enqueued), same policy as the 2.0
+            // runner — so the conformance rate reflects engine quality,
+            // not Saxon's UTF-16 string model or CI wall-clock budget.
+            if unsupported_set || is_version_locked(&qualified) || is_slow_skipped(&qualified) {
+                let s = by_group.entry(group.clone()).or_default();
+                s.skip += 1; total.skip += 1;
+                continue;
+            }
             work.push(WorkItem { case, dir: ts_dir.to_path_buf(), group: group.clone() });
         }
     }

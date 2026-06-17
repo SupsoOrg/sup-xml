@@ -18,7 +18,7 @@
 
 use std::fmt::Write;
 
-use crate::ast::OutputSpec;
+use crate::ast::{OutputSpec, QName, Standalone};
 use crate::error::XsltError;
 use crate::result_tree::{ResultNode, ResultTree};
 
@@ -41,13 +41,41 @@ fn effective_method(tree: &ResultTree) -> &str {
 
 impl ResultTree {
     /// Serialise the result tree to a string using the effective
-    /// output method.  XSLT 1.0 §16 — method = xml | html | text.
+    /// output method.  XSLT 1.0 §16 — method = xml | html | xhtml |
+    /// text.
+    ///
+    /// Method-dependent defaults follow the XSLT/XQuery Serialization
+    /// spec: `indent`, `escape-uri-attributes`, and
+    /// `include-content-type` all default to `yes` for the html and
+    /// xhtml output methods, and to `no` / not-applicable for xml.
     pub fn to_string(&self) -> Result<String, XsltError> {
-        match effective_method(self) {
-            "html" => Ok(serialize_html(self)),
-            "text" => Ok(serialize_text(self)),
-            _      => Ok(serialize_xml(self)),
-        }
+        let method = effective_method(self);
+        let html_family = matches!(method, "html" | "xhtml");
+        let indent = self.output.indent.unwrap_or(html_family);
+        let escape_uri = html_family
+            && self.output.escape_uri_attributes.unwrap_or(true);
+        let content_type = html_family
+            && self.output.include_content_type.unwrap_or(true);
+
+        // include-content-type: splice a <meta http-equiv> into the
+        // <head>.  Only clone the child list when an injection is
+        // actually performed.
+        let owned;
+        let children: &[ResultNode] = if content_type {
+            owned = with_content_type_meta(&self.children, &self.output, method == "xhtml");
+            &owned
+        } else {
+            &self.children
+        };
+
+        Ok(match method {
+            "html"  => serialize_html(children, &self.output, indent, escape_uri),
+            "text"  => serialize_text(children),
+            // The xhtml output method uses XML syntax with the
+            // html-family parameter defaults applied above.
+            _       => serialize_xml(children, &self.output, &self.character_map,
+                                     indent, escape_uri),
+        })
     }
 
     /// Write the serialised result to any [`io::Write`] sink.
@@ -60,21 +88,31 @@ impl ResultTree {
 
 // ── XML serialiser ────────────────────────────────────────────────
 
-pub fn serialize_xml(tree: &ResultTree) -> String {
+pub fn serialize_xml(
+    children:   &[ResultNode],
+    output:     &OutputSpec,
+    cmap:       &[(char, String)],
+    indent:     bool,
+    escape_uri: bool,
+) -> String {
     let mut out = String::new();
-    if should_emit_xml_decl(&tree.output) {
+    if should_emit_xml_decl(output) {
         let _ = write!(out, r#"<?xml version="{}" encoding="{}""#,
-            tree.output.version.as_deref().unwrap_or("1.0"),
-            tree.output.encoding.as_deref().unwrap_or("UTF-8"),
+            output.version.as_deref().unwrap_or("1.0"),
+            output.encoding.as_deref().unwrap_or("UTF-8"),
         );
-        if let Some(s) = tree.output.standalone {
-            let _ = write!(out, r#" standalone="{}""#, if s { "yes" } else { "no" });
+        // `standalone="omit"` (and an absent attribute) suppress the
+        // pseudo-attribute entirely; only yes/no are emitted.
+        match output.standalone {
+            Some(Standalone::Yes) => { let _ = write!(out, r#" standalone="yes""#); }
+            Some(Standalone::No)  => { let _ = write!(out, r#" standalone="no""#); }
+            Some(Standalone::Omit) | None => {}
         }
         out.push_str("?>\n");
     }
-    if let Some(dt_sys) = tree.output.doctype_system.as_deref() {
-        if let Some(root) = first_element_name(&tree.children) {
-            if let Some(pubid) = tree.output.doctype_public.as_deref() {
+    if let Some(dt_sys) = output.doctype_system.as_deref() {
+        if let Some(root) = first_element_name(children) {
+            if let Some(pubid) = output.doctype_public.as_deref() {
                 let _ = writeln!(out, r#"<!DOCTYPE {root} PUBLIC "{pubid}" "{dt_sys}">"#);
             } else {
                 let _ = writeln!(out, r#"<!DOCTYPE {root} SYSTEM "{dt_sys}">"#);
@@ -85,11 +123,10 @@ pub fn serialize_xml(tree: &ResultTree) -> String {
     // content. Mixed content (any text-node child) suppresses
     // formatting for that element and its whole subtree so text is
     // preserved verbatim.
-    let format = tree.output.indent == Some(true);
-    for child in &tree.children {
-        serialize_xml_node(child, &mut out, &tree.output, "", &tree.character_map, format, 0);
+    for child in children {
+        serialize_xml_node(child, &mut out, output, "", cmap, indent, escape_uri, 0);
     }
-    if format && !out.ends_with('\n') {
+    if indent && !out.ends_with('\n') {
         out.push('\n');
     }
     out
@@ -120,6 +157,7 @@ fn first_element_name(nodes: &[ResultNode]) -> Option<String> {
 /// the surrounding scope (`""` if none) — used to suppress redundant
 /// `xmlns=""` declarations on elements whose surrounding scope
 /// already has no default namespace.
+#[allow(clippy::too_many_arguments)]
 fn serialize_xml_node(
     node:        &ResultNode,
     out:         &mut String,
@@ -127,6 +165,7 @@ fn serialize_xml_node(
     parent_default_ns: &str,
     cmap:        &[(char, String)],
     format:      bool,
+    escape_uri:  bool,
     level:       usize,
 ) {
     let xml_11   = opts.version.as_deref() == Some("1.1");
@@ -170,7 +209,7 @@ fn serialize_xml_node(
             for (aname, value) in attributes {
                 let _ = write!(out, r#" {}="{}""#,
                     aname.to_qname_string(),
-                    escape_attr_with_map(value, xml_11, enc_cap, cmap));
+                    render_attr_value(name, aname, value, escape_uri, xml_11, enc_cap, cmap));
             }
             if children.is_empty() {
                 out.push_str("/>");
@@ -199,7 +238,7 @@ fn serialize_xml_node(
                         continue;
                     }
                 }
-                serialize_xml_node(c, out, opts, child_default_ns, cmap, child_format, level + 1);
+                serialize_xml_node(c, out, opts, child_default_ns, cmap, child_format, escape_uri, level + 1);
             }
             if child_format {
                 out.push('\n');
@@ -360,6 +399,152 @@ fn escape_attr_with_map(
     out
 }
 
+// ── URI-attribute escaping (html / xhtml output methods) ──────────
+
+/// Render an attribute value, applying `fn:escape-html-uri` first
+/// when `escape_uri` is in effect and the attribute is URI-valued
+/// (Serialization spec, Appendix "List of URI Attributes").  The
+/// `%HH`-escaped result is then passed through ordinary attribute
+/// escaping so reserved markup characters are still protected.
+#[allow(clippy::too_many_arguments)]
+fn render_attr_value(
+    element:    &QName,
+    attr:       &QName,
+    value:      &str,
+    escape_uri: bool,
+    xml_11:     bool,
+    enc_cap:    Option<u32>,
+    cmap:       &[(char, String)],
+) -> String {
+    if escape_uri
+        && attr.uri.is_empty()
+        && is_uri_attribute(&element.local.to_ascii_lowercase(),
+                            &attr.local.to_ascii_lowercase())
+    {
+        escape_attr_with_map(&escape_html_uri(value), xml_11, enc_cap, cmap)
+    } else {
+        escape_attr_with_map(value, xml_11, enc_cap, cmap)
+    }
+}
+
+/// `fn:escape-html-uri` (XPath/XQuery F&O §6.4): printable ASCII
+/// (`#x20`–`#x7E`) is left untouched; every other character is
+/// percent-escaped, one `%HH` per byte of its UTF-8 encoding.  This
+/// is deliberately confined to non-ASCII characters because escaping
+/// ASCII characters in a URI is not always appropriate.
+fn escape_html_uri(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut buf = [0u8; 4];
+    for c in s.chars() {
+        if matches!(c as u32, 0x20..=0x7E) {
+            out.push(c);
+        } else {
+            for b in c.encode_utf8(&mut buf).bytes() {
+                let _ = write!(out, "%{b:02X}");
+            }
+        }
+    }
+    out
+}
+
+/// Whether `(element, attr)` (both lowercase, no namespace) is a
+/// URI-valued attribute per the Serialization spec, Appendix "List
+/// of URI Attributes".  The list is element-specific: e.g. `value`
+/// is a URI only on `input`, `name` only on `a`.
+fn is_uri_attribute(element: &str, attr: &str) -> bool {
+    match attr {
+        "action"     => element == "form",
+        "archive"    => element == "object",
+        "background" => element == "body",
+        "cite"       => matches!(element, "blockquote" | "del" | "ins" | "q"),
+        "classid"    => element == "object",
+        "codebase"   => matches!(element, "applet" | "object"),
+        "data"       => element == "object",
+        "datasrc"    => matches!(element,
+            "button" | "div" | "input" | "object" | "select" | "span" | "table" | "textarea"),
+        "for"        => element == "script",
+        "formaction" => matches!(element, "button" | "input"),
+        "href"       => matches!(element, "a" | "area" | "base" | "link"),
+        "icon"       => element == "command",
+        "longdesc"   => matches!(element, "frame" | "iframe" | "img"),
+        "manifest"   => element == "html",
+        "name"       => element == "a",
+        "poster"     => element == "video",
+        "profile"    => element == "head",
+        "src"        => matches!(element,
+            "audio" | "embed" | "frame" | "iframe" | "img" | "input" | "script"
+            | "source" | "track" | "video"),
+        "usemap"     => matches!(element, "img" | "input" | "object"),
+        "value"      => element == "input",
+        _ => false,
+    }
+}
+
+// ── include-content-type (html / xhtml output methods) ────────────
+
+/// Return the result tree's children with a
+/// `<meta http-equiv="Content-Type" content="…; charset=…">` element
+/// spliced in as the first child of the `head` element (Serialization
+/// spec §6 / libxslt behavior).  Any existing content-type `meta` in
+/// that head is removed first.  When there is no `head` element the
+/// children are returned with no meta added.
+fn with_content_type_meta(children: &[ResultNode], output: &OutputSpec, xhtml: bool) -> Vec<ResultNode> {
+    let charset = output.encoding.as_deref().unwrap_or("UTF-8");
+    let media   = output.media_type.as_deref().unwrap_or("text/html");
+    let content = format!("{media}; charset={charset}");
+    // The meta SHOULD share the head's namespace: no namespace for
+    // the html output method, the XHTML namespace for xhtml.
+    let ns = if xhtml { "http://www.w3.org/1999/xhtml" } else { "" };
+    let mut result = children.to_vec();
+    inject_content_type(&mut result, &content, ns);
+    result
+}
+
+/// Walk `nodes` for the first `head` element in namespace `ns`,
+/// replacing any content-type meta among its children with a fresh
+/// one.  Returns whether a head was found.
+fn inject_content_type(nodes: &mut [ResultNode], content: &str, ns: &str) -> bool {
+    for node in nodes.iter_mut() {
+        if let ResultNode::Element { name, children, .. } = node {
+            if name.local.eq_ignore_ascii_case("head") && name.uri == ns {
+                children.retain(|c| !is_content_type_meta(c));
+                children.insert(0, content_type_meta(content, ns));
+                return true;
+            }
+            if inject_content_type(children, content, ns) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Whether `node` is a `<meta http-equiv="Content-Type" …>` element
+/// (the http-equiv name is matched case-insensitively, as HTML
+/// requires).
+fn is_content_type_meta(node: &ResultNode) -> bool {
+    matches!(node, ResultNode::Element { name, attributes, .. }
+        if name.local.eq_ignore_ascii_case("meta")
+        && attributes.iter().any(|(a, v)|
+            a.local.eq_ignore_ascii_case("http-equiv")
+            && v.eq_ignore_ascii_case("content-type")))
+}
+
+fn content_type_meta(content: &str, ns: &str) -> ResultNode {
+    let attr = |local: &str| QName { prefix: None, local: local.into(), uri: String::new() };
+    ResultNode::Element {
+        name: QName { prefix: None, local: "meta".into(), uri: ns.into() },
+        namespaces: Vec::new(),
+        attributes: vec![
+            (attr("http-equiv"), "Content-Type".into()),
+            (attr("content"),    content.into()),
+        ],
+        children: Vec::new(),
+        schema_type: None,
+        attr_types: Vec::new(),
+    }
+}
+
 // ── HTML serialiser ───────────────────────────────────────────────
 
 /// HTML5 void elements — emitted without a closing tag and
@@ -374,30 +559,34 @@ const VOID_ELEMENTS: &[&str] = &[
 /// HTML output method).
 const RAW_TEXT_ELEMENTS: &[&str] = &["script", "style"];
 
-pub fn serialize_html(tree: &ResultTree) -> String {
+pub fn serialize_html(
+    children:   &[ResultNode],
+    output:     &OutputSpec,
+    indent:     bool,
+    escape_uri: bool,
+) -> String {
     let mut out = String::new();
-    if let Some(dt_sys) = tree.output.doctype_system.as_deref() {
-        if let Some(root) = first_element_name(&tree.children) {
-            if let Some(pubid) = tree.output.doctype_public.as_deref() {
+    if let Some(dt_sys) = output.doctype_system.as_deref() {
+        if let Some(root) = first_element_name(children) {
+            if let Some(pubid) = output.doctype_public.as_deref() {
                 let _ = writeln!(out, r#"<!DOCTYPE {root} PUBLIC "{pubid}" "{dt_sys}">"#);
             } else {
                 let _ = writeln!(out, r#"<!DOCTYPE {root} SYSTEM "{dt_sys}">"#);
             }
         }
-    } else if let Some(pubid) = tree.output.doctype_public.as_deref() {
-        if let Some(root) = first_element_name(&tree.children) {
+    } else if let Some(pubid) = output.doctype_public.as_deref() {
+        if let Some(root) = first_element_name(children) {
             let _ = writeln!(out, r#"<!DOCTYPE {root} PUBLIC "{pubid}">"#);
         }
     }
-    let format = tree.output.indent == Some(true);
-    for c in &tree.children { serialize_html_node(c, &mut out, format, 0); }
-    if format && !out.ends_with('\n') {
+    for c in children { serialize_html_node(c, &mut out, indent, escape_uri, 0); }
+    if indent && !out.ends_with('\n') {
         out.push('\n');
     }
     out
 }
 
-fn serialize_html_node(node: &ResultNode, out: &mut String, format: bool, level: usize) {
+fn serialize_html_node(node: &ResultNode, out: &mut String, format: bool, escape_uri: bool, level: usize) {
     match node {
         ResultNode::Element { name, namespaces, attributes, children, .. } => {
             let local_lc = name.local.to_lowercase();
@@ -412,7 +601,8 @@ fn serialize_html_node(node: &ResultNode, out: &mut String, format: bool, level:
             }
             for (aname, value) in attributes {
                 let _ = write!(out, r#" {}="{}""#,
-                    aname.to_qname_string(), escape_attr(value, false, None));
+                    aname.to_qname_string(),
+                    render_attr_value(name, aname, value, escape_uri, false, None, &[]));
             }
             // Void elements: close with `>`, no children, no closing tag.
             if name.uri.is_empty() && VOID_ELEMENTS.iter().any(|v| *v == local_lc) {
@@ -438,7 +628,7 @@ fn serialize_html_node(node: &ResultNode, out: &mut String, format: bool, level:
                         continue;
                     }
                 }
-                serialize_html_node(c, out, child_format, level + 1);
+                serialize_html_node(c, out, child_format, escape_uri, level + 1);
             }
             if child_format {
                 out.push('\n');
@@ -471,9 +661,9 @@ fn serialize_html_node(node: &ResultNode, out: &mut String, format: bool, level:
 
 // ── text serialiser ───────────────────────────────────────────────
 
-pub fn serialize_text(tree: &ResultTree) -> String {
+pub fn serialize_text(children: &[ResultNode]) -> String {
     let mut out = String::new();
-    for c in &tree.children { append_text(c, &mut out); }
+    for c in children { append_text(c, &mut out); }
     out
 }
 
@@ -635,6 +825,9 @@ mod tests {
         let mut spec = OutputSpec::default();
         spec.method = Some(method.into());
         spec.indent = Some(true);
+        // Keep these indentation-focused tests independent of the
+        // include-content-type meta injection (exercised separately).
+        spec.include_content_type = Some(false);
         ResultTree { children: nodes, output: spec, character_map: Vec::new(), secondary: Vec::new() }
     }
 
@@ -664,13 +857,6 @@ mod tests {
             t.to_string().unwrap(),
             "<body>\n  <p>a <b>c</b> d</p>\n  <script>if (a < b) x();</script>\n</body>\n",
         );
-    }
-
-    #[test]
-    fn html_indent_off_by_default() {
-        let t = tree_of(vec![elt("html", vec![elt("body", vec![elt("br", vec![])])])],
-            Some("html"));
-        assert_eq!(t.to_string().unwrap(), "<html><body><br></body></html>");
     }
 
     // ── text ────────────────────────────────────────────────
@@ -727,7 +913,7 @@ mod tests {
     fn xml_decl_emits_standalone_yes() {
         let mut spec = OutputSpec::default();
         spec.omit_xml_declaration = Some(false);
-        spec.standalone = Some(true);
+        spec.standalone = Some(Standalone::Yes);
         let t = ResultTree {
             children: vec![elt("r", vec![])],
             output: spec,
@@ -742,7 +928,7 @@ mod tests {
     fn xml_decl_emits_standalone_no() {
         let mut spec = OutputSpec::default();
         spec.omit_xml_declaration = Some(false);
-        spec.standalone = Some(false);
+        spec.standalone = Some(Standalone::No);
         let t = ResultTree {
             children: vec![elt("r", vec![])],
             output: spec,
@@ -1019,5 +1205,245 @@ mod tests {
             ]),
         ], Some("text"));
         assert_eq!(t.to_string().unwrap(), "onetwothree");
+    }
+
+    // ── serialization-parameter defaults (XSLT 2.0 §20) ─────────
+    //
+    // Defaults are method-dependent: `indent`, `escape-uri-attributes`,
+    // and `include-content-type` default to `yes` for the html and
+    // xhtml output methods and to `no` / not-applicable for xml.
+
+    fn out_tree(nodes: Vec<ResultNode>, spec: OutputSpec) -> ResultTree {
+        ResultTree { children: nodes, output: spec, character_map: Vec::new(), secondary: Vec::new() }
+    }
+
+    fn elt_attrs(name: &str, attrs: &[(&str, &str)], children: Vec<ResultNode>) -> ResultNode {
+        ResultNode::Element {
+            name: QName { prefix: None, local: name.into(), uri: String::new() },
+            namespaces: Vec::new(),
+            attributes: attrs.iter().map(|(k, v)| (
+                QName { prefix: None, local: (*k).into(), uri: String::new() },
+                (*v).to_string(),
+            )).collect(),
+            children,
+            schema_type: None,
+            attr_types: Vec::new(),
+        }
+    }
+
+    // standalone -----------------------------------------------------
+
+    #[test]
+    fn standalone_omit_suppresses_pseudo_attribute() {
+        let spec = OutputSpec { standalone: Some(Standalone::Omit), ..Default::default() };
+        let s = out_tree(vec![elt("r", vec![])], spec).to_string().unwrap();
+        assert!(s.starts_with(r#"<?xml version="1.0" encoding="UTF-8"?>"#), "got: {s}");
+        assert!(!s.contains("standalone"), "omit must not emit a standalone pseudo-attr: {s}");
+    }
+
+    #[test]
+    fn standalone_absent_suppresses_pseudo_attribute() {
+        let s = out_tree(vec![elt("r", vec![])], OutputSpec::default()).to_string().unwrap();
+        assert!(!s.contains("standalone"), "got: {s}");
+    }
+
+    // indent ---------------------------------------------------------
+
+    #[test]
+    fn indent_defaults_to_no_for_xml_method() {
+        let spec = OutputSpec {
+            method: Some("xml".into()),
+            omit_xml_declaration: Some(true),
+            ..Default::default()
+        };
+        let s = out_tree(vec![elt("root", vec![elt("a", vec![])])], spec).to_string().unwrap();
+        assert_eq!(s, "<root><a/></root>");
+    }
+
+    #[test]
+    fn indent_defaults_to_yes_for_html_method() {
+        let spec = OutputSpec {
+            method: Some("html".into()),
+            include_content_type: Some(false), // isolate from meta injection
+            ..Default::default()
+        };
+        let s = out_tree(vec![elt("html", vec![
+            elt("body", vec![elt("p", vec![])]),
+        ])], spec).to_string().unwrap();
+        assert!(s.contains("<html>\n  <body>\n    <p>"), "html should indent by default: {s}");
+    }
+
+    #[test]
+    fn indent_defaults_to_yes_for_xhtml_method() {
+        let spec = OutputSpec {
+            method: Some("xhtml".into()),
+            omit_xml_declaration: Some(true),
+            include_content_type: Some(false),
+            ..Default::default()
+        };
+        let s = out_tree(vec![elt("root", vec![elt("a", vec![])])], spec).to_string().unwrap();
+        assert_eq!(s, "<root>\n  <a/>\n</root>\n");
+    }
+
+    #[test]
+    fn indent_defaults_to_yes_when_html_method_auto_detected() {
+        // No explicit method; a root <html> selects the html method,
+        // which carries the indent=yes default.
+        let spec = OutputSpec { include_content_type: Some(false), ..Default::default() };
+        let s = out_tree(vec![elt("html", vec![elt("body", vec![elt("p", vec![])])])], spec)
+            .to_string().unwrap();
+        assert!(s.contains("<html>\n  <body>"), "got: {s}");
+    }
+
+    #[test]
+    fn indent_no_overrides_html_default() {
+        let spec = OutputSpec {
+            method: Some("html".into()),
+            indent: Some(false),
+            include_content_type: Some(false),
+            ..Default::default()
+        };
+        let s = out_tree(vec![elt("html", vec![elt("body", vec![])])], spec).to_string().unwrap();
+        assert_eq!(s, "<html><body></body></html>");
+    }
+
+    // escape-uri-attributes -----------------------------------------
+
+    #[test]
+    fn escape_uri_attributes_default_escapes_non_ascii_in_href() {
+        let spec = OutputSpec {
+            method: Some("html".into()),
+            include_content_type: Some(false),
+            ..Default::default()
+        };
+        // é (U+00E9) → %C3%A9; ASCII characters (incl. space, ?) are
+        // left intact per fn:escape-html-uri.
+        let node = elt_attrs("a", &[("href", "/caf\u{e9}?x=1 2")], vec![]);
+        let s = out_tree(vec![node], spec).to_string().unwrap();
+        assert!(s.contains(r#"href="/caf%C3%A9?x=1 2""#), "got: {s}");
+    }
+
+    #[test]
+    fn escape_uri_attributes_no_disables_escaping() {
+        let spec = OutputSpec {
+            method: Some("html".into()),
+            escape_uri_attributes: Some(false),
+            include_content_type: Some(false),
+            ..Default::default()
+        };
+        let node = elt_attrs("a", &[("href", "/caf\u{e9}")], vec![]);
+        let s = out_tree(vec![node], spec).to_string().unwrap();
+        assert!(s.contains("href=\"/caf\u{e9}\""), "got: {s}");
+    }
+
+    #[test]
+    fn escape_uri_attributes_only_applies_to_uri_valued_attributes() {
+        // `title` is not a URI attribute → never escaped.
+        let spec = OutputSpec {
+            method: Some("html".into()),
+            include_content_type: Some(false),
+            ..Default::default()
+        };
+        let node = elt_attrs("a", &[("title", "caf\u{e9}")], vec![]);
+        let s = out_tree(vec![node], spec).to_string().unwrap();
+        assert!(s.contains("title=\"caf\u{e9}\""), "got: {s}");
+    }
+
+    #[test]
+    fn escape_uri_attributes_is_element_specific() {
+        // `href` is a URI attribute on <a> but not on an arbitrary
+        // element, so it is escaped on <a> and left alone elsewhere.
+        let spec = OutputSpec {
+            method: Some("html".into()),
+            include_content_type: Some(false),
+            ..Default::default()
+        };
+        let s = out_tree(vec![elt("body", vec![
+            elt_attrs("a",   &[("href", "/\u{e9}")], vec![]),
+            elt_attrs("span", &[("href", "/\u{e9}")], vec![]),
+        ])], spec).to_string().unwrap();
+        assert!(s.contains("<a href=\"/%C3%A9\">"), "a/href escaped: {s}");
+        assert!(s.contains("<span href=\"/\u{e9}\">"), "span/href untouched: {s}");
+    }
+
+    #[test]
+    fn escape_uri_attributes_not_applied_for_xml_method() {
+        let spec = OutputSpec {
+            method: Some("xml".into()),
+            omit_xml_declaration: Some(true),
+            ..Default::default()
+        };
+        let node = elt_attrs("a", &[("href", "/caf\u{e9}")], vec![]);
+        let s = out_tree(vec![node], spec).to_string().unwrap();
+        assert!(s.contains("href=\"/caf\u{e9}\""), "got: {s}");
+    }
+
+    // include-content-type ------------------------------------------
+
+    #[test]
+    fn include_content_type_default_inserts_meta_into_head() {
+        let spec = OutputSpec { method: Some("html".into()), ..Default::default() };
+        let s = out_tree(vec![elt("html", vec![
+            elt("head", vec![elt("title", vec![text("T")])]),
+            elt("body", vec![]),
+        ])], spec).to_string().unwrap();
+        assert!(
+            s.contains(r#"<meta http-equiv="Content-Type" content="text/html; charset=UTF-8">"#),
+            "got: {s}");
+        // Spec: inserted as the FIRST child of head, before <title>.
+        assert!(s.find("http-equiv").unwrap() < s.find("<title>").unwrap(),
+            "meta must precede title: {s}");
+    }
+
+    #[test]
+    fn include_content_type_uses_media_type_and_encoding() {
+        let spec = OutputSpec {
+            method: Some("html".into()),
+            media_type: Some("application/xhtml+xml".into()),
+            encoding: Some("ISO-8859-1".into()),
+            ..Default::default()
+        };
+        let s = out_tree(vec![elt("html", vec![elt("head", vec![])])], spec).to_string().unwrap();
+        assert!(s.contains(r#"content="application/xhtml+xml; charset=ISO-8859-1""#), "got: {s}");
+    }
+
+    #[test]
+    fn include_content_type_replaces_existing_content_type_meta() {
+        let spec = OutputSpec { method: Some("html".into()), ..Default::default() };
+        let existing = elt_attrs("meta",
+            &[("http-equiv", "Content-Type"), ("content", "text/html; charset=stale")], vec![]);
+        let s = out_tree(vec![elt("html", vec![elt("head", vec![existing])])], spec)
+            .to_string().unwrap();
+        assert!(!s.contains("charset=stale"), "stale meta must be removed: {s}");
+        assert_eq!(s.matches("http-equiv").count(), 1, "exactly one content-type meta: {s}");
+    }
+
+    #[test]
+    fn include_content_type_no_disables_meta() {
+        let spec = OutputSpec {
+            method: Some("html".into()),
+            include_content_type: Some(false),
+            ..Default::default()
+        };
+        let s = out_tree(vec![elt("html", vec![elt("head", vec![])])], spec).to_string().unwrap();
+        assert!(!s.contains("http-equiv"), "got: {s}");
+    }
+
+    #[test]
+    fn include_content_type_noop_without_head() {
+        let spec = OutputSpec { method: Some("html".into()), ..Default::default() };
+        let s = out_tree(vec![elt("html", vec![elt("body", vec![])])], spec).to_string().unwrap();
+        assert!(!s.contains("http-equiv"), "no head → no meta: {s}");
+    }
+
+    #[test]
+    fn include_content_type_not_applied_for_xml_method() {
+        let spec = OutputSpec {
+            method: Some("xml".into()),
+            omit_xml_declaration: Some(true),
+            ..Default::default()
+        };
+        let s = out_tree(vec![elt("html", vec![elt("head", vec![])])], spec).to_string().unwrap();
+        assert!(!s.contains("http-equiv"), "xml method must not inject meta: {s}");
     }
 }

@@ -3379,6 +3379,15 @@ fn compile_attribute_set(node: &Node) -> Result<AttributeSet, XsltError> {
 
 fn compile_output(node: &Node) -> Result<OutputSpec, XsltError> {
     let mut out = OutputSpec::default();
+    // `name="qname"` marks this as a named output definition (XSLT 2.0
+    // §20), referenced by `xsl:result-document format="qname"`.  It is
+    // resolved against the in-scope namespaces so it can be matched by
+    // expanded name; named definitions stay separate from the
+    // principal (unnamed) output.
+    out.name = match read_attribute(node, "name") {
+        Some(n) => Some(parse_qname_on(node, &n)?),
+        None    => None,
+    };
     // XSLT 2.0 §20 — each boolean / enumerated attribute on
     // xsl:output has a closed value set; non-conforming values are
     // XTSE0020 statically.  In forwards-compat mode the check is
@@ -3450,7 +3459,13 @@ fn compile_output(node: &Node) -> Result<OutputSpec, XsltError> {
     out.encoding               = read_attribute(node, "encoding").map(str::to_string);
     out.indent                 = read_attribute(node, "indent").map(parse_yesno);
     out.omit_xml_declaration   = read_attribute(node, "omit-xml-declaration").map(parse_yesno);
-    out.standalone             = read_attribute(node, "standalone").map(parse_yesno);
+    out.standalone             = read_attribute(node, "standalone").map(|v| match v.trim() {
+        "yes" | "true" | "1" => crate::ast::Standalone::Yes,
+        "omit"               => crate::ast::Standalone::Omit,
+        _                    => crate::ast::Standalone::No,
+    });
+    out.escape_uri_attributes  = read_attribute(node, "escape-uri-attributes").map(parse_yesno);
+    out.include_content_type   = read_attribute(node, "include-content-type").map(parse_yesno);
     out.media_type             = read_attribute(node, "media-type").map(str::to_string);
     out.doctype_public         = read_attribute(node, "doctype-public").map(str::to_string);
     out.doctype_system         = read_attribute(node, "doctype-system").map(str::to_string);
@@ -4061,6 +4076,7 @@ fn compile_raw_instr_into(
             validate_xslt_only_attributes(node, "xsl:fallback", &[])?;
             Instr::Fallback { body: compile_body(node)? }
         }
+        "assert"          => compile_assert(node)?,
         // XSLT 2.0 `<xsl:sequence select="…"/>` — only recognised in
         // 2.0 mode; in 1.0 mode it falls through to the
         // forwards-compatible "unknown instruction" handler.
@@ -4699,6 +4715,23 @@ fn compile_if(node: &Node) -> Result<Instr, XsltError> {
     Ok(Instr::If {
         test: parse_xpath_at(node, test).map_err(XsltError::from)?,
         body: compile_body(node)?,
+    })
+}
+
+fn compile_assert(node: &Node) -> Result<Instr, XsltError> {
+    validate_xslt_only_attributes(node, "xsl:assert",
+        &["test", "select", "error-code"])?;
+    let test = require_attr(node, "test", "xsl:assert")?;
+    let select = read_attribute(node, "select")
+        .map(|s| parse_xpath_at(node, s).map_err(XsltError::from))
+        .transpose()?;
+    let error_code = read_attribute(node, "error-code")
+        .map(|s| avt(node, s)).transpose()?;
+    Ok(Instr::Assert {
+        test: parse_xpath_at(node, test).map_err(XsltError::from)?,
+        select,
+        body: compile_body(node)?,
+        error_code,
     })
 }
 
@@ -6078,7 +6111,10 @@ pub fn validate_output_declarations(ast: &StylesheetAst) -> Result<(), XsltError
         let mut on_stack = HS::new();
         visit(name, &mut on_stack, &mut done, &by_name)?;
     }
-    let outs: Vec<&OutputSpec> = ast.outputs.iter().collect();
+    // XTSE1560 applies only to the principal (unnamed) output
+    // declarations; named output definitions are independent and may
+    // freely differ from the default and from each other.
+    let outs: Vec<&OutputSpec> = ast.outputs.iter().filter(|o| o.name.is_none()).collect();
     if outs.len() < 2 { return Ok(()); }
     macro_rules! check {
         ($field:ident, $label:expr) => {
@@ -6122,7 +6158,7 @@ pub fn validate_output_declarations(ast: &StylesheetAst) -> Result<(), XsltError
     check!(encoding, "encoding");
     check_bool!(indent, "indent");
     check_bool!(omit_xml_declaration, "omit-xml-declaration");
-    check_bool!(standalone, "standalone");
+    check!(standalone, "standalone");
     check!(media_type, "media-type");
     check!(doctype_public, "doctype-public");
     check!(doctype_system, "doctype-system");
@@ -6304,6 +6340,7 @@ fn check_iterate(
             | Comment { body, .. } | ProcessingInstruction { body, .. }
             | ForEach { body, .. } | Document { body }
             | Namespace { body, .. } | Message { body, .. }
+            | Assert { body, .. }
             | Fallback { body } | PerformSort { body, .. }
             | ValueOfBody { body, .. } => check_iterate(body, None)?,
             ForEachGroup { body, .. } => check_iterate(body, None)?,
@@ -6419,7 +6456,8 @@ where F: Fn(&[QName]) -> Result<(), XsltError>,
             }
             Attribute { body, .. } | Comment { body, .. }
             | Variable(crate::ast::Variable { body, .. })
-            | Message { body, .. } | Fallback { body } => walk_attr_set_refs(body, check)?,
+            | Message { body, .. } | Assert { body, .. }
+            | Fallback { body } => walk_attr_set_refs(body, check)?,
             ApplyTemplates { with_params, .. } | CallTemplate { with_params, .. }
             | Evaluate { with_params, .. } => {
                 for w in with_params { walk_attr_set_refs(&w.body, check)?; }
@@ -7775,7 +7813,7 @@ mod tests {
         assert_eq!(o.encoding.as_deref(),              Some("UTF-8"));
         assert_eq!(o.indent,                           Some(true));
         assert_eq!(o.omit_xml_declaration,             Some(true));
-        assert_eq!(o.standalone,                       Some(false));
+        assert_eq!(o.standalone,                       Some(crate::ast::Standalone::No));
         assert_eq!(o.media_type.as_deref(),            Some("text/html"));
         assert!(o.doctype_public.is_some());
         assert!(o.doctype_system.is_some());

@@ -537,6 +537,16 @@ pub enum Instr {
         terminate: Option<Avt>,
         body:      Body,
     },
+    /// `xsl:assert` (XSLT 3.0 §6.4) — when `test` is effectively false,
+    /// raises a terminating dynamic error (default code `XTMM9001`)
+    /// whose message is `select` (or the sequence-constructor body).
+    /// A no-op when `test` is true.
+    Assert {
+        test:       Expr,
+        select:     Option<Expr>,
+        body:       Body,
+        error_code: Option<Avt>,
+    },
     /// `xsl:fallback` — only fires when the surrounding instruction
     /// is unrecognised.  In XSLT 1.0 this is rare; we capture it so
     /// forward-compat documents that target XSLT 2.0+ still parse.
@@ -875,21 +885,52 @@ pub struct WithParam {
 /// handing to the output serialiser.
 #[derive(Clone, Debug, Default)]
 pub struct OutputSpec {
+    /// `xsl:output name="qname"` (XSLT 2.0 §20).  `None` for the
+    /// principal (unnamed) output declaration; `Some` for a named
+    /// output definition referenced by `xsl:result-document
+    /// format="qname"`.  Named definitions are independent of the
+    /// principal output — they neither merge into it nor participate
+    /// in its XTSE1560 conflict check.
+    pub name:                   Option<QName>,
     pub method:                 Option<String>,
     pub encoding:               Option<String>,
     pub indent:                 Option<bool>,
     pub omit_xml_declaration:   Option<bool>,
-    pub standalone:             Option<bool>,
+    pub standalone:             Option<Standalone>,
     pub cdata_section_elements: Vec<QName>,
     pub media_type:             Option<String>,
     pub doctype_public:         Option<String>,
     pub doctype_system:         Option<String>,
     pub version:                Option<String>,
+    /// XSLT 2.0 §20: `escape-uri-attributes="yes|no"`.  Applies to
+    /// the html and xhtml output methods only; default `yes`.  When
+    /// in effect, the values of URI-valued attributes (Serialization
+    /// spec, Appendix "List of URI Attributes") are escaped per
+    /// `fn:escape-html-uri` (`%HH` per non-ASCII UTF-8 byte).
+    pub escape_uri_attributes:  Option<bool>,
+    /// XSLT 2.0 §20: `include-content-type="yes|no"`.  Applies to the
+    /// html and xhtml output methods only; default `yes`.  When in
+    /// effect, a `<meta http-equiv="Content-Type">` element is added
+    /// as the first child of the `head` element, replacing any
+    /// existing content-type meta.
+    pub include_content_type:   Option<bool>,
     /// XSLT 2.0 §20: `use-character-maps="qname …"`.  Each name
     /// resolves to an `xsl:character-map` declaration in the
     /// stylesheet; their `output-character` substitutions are
     /// applied to character data during serialization.
     pub use_character_maps:     Vec<QName>,
+}
+
+/// `xsl:output standalone="yes|no|omit"` (XSLT 2.0 §20).  Both
+/// `Omit` and an absent attribute suppress the `standalone`
+/// pseudo-attribute in the XML declaration; they are distinguished
+/// only when merging multiple `xsl:output` declarations, where an
+/// explicit `omit` must override a lower-precedence `yes`/`no`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Standalone {
+    Yes,
+    No,
+    Omit,
 }
 
 /// `xsl:key name= match= use=` — indexes nodes by computed key
