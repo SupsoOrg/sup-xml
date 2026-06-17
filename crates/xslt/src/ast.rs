@@ -824,6 +824,22 @@ pub struct UsePackage {
     pub overrides: Box<StylesheetAst>,
 }
 
+/// `<xsl:expose>` declaration (XSLT 3.0 §3.5.2) — adjusts the
+/// visibility of named components of the containing package.  Captured
+/// for the post-assembly component-existence check (XTSE3020); the
+/// value-level checks happen at parse time.
+#[derive(Clone, Debug)]
+pub struct ExposeDecl {
+    /// `component=` — a kind (template / function / variable /
+    /// attribute-set / mode) or `*` for all kinds.
+    pub component:   String,
+    /// `names=` tokens (raw lexical form, including wildcards).
+    pub names:       Vec<String>,
+    /// In-scope `prefix -> uri` bindings, for resolving the tokens to
+    /// expanded names when matching against declared components.
+    pub namespaces:  std::collections::HashMap<String, String>,
+}
+
 /// `<xsl:accumulator>` declaration (XSLT 3.0 §18).  Computes a running
 /// value over a document-order traversal; `accumulator-before(name)` /
 /// `accumulator-after(name)` read the value at a node.
@@ -1104,6 +1120,9 @@ pub struct StylesheetAst {
     /// import precedence (like xsl:import), with xsl:override children
     /// taking precedence over the originals.
     pub use_packages:       Vec<UsePackage>,
+    /// `xsl:expose` declarations (XSLT 3.0 §3.5.2), validated for
+    /// component existence once the package is fully assembled.
+    pub exposes:            Vec<ExposeDecl>,
     /// `<xsl:mode>` declarations (XSLT 3.0 §6.6).  A mode named here
     /// overrides the default built-in-template behaviour for that mode
     /// via its `on-no-match` action.  The unnamed (default) mode has

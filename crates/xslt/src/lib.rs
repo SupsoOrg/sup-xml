@@ -169,6 +169,7 @@ impl Stylesheet {
         compiler::validate_call_template_with_params(&ast)?;
         compiler::validate_iterate_constraints(&ast)?;
         compiler::validate_input_type_annotations(&ast)?;
+        compiler::validate_package_exposes(&ast)?;
         Ok(Stylesheet { ast })
     }
 

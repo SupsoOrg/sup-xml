@@ -1793,7 +1793,7 @@ fn compile_top_level(node: &Node, ast: &mut StylesheetAst, pos: u32) -> Result<(
             }
         }
         "use-package"     => ast.use_packages.push(compile_use_package(node)?),
-        "expose"          => validate_expose(node)?,
+        "expose"          => ast.exposes.push(validate_expose(node)?),
         "output"          => ast.outputs.push(compile_output(node)?),
         "strip-space"     => collect_whitespace_rules(node, true,  &mut ast.whitespace_rules)?,
         "preserve-space"  => collect_whitespace_rules(node, false, &mut ast.whitespace_rules)?,
@@ -2649,6 +2649,7 @@ fn compile_with_imports_inner(
     acc.documents_to_load.extend(local.documents_to_load);
     acc.functions.extend(local.functions);
     acc.character_maps.extend(local.character_maps);
+    acc.exposes.extend(local.exposes);
     if acc.version.is_empty() { acc.version = local.version; }
     // First stylesheet on the chain (the principal one) wins for
     // `xml:base` — imports/includes have their own base URIs that
@@ -3291,7 +3292,7 @@ fn compile_use_package(node: &Node) -> Result<UsePackage, XsltError> {
 /// §3.5.2).  Component-existence and visibility-compatibility checks
 /// need the assembled component model and are applied separately; this
 /// covers the value-level static errors (XTSE0020).
-fn validate_expose(node: &Node) -> Result<(), XsltError> {
+fn validate_expose(node: &Node) -> Result<crate::ast::ExposeDecl, XsltError> {
     if let Some(v) = read_attribute(node, "visibility") {
         if !matches!(v.trim(),
             "public" | "private" | "final" | "abstract" | "hidden")
@@ -3331,16 +3332,22 @@ fn validate_expose(node: &Node) -> Result<(), XsltError> {
             }
         }
     }
-    if let Some(names) = read_attribute(node, "names") {
-        let ns: std::collections::HashMap<String, String> =
-            collect_in_scope_namespaces(node).into_iter()
-                .filter_map(|(p, u)| p.map(|p| (p, u)))
-                .collect();
-        for tok in names.split_whitespace() {
+    let ns: std::collections::HashMap<String, String> =
+        collect_in_scope_namespaces(node).into_iter()
+            .filter_map(|(p, u)| p.map(|p| (p, u)))
+            .collect();
+    let mut names = Vec::new();
+    if let Some(attr) = read_attribute(node, "names") {
+        for tok in attr.split_whitespace() {
             validate_component_token(tok, &ns, "xsl:expose")?;
+            names.push(tok.to_string());
         }
     }
-    Ok(())
+    Ok(ExposeDecl {
+        component: component.unwrap_or_default(),
+        names,
+        namespaces: ns,
+    })
 }
 
 /// Validate a single token of an `xsl:expose` / `xsl:accept` `names=`
@@ -3365,6 +3372,60 @@ fn validate_component_token(
         if !ns.contains_key(prefix) {
             return Err(XsltError::InvalidStylesheet(format!(
                 "{who} names token '{tok}' uses undeclared prefix '{prefix}' (XTSE0020)")));
+        }
+    }
+    Ok(())
+}
+
+/// Resolve an `xsl:expose` names token to a [`qname_key`]-form expanded
+/// name (`{uri}local`, or bare `local` in no namespace) for matching
+/// against declared components.
+fn expand_component_token(tok: &str, ns: &std::collections::HashMap<String, String>) -> String {
+    // A function token may carry an arity (`name#N`); match by name.
+    let tok = tok.split('#').next().unwrap_or(tok);
+    if let Some(rest) = tok.strip_prefix("Q{") {
+        if let Some(end) = rest.find('}') {
+            return format!("{{{}}}{}", &rest[..end], &rest[end + 1..]);
+        }
+    }
+    expand_lexical(tok, ns)
+}
+
+/// XSLT 3.0 §3.5.2 / XTSE3020 — every non-wildcard token in an
+/// `xsl:expose` names= list must match a component of the named kind
+/// declared in the (fully assembled) package.  Run from `finalize`,
+/// after includes/imports/used-package components are merged.
+pub(crate) fn validate_package_exposes(ast: &StylesheetAst) -> Result<(), XsltError> {
+    if ast.exposes.is_empty() { return Ok(()); }
+    use std::collections::HashSet;
+    let templates: HashSet<String> = ast.templates.iter()
+        .filter_map(|t| t.name.as_ref().map(qname_key)).collect();
+    let functions: HashSet<String> = ast.functions.iter().map(|f| qname_key(&f.name)).collect();
+    let variables: HashSet<String> = ast.global_variables.iter().map(|v| qname_key(&v.name))
+        .chain(ast.global_params.iter().map(|p| qname_key(&p.name))).collect();
+    let attr_sets: HashSet<String> = ast.attribute_sets.iter().map(|s| qname_key(&s.name)).collect();
+    let modes: HashSet<String> = ast.modes.iter()
+        .filter_map(|m| m.name.as_ref().map(qname_key)).collect();
+    for ex in &ast.exposes {
+        for tok in &ex.names {
+            // Wildcards never raise XTSE3020.
+            if tok == "*" || tok.starts_with("*:") || tok.ends_with(":*") { continue; }
+            let key = expand_component_token(tok, &ex.namespaces);
+            let found = match ex.component.as_str() {
+                "template"      => templates.contains(&key),
+                "function"      => functions.contains(&key),
+                "variable"      => variables.contains(&key),
+                "attribute-set" => attr_sets.contains(&key),
+                "mode"          => modes.contains(&key),
+                "*"             => [&templates, &functions, &variables, &attr_sets, &modes]
+                                       .iter().any(|s| s.contains(&key)),
+                _ => true,
+            };
+            if !found {
+                return Err(XsltError::InvalidStylesheet(format!(
+                    "xsl:expose names='{tok}' matches no {} component in the \
+                     package (XTSE3020)", ex.component)));
+            }
         }
     }
     Ok(())
