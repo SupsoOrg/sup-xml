@@ -24,7 +24,7 @@ use sup_xml_core::xpath::context::INodeKind;
 use sup_xml_tree::dom::Document;
 
 use crate::ast::{
-    Avt, AvtPart, Instr, OnNoMatch, Param, QName, StylesheetAst, Template,
+    Avt, AvtPart, Body, Instr, OnNoMatch, Param, QName, StylesheetAst, Template,
     Variable, WithParam,
 };
 use crate::error::XsltError;
@@ -932,7 +932,7 @@ fn call_user_function_pure_xpath<I: DocIndexLike>(
     let prev_ctx = CONTEXT_UNDEFINED.with(|c| c.replace(true));
     let items = sup_xml_core::xpath::eval::with_focus_undefined(true, || {
         eval_function_body(
-            &uf.body, idx, context_node, 1, 1, chain.as_ref(),
+            &uf.body, 0, idx, context_node, 1, 1, chain.as_ref(),
             FnEnv { style, depth: 0 }, &static_ctx,
         )
     });
@@ -1050,7 +1050,8 @@ fn fn_coerce_as<I: DocIndexLike>(
 }
 
 fn eval_function_body<I: DocIndexLike>(
-    body: &[crate::ast::Instr],
+    body: &crate::ast::Body,
+    start: usize,
     idx:  &I,
     ctx_node: NodeId,
     pos:  usize,
@@ -1073,10 +1074,17 @@ fn eval_function_body<I: DocIndexLike>(
             static_ctx: sc,
         }
     }
-    for (i, instr) in body.iter().enumerate() {
+    for (j, instr) in body.instrs()[start..].iter().enumerate() {
+        let i = start + j;
+        // This instruction's source position + file — attached locally
+        // to any error it raises (XSLT 2.0 §10.3 function bodies error
+        // too).  Errors from a nested user function arrive already
+        // positioned, so `stamp_xml`'s guard leaves the deeper one.
+        let src_pos = body.pos_at(i);
+        let src_file = body.file();
         match instr {
             Instr::Sequence { select } => {
-                let v = eval_expr(select, &mk_ctx(bindings, static_ctx, ctx_node, pos, size), idx)?;
+                let v = eval_expr(select, &mk_ctx(bindings, static_ctx, ctx_node, pos, size), idx).map_err(|e| stamp_xml(e, src_pos, src_file))?;
                 out.push(v);
             }
             Instr::Variable(v) => {
@@ -1085,11 +1093,11 @@ fn eval_function_body<I: DocIndexLike>(
                 // top and recurse with the tail — that way every
                 // subsequent instruction sees the binding.
                 let val = if let Some(sel) = &v.select {
-                    eval_expr(sel, &mk_ctx(bindings, static_ctx, ctx_node, pos, size), idx)?
+                    eval_expr(sel, &mk_ctx(bindings, static_ctx, ctx_node, pos, size), idx).map_err(|e| stamp_xml(e, src_pos, src_file))?
                 } else if v.body.is_empty() {
                     Value::String(String::new())
                 } else {
-                    let items = eval_function_body(&v.body, idx, ctx_node, pos, size, bindings, env, static_ctx)?;
+                    let items = eval_function_body(&v.body, 0, idx, ctx_node, pos, size, bindings, env, static_ctx)?;
                     if items.len() == 1 { items.into_iter().next().unwrap() }
                     else                 { Value::Sequence(items) }
                 };
@@ -1099,24 +1107,24 @@ fn eval_function_body<I: DocIndexLike>(
                     value: val,
                 };
                 let mut tail = eval_function_body(
-                    &body[i + 1..], idx, ctx_node, pos, size, &layered, env, static_ctx)?;
+                    body, i + 1, idx, ctx_node, pos, size, &layered, env, static_ctx)?;
                 out.append(&mut tail);
                 return Ok(out);
             }
             Instr::If { test, body: if_body } => {
-                let v = eval_expr(test, &mk_ctx(bindings, static_ctx, ctx_node, pos, size), idx)?;
+                let v = eval_expr(test, &mk_ctx(bindings, static_ctx, ctx_node, pos, size), idx).map_err(|e| stamp_xml(e, src_pos, src_file))?;
                 if value_to_bool(&v, idx) {
-                    let mut sub = eval_function_body(if_body, idx, ctx_node, pos, size, bindings, env, static_ctx)?;
+                    let mut sub = eval_function_body(if_body, 0, idx, ctx_node, pos, size, bindings, env, static_ctx)?;
                     out.append(&mut sub);
                 }
             }
             Instr::Choose { whens, otherwise } => {
                 let mut matched = false;
                 for (test, when_body) in whens {
-                    let v = eval_expr(test, &mk_ctx(bindings, static_ctx, ctx_node, pos, size), idx)?;
+                    let v = eval_expr(test, &mk_ctx(bindings, static_ctx, ctx_node, pos, size), idx).map_err(|e| stamp_xml(e, src_pos, src_file))?;
                     if value_to_bool(&v, idx) {
                         let mut sub = eval_function_body(
-                            when_body, idx, ctx_node, pos, size, bindings, env, static_ctx)?;
+                            when_body, 0, idx, ctx_node, pos, size, bindings, env, static_ctx)?;
                         out.append(&mut sub);
                         matched = true;
                         break;
@@ -1125,7 +1133,7 @@ fn eval_function_body<I: DocIndexLike>(
                 if !matched {
                     if let Some(else_body) = otherwise {
                         let mut sub = eval_function_body(
-                            else_body, idx, ctx_node, pos, size, bindings, env, static_ctx)?;
+                            else_body, 0, idx, ctx_node, pos, size, bindings, env, static_ctx)?;
                         out.append(&mut sub);
                     }
                 }
@@ -1136,7 +1144,7 @@ fn eval_function_body<I: DocIndexLike>(
                 // item is a node (atomic items keep the surrounding
                 // context node since our model doesn't carry an
                 // atomic context-item separately).
-                let v = eval_expr(select, &mk_ctx(bindings, static_ctx, ctx_node, pos, size), idx)?;
+                let v = eval_expr(select, &mk_ctx(bindings, static_ctx, ctx_node, pos, size), idx).map_err(|e| stamp_xml(e, src_pos, src_file))?;
                 let items: Vec<Value> = match v {
                     Value::NodeSet(ns) => ns.into_iter()
                         .map(|id| Value::NodeSet(vec![id])).collect(),
@@ -1145,17 +1153,27 @@ fn eval_function_body<I: DocIndexLike>(
                 };
                 let total = items.len();
                 for (i, item) in items.into_iter().enumerate() {
-                    let cx = match &item {
-                        Value::NodeSet(ns) if ns.len() == 1 => ns[0],
-                        _ => ctx_node,
+                    // xsl:for-each establishes a new focus (XSLT 2.0
+                    // §13.1).  Inside an xsl:function the focus is
+                    // otherwise undefined (§10.3), but each iteration
+                    // binds `.` to the selected item: a node gives a
+                    // node focus — so a contained xsl:number counts it —
+                    // whereas an atomic item leaves the focus node-less,
+                    // and xsl:number then reports XTTE0990.
+                    let (cx, item_is_node) = match &item {
+                        Value::NodeSet(ns) if ns.len() == 1 => (ns[0], true),
+                        _ => (ctx_node, false),
                     };
-                    let mut sub = eval_function_body(
-                        fe_body, idx, cx, i + 1, total, bindings, env, static_ctx)?;
+                    let mut sub = sup_xml_core::xpath::eval::with_focus_undefined(
+                        !item_is_node,
+                        || eval_function_body(
+                            fe_body, 0, idx, cx, i + 1, total, bindings, env, static_ctx),
+                    )?;
                     out.append(&mut sub);
                 }
             }
             Instr::ValueOf { select, separator, .. } => {
-                let v = eval_expr(select, &mk_ctx(bindings, static_ctx, ctx_node, pos, size), idx)?;
+                let v = eval_expr(select, &mk_ctx(bindings, static_ctx, ctx_node, pos, size), idx).map_err(|e| stamp_xml(e, src_pos, src_file))?;
                 let text = match separator {
                     // XSLT 1.0 / backwards-compat (§7.6.1): the
                     // string-value of the first item only.  The
@@ -1187,7 +1205,7 @@ fn eval_function_body<I: DocIndexLike>(
                 let sep = separator.as_ref()
                     .and_then(avt_static_string).unwrap_or_default();
                 let sub = eval_function_body(
-                    vob_body, idx, ctx_node, pos, size, bindings, env, static_ctx)?;
+                    vob_body, 0, idx, ctx_node, pos, size, bindings, env, static_ctx)?;
                 let pieces: Vec<String> = sub.into_iter()
                     .map(|v| value_to_string_with(&v, idx, bindings))
                     .filter(|s| !s.is_empty())
@@ -1220,7 +1238,7 @@ fn eval_function_body<I: DocIndexLike>(
                 build_function_subtree(
                     std::slice::from_ref(instr), bindings, idx,
                     ctx_node, pos, size, &mut builder, static_ctx,
-                )?;
+                ).map_err(|e| stamp_xml(e, src_pos, src_file))?;
                 let nodes = builder.finish();
                 let ids = rtf_children_into_index_generic(idx, &nodes);
                 for id in ids {
@@ -1260,7 +1278,7 @@ fn eval_function_body<I: DocIndexLike>(
                     _ => None,
                 };
                 let numbers = if let Some(ve) = value {
-                    let v = eval_expr(ve, &mk_ctx(bindings, static_ctx, ctx_node, pos, size), idx)?;
+                    let v = eval_expr(ve, &mk_ctx(bindings, static_ctx, ctx_node, pos, size), idx).map_err(|e| stamp_xml(e, src_pos, src_file))?;
                     match v {
                         Value::Sequence(items) => items.into_iter().filter_map(|it| {
                             let f = crate::eval::value_to_number_xpath(&it, idx);
@@ -1276,11 +1294,11 @@ fn eval_function_body<I: DocIndexLike>(
                     }
                 } else {
                     let target_node = if let Some(sel) = select {
-                        match eval_expr(sel, &mk_ctx(bindings, static_ctx, ctx_node, pos, size), idx)? {
+                        match eval_expr(sel, &mk_ctx(bindings, static_ctx, ctx_node, pos, size), idx).map_err(|e| stamp_xml(e, src_pos, src_file))? {
                             Value::NodeSet(ns) if ns.len() == 1 => ns[0],
-                            _ => return Err(err(
+                            _ => return Err(stamp_xml(xslt_runtime_error(
                                 "xsl:number select must evaluate to a \
-                                 single node (XTTE1000)".into())),
+                                 single node (XTTE1000)"), src_pos, src_file)),
                         }
                     } else {
                         // XSLT 2.0 §12.4 / XTTE0990 — without select=,
@@ -1292,17 +1310,17 @@ fn eval_function_body<I: DocIndexLike>(
                         if sup_xml_core::xpath::eval::focus_is_undefined()
                             || in_atomic_for_each()
                         {
-                            return Err(err(
+                            return Err(stamp_xml(xslt_runtime_error(
                                 "xsl:number with no select= called where \
                                  the context item is not a node \
-                                 (XTTE0990)".into()));
+                                 (XTTE0990)"), src_pos, src_file));
                         }
                         ctx_node
                     };
                     compute_number_list_generic(
                         idx, bindings, *level,
                         count.as_ref(), from.as_ref(), target_node,
-                    ).map_err(|e| err(format!("xsl:number in function body: {e}")))?
+                    ).map_err(|e| stamp_xml(err(format!("xsl:number in function body: {e}")), src_pos, src_file))?
                 };
                 let mut numbers = numbers;
                 let start_offsets: Vec<i64> = start_at.as_ref()
@@ -1328,7 +1346,7 @@ fn eval_function_body<I: DocIndexLike>(
                 // text.  Stringify the body via the function-body
                 // interpreter to preserve any side effects of arg
                 // evaluation, then drop the result on the floor.
-                let _ = eval_function_body(body, idx, ctx_node, pos, size, bindings, env, static_ctx)?;
+                let _ = eval_function_body(body, 0, idx, ctx_node, pos, size, bindings, env, static_ctx)?;
             }
             Instr::CallTemplate { name, with_params } => {
                 // `xsl:call-template` to a named template whose body is
@@ -1406,7 +1424,7 @@ fn eval_function_body<I: DocIndexLike>(
                     });
                 }
                 let mut sub = eval_function_body(
-                    &template.body, idx, ctx_node, pos, size, chain.as_ref(),
+                    &template.body, 0, idx, ctx_node, pos, size, chain.as_ref(),
                     FnEnv { depth: env.depth + 1, ..env }, static_ctx)?;
                 out.append(&mut sub);
             }
@@ -1423,7 +1441,7 @@ fn eval_function_body<I: DocIndexLike>(
                 let select_expr = select.as_ref().ok_or_else(|| err(
                     "xsl:perform-sort body form is not supported in xsl:function bodies".into()
                 ))?;
-                let v = eval_expr(select_expr, &mk_ctx(bindings, static_ctx, ctx_node, pos, size), idx)?;
+                let v = eval_expr(select_expr, &mk_ctx(bindings, static_ctx, ctx_node, pos, size), idx).map_err(|e| stamp_xml(e, src_pos, src_file))?;
                 match v {
                     Value::NodeSet(nodes) => {
                         let sorted = crate::sort::sort_nodes(
@@ -2776,7 +2794,7 @@ const ERR_NS: &str = "http://www.w3.org/2005/xqt-errors";
 /// body.  When no handler matches, the error propagates.
 fn run_try_instr<'a>(
     state:    &mut EvalState<'a>,
-    body:     &[crate::ast::Instr],
+    body:     &crate::ast::Body,
     catches:  &[crate::ast::TryCatch],
     ctx_node: NodeId, pos: usize, size: usize,
 ) -> Result<()> {
@@ -3090,6 +3108,43 @@ fn in_temporary_output() -> bool {
     TEMP_OUTPUT_DEPTH.with(|c| c.get() > 0)
 }
 
+/// Attach a failing instruction's source position to an [`XmlError`]
+/// that doesn't already carry one.  Called locally at each dispatch
+/// site with that instruction's `Body` position — the innermost site
+/// stamps first, and the `e.line.is_some()` guard stops outer sites
+/// from overwriting it, so the most specific (deepest) instruction
+/// wins.  `pos` carries its own per-module file (correct for
+/// `xsl:include`d modules); a placeholder stands in when unknown.
+fn stamp_xml(
+    e: sup_xml_core::error::XmlError,
+    pos: Option<crate::ast::SrcPos>,
+    file: Option<&str>,
+) -> sup_xml_core::error::XmlError {
+    if e.line.is_some() {
+        return e;
+    }
+    match pos {
+        Some(p) => e.at(file.unwrap_or("<stylesheet>"), p.line, p.col, p.offset as u64),
+        None => e,
+    }
+}
+
+/// Build an unpositioned XPath-domain runtime error; the caller's
+/// [`stamp_xml`] attaches the instruction position.
+fn xslt_runtime_error(msg: &str) -> sup_xml_core::error::XmlError {
+    use sup_xml_core::error::{ErrorDomain, ErrorLevel, XmlError};
+    XmlError::new(ErrorDomain::XPath, ErrorLevel::Error, msg.to_string())
+}
+
+/// [`stamp_xml`] for the `XsltError::Xpath` wrapper used by the stateful
+/// evaluator's instruction dispatch.
+fn stamp_xslt(e: XsltError, pos: Option<crate::ast::SrcPos>, file: Option<&str>) -> XsltError {
+    match e {
+        XsltError::Xpath(inner) => XsltError::Xpath(stamp_xml(inner, pos, file)),
+        other => other,
+    }
+}
+
 /// True iff the current evaluation is inside an `xsl:function` body —
 /// where the XPath focus (context item / position / size) is
 /// undefined per XSLT 2.0 §10.3.  Used by context-dependent built-ins
@@ -3191,7 +3246,7 @@ const ON_COND_NS: &str = "https://sup-xml.internal/on-conditional";
 
 fn eval_body(
     state: &mut EvalState,
-    body:  &[Instr],
+    body:  &Body,
     ctx_node: NodeId, pos: usize, size: usize,
 ) -> Result<()> {
     // XSLT 3.0 §16.4 — a sequence constructor containing xsl:on-empty /
@@ -3200,8 +3255,12 @@ fn eval_body(
     if body.iter().any(|i| matches!(i, Instr::OnEmpty { .. } | Instr::OnNonEmpty { .. })) {
         return eval_body_conditional(state, body, ctx_node, pos, size);
     }
-    for instr in body {
-        eval_instr(state, instr, ctx_node, pos, size)?;
+    for (i, instr) in body.iter().enumerate() {
+        // Record where this instruction lives so any error it raises
+        // (including XPath errors inside its select=/test=) can be
+        // attributed to the right stylesheet line/column.
+        eval_instr(state, instr, ctx_node, pos, size)
+            .map_err(|e| stamp_xslt(e, body.pos_at(i), body.file()))?;
         // An xsl:break / xsl:next-iteration in the enclosing
         // xsl:iterate terminates the rest of this sequence
         // constructor; the iterate driver handles the signal.
@@ -3219,7 +3278,7 @@ fn eval_body(
 /// nodes are replayed into the real builder in document order.
 fn eval_body_conditional(
     state: &mut EvalState,
-    body:  &[Instr],
+    body:  &Body,
     ctx_node: NodeId, pos: usize, size: usize,
 ) -> Result<()> {
     let prev = std::mem::replace(&mut state.builder, ResultBuilder::new());
@@ -3262,10 +3321,10 @@ fn eval_body_conditional(
 /// wrapping each on-empty / on-non-empty prong in a sentinel element.
 fn capture_on_conditional_body(
     state: &mut EvalState,
-    body:  &[Instr],
+    body:  &Body,
     ctx_node: NodeId, pos: usize, size: usize,
 ) -> Result<()> {
-    for instr in body {
+    for (i, instr) in body.iter().enumerate() {
         match instr {
             Instr::OnEmpty { body } | Instr::OnNonEmpty { body } => {
                 let local = if matches!(instr, Instr::OnEmpty { .. })
@@ -3275,7 +3334,8 @@ fn capture_on_conditional_body(
                 eval_body(state, body, ctx_node, pos, size)?;
                 state.builder.close_element();
             }
-            other => eval_instr(state, other, ctx_node, pos, size)?,
+            other => eval_instr(state, other, ctx_node, pos, size)
+                .map_err(|e| stamp_xslt(e, body.pos_at(i), body.file()))?,
         }
         if iterate_control_active() { break; }
     }
@@ -5159,9 +5219,9 @@ fn eval_instr(
             let target_node = if let Some(sel) = select {
                 match state.xpath_eval(sel, ctx_node, pos, size)? {
                     Value::NodeSet(ns) if ns.len() == 1 => ns[0],
-                    _ => return Err(XsltError::InvalidStylesheet(
+                    _ => return Err(XsltError::Xpath(xslt_runtime_error(
                         "xsl:number select must evaluate to a single node \
-                         (XTTE1000)".into())),
+                         (XTTE1000)"))),
                 }
             } else {
                 // XSLT 2.0 §12.4 / XTTE0990 — with no select=, the
@@ -5171,14 +5231,14 @@ fn eval_instr(
                 // `<xsl:for-each select="1 to 5"><xsl:number/>`)
                 // makes the counting target ill-defined.
                 if sup_xml_core::xpath::eval::focus_is_undefined() {
-                    return Err(XsltError::InvalidStylesheet(
+                    return Err(XsltError::Xpath(xslt_runtime_error(
                         "xsl:number with no select= called where the \
-                         context item is undefined (XTTE0990)".into()));
+                         context item is undefined (XTTE0990)")));
                 }
                 if in_atomic_for_each() {
-                    return Err(XsltError::InvalidStylesheet(
+                    return Err(XsltError::Xpath(xslt_runtime_error(
                         "xsl:number with no select= called where the \
-                         context item is not a node (XTTE0990)".into()));
+                         context item is not a node (XTTE0990)")));
                 }
                 ctx_node
             };
@@ -5335,7 +5395,7 @@ fn eval_instr(
 /// an RTF whose string value is the key (mirroring a body-form
 /// variable).
 fn eval_key_body_value(
-    state: &mut EvalState, body: &[Instr], node: NodeId,
+    state: &mut EvalState, body: &Body, node: NodeId,
 ) -> Result<Value> {
     // Computing a key value is a temporary output destination, so a
     // contained xsl:result-document is illegal (XTDE1480).
@@ -5379,11 +5439,11 @@ fn body_uses_sequence_or_call(body: &[Instr]) -> bool {
         }
         let inner: Vec<&[Instr]> = match i {
             Instr::If { body, .. } | Instr::ForEach { body, .. }
-            | Instr::ForEachGroup { body, .. } => vec![body.as_slice()],
+            | Instr::ForEachGroup { body, .. } => vec![body.instrs()],
             Instr::Choose { whens, otherwise } => {
                 let mut v: Vec<&[Instr]> = whens.iter()
-                    .map(|(_, b)| b.as_slice()).collect();
-                if let Some(o) = otherwise { v.push(o.as_slice()); }
+                    .map(|(_, b)| b.instrs()).collect();
+                if let Some(o) = otherwise { v.push(o.instrs()); }
                 v
             }
             _ => continue,
@@ -5398,7 +5458,7 @@ fn body_uses_sequence_or_call(body: &[Instr]) -> bool {
 fn bind_variable(
     state: &mut EvalState, name: &QName,
     select: Option<&sup_xml_core::xpath::Expr>,
-    body:   &[Instr],
+    body:   &Body,
     as_type: Option<&str>,
     base_uri: Option<&str>,
     ctx_node: NodeId, pos: usize, size: usize,
@@ -6412,7 +6472,7 @@ fn check_document_node_content(nodes: &[ResultNode]) -> Result<()> {
 }
 
 fn build_rtf_nodes_no_merge(
-    state: &mut EvalState, body: &[Instr],
+    state: &mut EvalState, body: &Body,
     ctx_node: NodeId, pos: usize, size: usize,
 ) -> Result<Vec<ResultNode>> {
     let mut tmp = EvalState {
@@ -7378,7 +7438,7 @@ fn result_node_is_significant(n: &ResultNode) -> bool {
 }
 
 fn build_rtf_nodes(
-    state: &mut EvalState, body: &[Instr],
+    state: &mut EvalState, body: &Body,
     ctx_node: NodeId, pos: usize, size: usize,
 ) -> Result<Vec<ResultNode>> {
     let mut tmp = EvalState {
@@ -7800,7 +7860,7 @@ fn copy_result_node_into(state: &mut EvalState, node: &ResultNode) {
 
 /// Snapshot a subtree's stringified form via a temporary builder.
 fn stringify_into_string(
-    state: &mut EvalState, body: &[Instr],
+    state: &mut EvalState, body: &Body,
     ctx_node: NodeId, pos: usize, size: usize,
 ) -> Result<String> {
     let mut tmp = EvalState {
@@ -7888,7 +7948,7 @@ fn collect_value_of_body_pieces(
         // *which* atomic items it produced (rather than smearing every
         // sequence in the body into one bucket at the end).
         state.sequence_sinks.push(Vec::new());
-        let nodes = build_rtf_nodes(state, std::slice::from_ref(instr),
+        let nodes = build_rtf_nodes(state, &Body::from(vec![instr.clone()]),
                                     ctx_node, pos, size)?;
         let captured = state.sequence_sinks.pop().unwrap_or_default();
         // Constructed-node output: adjacent text nodes coalesce into
@@ -8331,8 +8391,8 @@ fn matching_body_uses_regex_group(body: &[Instr]) -> bool {
 /// is absent still occupies a position in that numbering.
 fn run_analyze_partition(
     state:       &mut EvalState,
-    matching:    &[Instr],
-    non_matching:&[Instr],
+    matching:    &Body,
+    non_matching:&Body,
     segments:    &[(bool, String, Vec<String>)],
     ctx_node:    NodeId,
 ) -> Result<()> {
@@ -8347,7 +8407,7 @@ fn run_analyze_partition(
 
 fn run_analyze_segment(
     state:     &mut EvalState,
-    body:      &[Instr],
+    body:      &Body,
     segment:   &str,
     groups:    &[String],
     _ctx_node: NodeId,
@@ -8379,7 +8439,7 @@ fn run_for_each_typed_sequence(
     state:    &mut EvalState,
     items:    Vec<sup_xml_core::xpath::eval::Value>,
     sorts:    &[crate::ast::Sort],
-    body:     &[Instr],
+    body:     &Body,
     ctx_node: NodeId,
     _pos:     usize,
     _size:    usize,

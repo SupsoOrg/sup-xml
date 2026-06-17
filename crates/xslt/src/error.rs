@@ -33,7 +33,20 @@ impl std::fmt::Display for XsltError {
         match self {
             XsltError::InvalidStylesheet(msg)  => write!(f, "invalid stylesheet: {msg}"),
             XsltError::UnresolvedReference(msg) => write!(f, "unresolved reference: {msg}"),
-            XsltError::Xpath(e)                => write!(f, "xpath error: {}", e.message),
+            // When the error carries a source position (file:line:col,
+            // and the ground-truth byte offset), lead with the
+            // editor-clickable prefix; otherwise fall back to the bare
+            // "xpath error" label.
+            XsltError::Xpath(e) => match (&e.file, e.line, e.column) {
+                (Some(file), Some(line), Some(col)) => {
+                    write!(f, "{file}:{line}:{col}: {}", e.message)?;
+                    if let Some(ofs) = e.byte_offset {
+                        write!(f, " @ byte {ofs}")?;
+                    }
+                    Ok(())
+                }
+                _ => write!(f, "xpath error: {}", e.message),
+            },
             XsltError::Terminated(msg)         => write!(f, "xsl:message terminate=yes: {msg}"),
         }
     }

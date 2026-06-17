@@ -64,6 +64,84 @@ thread_local! {
     /// inside a use-when answers with the right path.
     static MODULE_BASE_URI: std::cell::RefCell<Option<String>>
         = const { std::cell::RefCell::new(None) };
+    /// Byte offsets at which each line of the module currently being
+    /// compiled begins (`line_starts[i]` is the start of line `i + 1`;
+    /// `line_starts[0]` is always 0).  Built once at the top of
+    /// [`compile`] from the document's source and restored on return;
+    /// consulted by [`node_src_pos`] to translate an element's byte
+    /// offset into a `(line, col)` pair.  Far smaller than the source
+    /// itself (one entry per line, not per byte), and a binary search
+    /// makes each lookup `O(log lines)` — versus rescanning from byte 0
+    /// on every instruction, which would make compilation quadratic in
+    /// the stylesheet's size.  Per-module (each included / imported file
+    /// compiles with its own `compile` call), so positions resolve
+    /// against the right file.
+    static MODULE_LINE_STARTS: std::cell::RefCell<Option<Vec<u32>>>
+        = const { std::cell::RefCell::new(None) };
+}
+
+/// Byte offsets of each line start in `src` (`[0]` is always 0; one
+/// further entry per `\n`).  Saturates offsets at `u32::MAX`, matching
+/// the parser's [`crate::ast::SrcPos`] / `Node::source_offset` width.
+fn line_starts(src: &[u8]) -> Vec<u32> {
+    let mut starts = Vec::with_capacity(src.len() / 40 + 1);
+    starts.push(0);
+    for (i, &b) in src.iter().enumerate() {
+        if b == b'\n' {
+            starts.push((i + 1).min(u32::MAX as usize) as u32);
+        }
+    }
+    starts
+}
+
+/// Source position of `node` derived from its parser-recorded byte
+/// offset against the current module's line-start index.  `None` for
+/// nodes with no recorded offset (programmatic nodes) or when the
+/// module index is unavailable.
+fn node_src_pos(node: &Node) -> Option<crate::ast::SrcPos> {
+    let offset = node.source_offset;
+    if offset == 0 {
+        return None;
+    }
+    MODULE_LINE_STARTS.with(|s| {
+        s.borrow().as_ref().map(|starts| {
+            let (line, col) = line_col_from_starts(starts, offset);
+            crate::ast::SrcPos { line, col, offset }
+        })
+    })
+}
+
+/// Translate a byte `offset` into 1-based `(line, col)` using a
+/// line-start index (see [`line_starts`]).  The line is the greatest
+/// index whose start is `<= offset`; `starts[0] == 0 <= offset`
+/// guarantees the `Err` arm's insertion point is `>= 1`, so `i - 1`
+/// never underflows.  Equivalent to `scanner::compute_line_col`, but
+/// `O(log lines)` per call instead of an `O(offset)` rescan.
+fn line_col_from_starts(starts: &[u32], offset: u32) -> (u32, u32) {
+    let line_idx = match starts.binary_search(&offset) {
+        Ok(i)  => i,
+        Err(i) => i - 1,
+    };
+    (line_idx as u32 + 1, offset - starts[line_idx] + 1)
+}
+
+/// The current module's base URI (its source file), shared by every
+/// instruction compiled from it — stamped once onto each [`crate::ast::Body`]
+/// so an `xsl:include`d module's errors report that file.
+fn current_module_file() -> Option<std::sync::Arc<str>> {
+    MODULE_BASE_URI.with(|b| b.borrow().as_deref().map(std::sync::Arc::<str>::from))
+}
+
+/// A single-instruction [`Body`] stamped with `node`'s source position
+/// and the current module file.  Used by the desugaring sites that lower
+/// a `select=` shorthand into one `xsl:sequence` (`xsl:try`, `xsl:catch`,
+/// `xsl:function`, the on-empty / on-non-empty family, …) so the lowered
+/// form still reports the originating stylesheet line/column at runtime.
+fn body_of_one(node: &Node, instr: Instr) -> Body {
+    let mut body = Body::new();
+    body.set_file(current_module_file());
+    body.push(instr, node_src_pos(node));
+    body
 }
 
 fn get_package_source(name: &str) -> Option<(String, Option<String>)> {
@@ -832,6 +910,18 @@ fn expand_text_in_scope(node: &Node) -> bool {
 /// Public entry point — compile a parsed stylesheet document into
 /// a [`StylesheetAst`].
 pub fn compile(doc: &Document) -> Result<StylesheetAst, XsltError> {
+    // Publish this module's source so instruction compilers can turn an
+    // element's byte offset into a (line, col) for runtime diagnostics.
+    // Restored on return so an enclosing module's source is unaffected.
+    let prev_src = MODULE_LINE_STARTS.with(|s|
+        std::mem::replace(&mut *s.borrow_mut(), doc.source().map(line_starts)));
+    struct SourceGuard(Option<Vec<u32>>);
+    impl Drop for SourceGuard {
+        fn drop(&mut self) {
+            MODULE_LINE_STARTS.with(|s| *s.borrow_mut() = self.0.take());
+        }
+    }
+    let _src_guard = SourceGuard(prev_src);
     let root = doc.root();
     if !root.is_element() {
         return Err(XsltError::InvalidStylesheet(
@@ -1878,7 +1968,7 @@ fn compile_function(node: &Node) -> Result<UserFunction, XsltError> {
     }
     reject_reserved_name(&qname, "xsl:function")?;
     let mut params = Vec::new();
-    let mut body   = Vec::new();
+    let mut body   = Body::new();
     let mut seen_non_param = false;
     for child in node.children() {
         if !child.is_element() { continue; }
@@ -1922,7 +2012,7 @@ fn compile_function(node: &Node) -> Result<UserFunction, XsltError> {
             continue;
         }
         seen_non_param = true;
-        compile_instr_into(&child, &mut body)?;
+        compile_instr_into_body(&child, &mut body)?;
     }
     // Try to lower the body into a single XPath expression so the
     // pure-XPath dispatch path can handle it.  Bodies that don't
@@ -1937,7 +2027,7 @@ fn compile_function(node: &Node) -> Result<UserFunction, XsltError> {
     // for the obvious ones; flag with the spec error.
     reject_function_body_focus_use(&body)?;
     if let Some(expr) = desugar_body_to_xpath(&body) {
-        body = vec![Instr::Sequence { select: expr }];
+        body = body_of_one(node, Instr::Sequence { select: expr });
     }
     let as_type = read_attribute(node, "as").map(str::to_string);
     let visibility = read_attribute(node, "visibility").map(str::to_string);
@@ -2938,7 +3028,7 @@ fn compile_template(node: &Node) -> Result<Template, XsltError> {
     // Body opens with `xsl:param` declarations (if any), then any
     // mix of instructions.  Split at first non-param child.
     let mut params = Vec::new();
-    let mut body   = Vec::new();
+    let mut body   = Body::new();
     let mut seen_non_param = false;
     for child in node.children() {
         if !child.is_element() && !is_significant_text(child) { continue; }
@@ -2959,7 +3049,7 @@ fn compile_template(node: &Node) -> Result<Template, XsltError> {
             continue;
         }
         seen_non_param = true;
-        compile_instr_into(child, &mut body)?;
+        compile_instr_into_body(child, &mut body)?;
     }
 
     let as_type = read_attribute(node, "as").map(str::to_string);
@@ -3048,16 +3138,16 @@ fn reject_select_with_body(
 // we don't enforce it strictly — body wins if both present,
 // matching libxslt).
 fn split_select_and_body(node: &Node)
-    -> Result<(Option<Expr>, Vec<Instr>), XsltError>
+    -> Result<(Option<Expr>, Body), XsltError>
 {
     let select = match read_attribute(node, "select") {
         Some(s) => Some(parse_xpath_at(node, s).map_err(XsltError::from)?),
         None    => None,
     };
-    let mut body = Vec::new();
+    let mut body = Body::new();
     for child in node.children() {
         if !child.is_element() && !is_significant_text(child) { continue; }
-        compile_instr_into(child, &mut body)?;
+        compile_instr_into_body(child, &mut body)?;
     }
     Ok((select, body))
 }
@@ -3066,11 +3156,11 @@ fn split_select_and_body(node: &Node)
 // contained sequence constructor, but not both (XTSE3280 for the
 // on-empty / on-non-empty family).  A `select=` is shorthand for a
 // body of a single `xsl:sequence`.
-fn select_or_body(node: &Node, who: &str) -> Result<Vec<Instr>, XsltError> {
+fn select_or_body(node: &Node, who: &str) -> Result<Body, XsltError> {
     let (select, body) = split_select_and_body(node)?;
     reject_select_with_body(node, &select, &body, who)?;
     Ok(match select {
-        Some(select) => vec![Instr::Sequence { select }],
+        Some(select) => body_of_one(node, Instr::Sequence { select }),
         None => body,
     })
 }
@@ -3124,7 +3214,7 @@ fn compile_key(node: &Node) -> Result<Key, XsltError> {
             name,
             matcher,
             use_: parse_xpath_at(node, u).map_err(XsltError::from)?,
-            body: Vec::new(),
+            body: Body::new(),
             collation,
         }),
         (None, true) => Ok(Key {
@@ -3244,11 +3334,11 @@ fn compile_accumulator_rule(node: &Node) -> Result<AccumulatorRule, XsltError> {
     };
     let select = read_attribute(node, "select")
         .map(|s| parse_xpath_at(node, s)).transpose().map_err(XsltError::from)?;
-    let mut body = Vec::new();
+    let mut body = Body::new();
     if select.is_none() {
         for child in node.children() {
             if !child.is_element() && !is_significant_text(child) { continue; }
-            compile_instr_into(child, &mut body)?;
+            compile_instr_into_body(child, &mut body)?;
         }
     }
     Ok(AccumulatorRule { match_pattern, phase, select, body })
@@ -3262,7 +3352,7 @@ fn compile_attribute_set(node: &Node) -> Result<AttributeSet, XsltError> {
     let use_attribute_sets = parse_qname_list(
         node, read_attribute(node, "use-attribute-sets").unwrap_or(""),
     )?;
-    let mut attributes = Vec::new();
+    let mut attributes = Body::new();
     for child in node.children() {
         // Non-whitespace text inside xsl:attribute-set is XTSE0010.
         if matches!(child.kind, NodeKind::Text | NodeKind::CData)
@@ -3279,9 +3369,7 @@ fn compile_attribute_set(node: &Node) -> Result<AttributeSet, XsltError> {
                 "xsl:attribute-set children must be xsl:attribute".into(),
             ));
         }
-        let mut buf = Vec::with_capacity(1);
-        compile_instr_into(child, &mut buf)?;
-        attributes.extend(buf);
+        compile_instr_into_body(child, &mut attributes)?;
     }
     Ok(AttributeSet {
         name, use_attribute_sets, attributes,
@@ -3796,7 +3884,26 @@ fn collect_whitespace_rules(
 
 // ── instruction dispatch ─────────────────────────────────────────
 
-fn compile_instr_into(node: &Node, out: &mut Vec<Instr>) -> Result<(), XsltError> {
+/// Compile `node` into `out`, tagging each produced instruction with
+/// the node's source position so runtime errors can be traced back to
+/// the stylesheet line/column.  Wraps [`compile_raw_instr_into`] (which
+/// produces the instructions) and is the funnel every body builder uses.
+fn compile_instr_into_body(node: &Node, out: &mut Body) -> Result<(), XsltError> {
+    // Stamp the body's shared source file once (all its instructions are
+    // from this module); each instruction is pushed with `node`'s
+    // position by `compile_raw_instr_into` below.
+    if out.file().is_none() {
+        out.set_file(current_module_file());
+    }
+    compile_raw_instr_into(node, out, node_src_pos(node))
+}
+
+/// Produce the instruction(s) for `node`, pushing each onto `out` paired
+/// with `pos` (the position of `node`, shared by every instruction it
+/// yields — a text value template can expand to several).
+fn compile_raw_instr_into(
+    node: &Node, out: &mut Body, pos: Option<crate::ast::SrcPos>,
+) -> Result<(), XsltError> {
     // Text / CData → emit as literal text.  Comments and PIs in
     // the stylesheet are XSLT-source comments, not result-tree
     // content; the spec says they're ignored during transformation.
@@ -3814,14 +3921,14 @@ fn compile_instr_into(node: &Node, out: &mut Vec<Instr>) -> Result<(), XsltError
                     match part {
                         AvtPart::Literal(s) => {
                             if !s.is_empty() {
-                                out.push(Instr::LiteralText { text: s, dose: false });
+                                out.push(Instr::LiteralText { text: s, dose: false }, pos);
                             }
                         }
                         AvtPart::Expr(e) => out.push(Instr::ValueOf {
                             select: e,
                             dose: false,
                             separator: Some(Avt::literal(" ")),
-                        }),
+                        }, pos),
                     }
                 }
                 return Ok(());
@@ -3829,7 +3936,7 @@ fn compile_instr_into(node: &Node, out: &mut Vec<Instr>) -> Result<(), XsltError
             out.push(Instr::LiteralText {
                 text: text.to_string(),
                 dose: false,
-            });
+            }, pos);
             return Ok(());
         }
         NodeKind::Comment | NodeKind::Pi => return Ok(()),
@@ -3854,7 +3961,7 @@ fn compile_instr_into(node: &Node, out: &mut Vec<Instr>) -> Result<(), XsltError
 
     if !is_xslt_element(node) {
         // Literal result element.
-        out.push(compile_literal_element(node)?);
+        out.push(compile_literal_element(node)?, pos);
         return Ok(());
     }
 
@@ -4015,7 +4122,7 @@ fn compile_instr_into(node: &Node, out: &mut Vec<Instr>) -> Result<(), XsltError
                 Some(s) => Some(parse_xpath_at(node, &s).map_err(XsltError::from)?),
                 None => None,
             };
-            let body = if select.is_some() { Vec::new() } else { compile_body(node)? };
+            let body = if select.is_some() { Body::new() } else { compile_body(node)? };
             Instr::MapEntry { key, select, body }
         }
         "for-each-group" => compile_for_each_group(node)?,
@@ -4121,23 +4228,23 @@ fn compile_instr_into(node: &Node, out: &mut Vec<Instr>) -> Result<(), XsltError
                     "xsl:{other} is not a recognised XSLT instruction (XTSE0010)"
                 )));
             }
-            let mut fallback: Vec<Instr> = Vec::new();
+            let mut fallback = Body::new();
             for child in node.children() {
                 if child.is_element()
                     && is_xslt_element(child)
                     && child.local_name() == "fallback"
                 {
-                    fallback.extend(compile_body(child)?);
+                    fallback.append(compile_body(child)?);
                 }
             }
             Instr::Unsupported { name: other.to_string(), fallback }
         }
     };
-    out.push(instr);
+    out.push(instr, pos);
     Ok(())
 }
 
-fn compile_body(node: &Node) -> Result<Vec<Instr>, XsltError> {
+fn compile_body(node: &Node) -> Result<Body, XsltError> {
     // XSLT 1.0 §3.4 strips whitespace-only text nodes from stylesheet
     // bodies, but XML parsers may split a logical character run into
     // (text, CDATA, text…) — without that knowledge, the WHITESPACE
@@ -4147,12 +4254,12 @@ fn compile_body(node: &Node) -> Result<Vec<Instr>, XsltError> {
     // only" decision.
     let children: Vec<&Node> = node.children().collect();
     let keep_run = run_keep_mask(&children);
-    let mut out = Vec::new();
+    let mut out = Body::new();
     for (i, child) in children.iter().enumerate() {
         if child.is_element() {
-            compile_instr_into(child, &mut out)?;
+            compile_instr_into_body(child, &mut out)?;
         } else if is_text_like(child) {
-            if keep_run[i] { compile_instr_into(child, &mut out)?; }
+            if keep_run[i] { compile_instr_into_body(child, &mut out)?; }
         }
     }
     Ok(out)
@@ -4617,13 +4724,13 @@ fn compile_for_each(node: &Node) -> Result<Instr, XsltError> {
         }
     }
     let (sort, _) = collect_sort_and_with_params(node)?;
-    let mut body = Vec::new();
+    let mut body = Body::new();
     for child in node.children() {
         if child.is_element() && is_xslt_element(child) && child.local_name() == "sort" {
             continue;
         }
         if !child.is_element() && !is_significant_text(child) { continue; }
-        compile_instr_into(child, &mut body)?;
+        compile_instr_into_body(child, &mut body)?;
     }
     Ok(Instr::ForEach {
         select: parse_xpath_at(node, select).map_err(XsltError::from)?,
@@ -4684,13 +4791,13 @@ fn compile_for_each_group(node: &Node) -> Result<Instr, XsltError> {
         }
     }
     let (sort, _) = collect_sort_and_with_params(node)?;
-    let mut body = Vec::new();
+    let mut body = Body::new();
     for child in node.children() {
         if child.is_element() && is_xslt_element(child) && child.local_name() == "sort" {
             continue;
         }
         if !child.is_element() && !is_significant_text(child) { continue; }
-        compile_instr_into(child, &mut body)?;
+        compile_instr_into_body(child, &mut body)?;
     }
     Ok(Instr::ForEachGroup {
         select: parse_xpath_at(node, select).map_err(XsltError::from)?,
@@ -4745,7 +4852,7 @@ fn compile_evaluate(node: &Node) -> Result<Instr, XsltError> {
 /// `xsl:merge-action` whose body runs once per distinct merge key.
 fn compile_merge(node: &Node) -> Result<Instr, XsltError> {
     let mut sources = Vec::new();
-    let mut action: Option<Vec<Instr>> = None;
+    let mut action: Option<Body> = None;
     for child in node.children() {
         if !child.is_element() {
             if is_significant_text(child) {
@@ -4762,10 +4869,10 @@ fn compile_merge(node: &Node) -> Result<Instr, XsltError> {
         match child.local_name() {
             "merge-source" => sources.push(compile_merge_source(child)?),
             "merge-action" => {
-                let mut body = Vec::new();
+                let mut body = Body::new();
                 for gc in child.children() {
                     if !gc.is_element() && !is_significant_text(gc) { continue; }
-                    compile_instr_into(gc, &mut body)?;
+                    compile_instr_into_body(gc, &mut body)?;
                 }
                 action = Some(body);
             }
@@ -4814,8 +4921,8 @@ fn compile_analyze_string(node: &Node) -> Result<Instr, XsltError> {
     let regex  = avt(node, require_attr(node, "regex", "xsl:analyze-string")?)?;
     let flags  = read_attribute(node, "flags").map(|s| avt(node, s)).transpose()?
                   .unwrap_or_default();
-    let mut matching:     Option<Vec<Instr>> = None;
-    let mut non_matching: Option<Vec<Instr>> = None;
+    let mut matching:     Option<Body> = None;
+    let mut non_matching: Option<Body> = None;
     for child in node.children() {
         if !child.is_element() { continue; }
         if !is_xslt_element(child) {
@@ -4901,7 +5008,7 @@ fn compile_perform_sort(node: &Node) -> Result<Instr, XsltError> {
     }
     let (sort, _) = collect_sort_and_with_params(node)?;
     let body = if select.is_some() {
-        Vec::new()
+        Body::new()
     } else {
         compile_body_skipping_xsl_sort(node)?
     };
@@ -4940,18 +5047,18 @@ fn require_xsl_sort_first(parent: &Node, who: &str) -> Result<(), XsltError> {
 /// Like [`compile_body`] but skips child `xsl:sort` elements (those
 /// are collected by [`collect_sort_and_with_params`] into the sort
 /// key list, not the sequence constructor).
-fn compile_body_skipping_xsl_sort(node: &Node) -> Result<Vec<Instr>, XsltError> {
+fn compile_body_skipping_xsl_sort(node: &Node) -> Result<Body, XsltError> {
     let children: Vec<&Node> = node.children().collect();
     let keep_run = run_keep_mask(&children);
-    let mut out = Vec::new();
+    let mut out = Body::new();
     for (i, child) in children.iter().enumerate() {
         if child.is_element() {
             if is_xslt_element(child) && child.local_name() == "sort" {
                 continue;
             }
-            compile_instr_into(child, &mut out)?;
+            compile_instr_into_body(child, &mut out)?;
         } else if is_text_like(child) && keep_run[i] {
-            compile_instr_into(child, &mut out)?;
+            compile_instr_into_body(child, &mut out)?;
         }
     }
     Ok(out)
@@ -4966,7 +5073,7 @@ fn compile_namespace_instr(node: &Node) -> Result<Instr, XsltError> {
     let name   = avt(node, require_attr(node, "name", "xsl:namespace")?)?;
     let select = read_attribute(node, "select")
         .map(|src| parse_xpath_at(node, src)).transpose().map_err(XsltError::from)?;
-    let body   = if select.is_none() { compile_body(node)? } else { Vec::new() };
+    let body   = if select.is_none() { compile_body(node)? } else { Body::new() };
     Ok(Instr::Namespace { name, select, body })
 }
 
@@ -4975,7 +5082,7 @@ fn compile_namespace_instr(node: &Node) -> Result<Instr, XsltError> {
 /// `select=` on `xsl:try` collapses the body into a single
 /// expression evaluation; the more common form is body-only.
 fn compile_try(node: &Node) -> Result<Instr, XsltError> {
-    let mut body    = Vec::new();
+    let mut body    = Body::new();
     let mut catches = Vec::new();
     let mut seen_catch = false;
     for child in node.children() {
@@ -5009,7 +5116,7 @@ fn compile_try(node: &Node) -> Result<Instr, XsltError> {
                 "xsl:try body must precede all xsl:catch handlers (XTSE0010)".into(),
             ));
         }
-        compile_instr_into(child, &mut body)?;
+        compile_instr_into_body(child, &mut body)?;
     }
     if catches.is_empty() {
         return Err(XsltError::InvalidStylesheet(
@@ -5026,7 +5133,7 @@ fn compile_try(node: &Node) -> Result<Instr, XsltError> {
             ));
         }
         let expr = parse_xpath_at(node, sel).map_err(XsltError::from)?;
-        body.push(Instr::Sequence { select: expr });
+        body = body_of_one(node, Instr::Sequence { select: expr });
     }
     Ok(Instr::Try { body, catches })
 }
@@ -5037,8 +5144,8 @@ fn compile_iterate(node: &Node) -> Result<Instr, XsltError> {
     let select = require_attr(node, "select", "xsl:iterate")?;
     let select = parse_xpath_at(node, select).map_err(XsltError::from)?;
     let mut params = Vec::new();
-    let mut on_completion = Vec::new();
-    let mut body = Vec::new();
+    let mut on_completion = Body::new();
+    let mut body = Body::new();
     // Route xsl:param → loop-carried params and xsl:on-completion →
     // its own body; everything else is the iteration body.  Strip
     // whitespace-only text runs the same way compile_body does (XSLT
@@ -5054,9 +5161,9 @@ fn compile_iterate(node: &Node) -> Result<Instr, XsltError> {
                     _ => {}
                 }
             }
-            compile_instr_into(child, &mut body)?;
+            compile_instr_into_body(child, &mut body)?;
         } else if is_text_like(child) && keep_run[i] {
-            compile_instr_into(child, &mut body)?;
+            compile_instr_into_body(child, &mut body)?;
         }
     }
     Ok(Instr::Iterate { select, params, on_completion, body })
@@ -5111,7 +5218,9 @@ fn compile_catch(node: &Node) -> Result<crate::ast::TryCatch, XsltError> {
                 "xsl:catch select= and body are mutually exclusive (XTSE0010)".into(),
             ));
         }
-        vec![Instr::Sequence { select: parse_xpath_at(node, sel).map_err(XsltError::from)? }]
+        body_of_one(node, Instr::Sequence {
+            select: parse_xpath_at(node, sel).map_err(XsltError::from)?,
+        })
     } else {
         compile_body(node)?
     };
@@ -5408,15 +5517,17 @@ fn compile_text(node: &Node) -> Result<Instr, XsltError> {
         .map(|v| matches!(v.trim(), "yes" | "true" | "1"))
         .unwrap_or_else(|| expand_text_in_scope(node));
     if expand && (text.contains('{') || text.contains('}')) {
-        let mut body = Vec::new();
+        let mut body = Body::new();
+        body.set_file(current_module_file());
+        let pos = node_src_pos(node);
         for part in avt(node, &text)?.parts {
             match part {
                 AvtPart::Literal(s) => if !s.is_empty() {
-                    body.push(Instr::LiteralText { text: s, dose });
+                    body.push(Instr::LiteralText { text: s, dose }, pos);
                 },
                 AvtPart::Expr(e) => body.push(Instr::ValueOf {
                     select: e, dose, separator: Some(Avt::literal(" ")),
-                }),
+                }, pos),
             }
         }
         // Emit the parts as one instruction (an unconditional xsl:if),
@@ -5508,13 +5619,13 @@ fn compile_literal_element(node: &Node) -> Result<Instr, XsltError> {
     // children at execution time, same as unknown XSLT instructions.
     let ext_uris = collect_extension_element_uris(node);
     if !ext_uris.is_empty() && ext_uris.contains(&name.uri) {
-        let mut fallback: Vec<Instr> = Vec::new();
+        let mut fallback = Body::new();
         for child in node.children() {
             if child.is_element()
                 && is_xslt_element(child)
                 && child.local_name() == "fallback"
             {
-                fallback.extend(compile_body(child)?);
+                fallback.append(compile_body(child)?);
             }
         }
         return Ok(Instr::Unsupported {
@@ -6635,7 +6746,7 @@ fn compile_simplified(root: &Node) -> Result<StylesheetAst, XsltError> {
         import_precedence: TOP_LEVEL_IMPORT_PRECEDENCE,
         source_path: vec![0],
         params: Vec::new(),
-        body: vec![lre],
+        body: body_of_one(root, lre),
         as_type: None,
     };
     ast.templates.push(template);
@@ -7394,6 +7505,38 @@ mod tests {
             ..sup_xml_core::ParseOptions::default()
         };
         sup_xml_core::parse_str(src, &opts).expect("parse")
+    }
+
+    // ── line-start index (node_src_pos fast path) ───────────────
+
+    /// The `O(log lines)` line-start lookup must agree with the
+    /// canonical `O(offset)` `scanner::compute_line_col` at every byte
+    /// offset, including line boundaries, the final byte, and offsets
+    /// past the end (which `compute_line_col` clamps).
+    #[test]
+    fn line_col_from_starts_matches_compute_line_col() {
+        // Mixed line lengths, blank lines, no trailing newline, CRLF,
+        // and a multi-byte UTF-8 char so column counting is exercised
+        // on byte offsets the way the parser records them.
+        let src = "<a>\n  <b/>\n\n    <c x=\"é\"/>\r\n</a>".as_bytes();
+        let starts = line_starts(src);
+        for offset in 0..=src.len() + 4 {
+            let want = sup_xml_core::compute_line_col(src, offset);
+            // compute_line_col clamps past-end offsets to src.len(); mirror
+            // that so the two agree on out-of-range inputs too.
+            let clamped = offset.min(src.len()) as u32;
+            let got = line_col_from_starts(&starts, clamped);
+            assert_eq!(got, want, "offset {offset}");
+        }
+    }
+
+    /// `line_starts` records the byte after each `\n`, with line 1 at 0.
+    #[test]
+    fn line_starts_records_each_line_boundary() {
+        assert_eq!(line_starts(b""), vec![0]);
+        assert_eq!(line_starts(b"abc"), vec![0]);
+        assert_eq!(line_starts(b"a\nbc\n"), vec![0, 2, 5]);
+        assert_eq!(line_starts(b"\n\n"), vec![0, 1, 2]);
     }
 
     // ── root-element validation ─────────────────────────────────

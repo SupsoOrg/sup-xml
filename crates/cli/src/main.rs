@@ -1230,7 +1230,7 @@ fn run_xslt(args: &XsltArgs, g: &GlobalOpts) -> Result<(), CliError> {
 
     let style = sup_xml::xslt::Stylesheet::compile_str_with_loader(
         &xsl_text, &loader, Some(&base),
-    ).map_err(|e| xslt_err("compile", format!("{e:?}")))?;
+    ).map_err(|e| xslt_err("compile", format!("{e}")))?;
 
     // Input XML.
     let src_bytes = read_input(args.file.as_deref(), g.max_size)?;
@@ -1267,7 +1267,7 @@ fn run_xslt(args: &XsltArgs, g: &GlobalOpts) -> Result<(), CliError> {
         style.apply_with_loader(&doc, &loader, Some(&base))
     } else {
         style.apply_with_params(&doc, &loader, Some(&base), &params)
-    }.map_err(|e| xslt_err("apply", format!("{e:?}")))?;
+    }.map_err(|e| xslt_err("apply", format!("{e}")))?;
 
     // `--pretty` forces indentation regardless of the stylesheet's
     // own `xsl:output indent`; it only affects the XML output method.
@@ -1277,7 +1277,7 @@ fn run_xslt(args: &XsltArgs, g: &GlobalOpts) -> Result<(), CliError> {
 
     let out = result
         .to_string()
-        .map_err(|e| xslt_err("serialize", format!("{e:?}")))?;
+        .map_err(|e| xslt_err("serialize", format!("{e}")))?;
     write_output(args.output.as_deref(), &out)?;
     Ok(())
 }

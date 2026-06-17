@@ -127,7 +127,7 @@ pub struct Template {
     /// `xsl:param` elements that have to precede instructions.
     pub params:        Vec<Param>,
     /// Body instructions, in document order.
-    pub body:          Vec<Instr>,
+    pub body:          Body,
     /// XSLT 2.0 `as="xs:T"` on xsl:template — the declared type of
     /// the value produced by the body.  XTTE0505 fires when the
     /// produced value doesn't match.  `None` means no constraint.
@@ -143,7 +143,7 @@ pub struct Param {
     /// `body` per the XSLT spec; we encode "either / or" by
     /// storing the active form and leaving the other empty.
     pub select: Option<Expr>,
-    pub body:   Vec<Instr>,
+    pub body:   Body,
     /// XSLT 2.0 `tunnel="yes"` — read from the tunnel-param pool
     /// rather than the caller's regular `xsl:with-param` args.
     pub tunnel: bool,
@@ -168,7 +168,7 @@ pub struct Param {
 pub struct Variable {
     pub name:   QName,
     pub select: Option<Expr>,
-    pub body:   Vec<Instr>,
+    pub body:   Body,
     /// XSLT 2.0 `as="xs:T"` — see [`Param::as_type`].
     pub as_type: Option<String>,
     /// Effective xml:base for this variable's body-form RTF.
@@ -183,6 +183,119 @@ pub struct Variable {
 }
 
 // ── instructions ────────────────────────────────────────────────
+
+/// Source position of an instruction within its stylesheet module, for
+/// runtime error reporting.  Derived from the element's byte offset
+/// (the ground truth recorded by the parser) against the module's
+/// source buffer at compile time; `offset` is 0-based, `line`/`col`
+/// 1-based.  The file isn't stored here — it's uniform across a module,
+/// so it lives once on the enclosing [`Body`] ([`Body::file`]) rather
+/// than being repeated on every instruction's position.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SrcPos {
+    pub line:   u32,
+    pub col:    u32,
+    pub offset: u32,
+}
+
+/// A sequence constructor: a list of instructions plus, in lockstep, the
+/// source position of each (and the file they share).  Positions live in
+/// a side array rather than on every [`Instr`] variant, which keeps the
+/// position data *cold* — the evaluator's instruction walk only touches
+/// `instrs`, consulting [`Body::pos_at`] / [`Body::file`] solely when
+/// stamping a runtime error onto the failing instruction.
+///
+/// `Body` `Deref`s to `[Instr]`, so slice-style reads — `len`,
+/// `is_empty`, indexing, `iter`, and passing `&body` where `&[Instr]` is
+/// expected — work directly; `for x in &body` works via the
+/// [`IntoIterator`] impl below.  Building and mutation, by contrast, go
+/// through [`Body::push`] / [`Body::append`] / [`From<Vec<Instr>>`]
+/// (there is intentionally no `Vec`-style `push`/`extend`/`iter_mut`),
+/// so the `instrs`/`positions` length invariant can't be broken from
+/// outside the type.
+#[derive(Clone, Debug, Default)]
+pub struct Body {
+    instrs:    Vec<Instr>,
+    positions: Vec<Option<SrcPos>>,
+    /// Source file (module base URI) shared by every instruction in this
+    /// body — all of a body's instructions come from one module, so the
+    /// file is stored once here rather than on each [`SrcPos`].  `None`
+    /// for programmatically-synthesized bodies.
+    file:      Option<std::sync::Arc<str>>,
+}
+
+impl Body {
+    pub fn new() -> Self {
+        Self { instrs: Vec::new(), positions: Vec::new(), file: None }
+    }
+
+    /// Append one instruction with its source position.
+    pub fn push(&mut self, instr: Instr, pos: Option<SrcPos>) {
+        self.instrs.push(instr);
+        self.positions.push(pos);
+    }
+
+    /// Append every instruction (and position) of `other`, inheriting
+    /// its file if this body doesn't yet have one.
+    pub fn append(&mut self, mut other: Body) {
+        self.instrs.append(&mut other.instrs);
+        self.positions.append(&mut other.positions);
+        if self.file.is_none() {
+            self.file = other.file;
+        }
+    }
+
+    /// Set the source file shared by this body's instructions.
+    pub fn set_file(&mut self, file: Option<std::sync::Arc<str>>) {
+        self.file = file;
+    }
+
+    /// The source file (module base URI) of this body's instructions.
+    pub fn file(&self) -> Option<&str> {
+        self.file.as_deref()
+    }
+
+    /// Source position of the instruction at index `i`, if recorded.
+    pub fn pos_at(&self, i: usize) -> Option<SrcPos> {
+        self.positions.get(i).copied().flatten()
+    }
+
+    /// The instruction slice — the same view callers get via `Deref`,
+    /// named for use where a method call reads clearer than a coercion.
+    pub fn instrs(&self) -> &[Instr] {
+        &self.instrs
+    }
+}
+
+impl std::ops::Deref for Body {
+    type Target = [Instr];
+    fn deref(&self) -> &[Instr] {
+        &self.instrs
+    }
+}
+
+impl From<Vec<Instr>> for Body {
+    /// Wrap instructions with no known positions (programmatic /
+    /// synthesized bodies).
+    fn from(instrs: Vec<Instr>) -> Self {
+        let positions = vec![None; instrs.len()];
+        Self { instrs, positions, file: None }
+    }
+}
+
+impl FromIterator<Instr> for Body {
+    fn from_iter<I: IntoIterator<Item = Instr>>(iter: I) -> Self {
+        Body::from(iter.into_iter().collect::<Vec<_>>())
+    }
+}
+
+impl<'a> IntoIterator for &'a Body {
+    type Item = &'a Instr;
+    type IntoIter = std::slice::Iter<'a, Instr>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.instrs.iter()
+    }
+}
 
 /// One XSLT instruction or piece of result-tree-emitting content.
 /// Covers every XSLT 1.0 instruction.  The structure is captured
@@ -214,7 +327,7 @@ pub enum Instr {
         /// the ordinary untyped LRE.  Annotates the constructed element
         /// so its typed value is recoverable.
         schema_type: Option<(String, String)>,
-        body:       Vec<Instr>,
+        body:       Body,
     },
     /// Literal text node — verbatim character content with no
     /// XSLT interpretation.  Carries the `disable-output-escaping`
@@ -255,17 +368,17 @@ pub enum Instr {
         with_params: Vec<WithParam>,
     },
     Choose {
-        whens:     Vec<(Expr, Vec<Instr>)>,
-        otherwise: Option<Vec<Instr>>,
+        whens:     Vec<(Expr, Body)>,
+        otherwise: Option<Body>,
     },
     If {
         test: Expr,
-        body: Vec<Instr>,
+        body: Body,
     },
     ForEach {
         select: Expr,
         sort:   Vec<Sort>,
-        body:   Vec<Instr>,
+        body:   Body,
     },
     /// XSLT 3.0 §8.3 `xsl:iterate` — sequential iteration with
     /// loop-carried parameters.  `params` are the `xsl:param`
@@ -276,8 +389,8 @@ pub enum Instr {
     Iterate {
         select:        Expr,
         params:        Vec<Param>,
-        on_completion: Vec<Instr>,
-        body:          Vec<Instr>,
+        on_completion: Body,
+        body:          Body,
     },
     /// XSLT 3.0 §8.3 `xsl:next-iteration` — ends the current iteration
     /// of the enclosing `xsl:iterate`, supplying parameter values for
@@ -289,7 +402,7 @@ pub enum Instr {
     /// `xsl:iterate`; the optional `select`/body is the break's output.
     Break {
         select: Option<Expr>,
-        body:   Vec<Instr>,
+        body:   Body,
     },
     ValueOf {
         select: Expr,
@@ -310,13 +423,13 @@ pub enum Instr {
     /// `disable-output-escaping` and `separator=` the same way the
     /// select-form does).
     ValueOfBody {
-        body:      Vec<Instr>,
+        body:      Body,
         dose:      bool,
         separator: Option<Avt>,
     },
     Copy {
         use_attribute_sets: Vec<QName>,
-        body:               Vec<Instr>,
+        body:               Body,
         /// XSLT 2.0 §11.9.1 `copy-namespaces` — `false` (`="no"`) keeps
         /// only the namespaces the copied element's own name needs.
         /// Default `true`.
@@ -333,7 +446,7 @@ pub enum Instr {
         name:               Avt,                 // AVT — name may be dynamic
         namespace:          Option<Avt>,
         use_attribute_sets: Vec<QName>,
-        body:               Vec<Instr>,
+        body:               Body,
         /// In-scope namespaces at the `xsl:element` source location,
         /// captured at compile time.  Used to expand the runtime
         /// `name` AVT into a QName under the stylesheet author's
@@ -354,7 +467,7 @@ pub enum Instr {
         /// constructed body.  `None` falls back to the default
         /// (`" "` for `select=`, empty for body-form).
         separator: Option<Avt>,
-        body:      Vec<Instr>,
+        body:      Body,
         /// In-scope namespaces at the `xsl:attribute` source
         /// location, for the same reason `xsl:element` carries them.
         in_scope_namespaces: Vec<(Option<String>, String)>,
@@ -369,13 +482,13 @@ pub enum Instr {
         /// string-value of the expression.  When absent, the value
         /// comes from the body.
         select: Option<Expr>,
-        body:   Vec<Instr>,
+        body:   Body,
     },
     ProcessingInstruction {
         name:   Avt,
         /// XSLT 2.0 §11.5 `select=` shortcut for the PI data.
         select: Option<Expr>,
-        body:   Vec<Instr>,
+        body:   Body,
     },
     Number {
         // XSLT §7.7.  When `value=` is set we just format that
@@ -422,12 +535,12 @@ pub enum Instr {
         /// `"yes"` / `"no"` at runtime.  `None` means absent, equivalent
         /// to `"no"`.
         terminate: Option<Avt>,
-        body:      Vec<Instr>,
+        body:      Body,
     },
     /// `xsl:fallback` — only fires when the surrounding instruction
     /// is unrecognised.  In XSLT 1.0 this is rare; we capture it so
     /// forward-compat documents that target XSLT 2.0+ still parse.
-    Fallback { body: Vec<Instr> },
+    Fallback { body: Body },
 
     /// `xsl:sequence` (XSLT 2.0) — evaluates `select` and contributes
     /// its value to the current sequence constructor.  Inside an
@@ -439,11 +552,11 @@ pub enum Instr {
     /// `xsl:map` (XSLT 3.0 §17.4) — evaluates its sequence-constructor
     /// body, which must yield a set of maps, and merges them into a single
     /// map.  In practice the body is a series of `xsl:map-entry`s.
-    Map { body: Vec<Instr> },
+    Map { body: Body },
     /// `xsl:map-entry` (XSLT 3.0 §17.4) — contributes a single-entry map
     /// `{ key : value }` to the enclosing `xsl:map`.  The value is the
     /// `select` expression or, absent that, the sequence-constructor body.
-    MapEntry { key: Expr, select: Option<Expr>, body: Vec<Instr> },
+    MapEntry { key: Expr, select: Option<Expr>, body: Body },
     /// `xsl:for-each-group` (XSLT 2.0 §14) — partitions the `select`
     /// node-set into groups by one of the four grouping criteria
     /// (`group-by`, `group-adjacent`, `group-starting-with`,
@@ -455,7 +568,7 @@ pub enum Instr {
         kind:     GroupingKind,
         key:      Expr,
         sort:     Vec<Sort>,
-        body:     Vec<Instr>,
+        body:     Body,
         /// Optional `collation=` URI (defaults to the codepoint
         /// collation if absent or empty).  Only `group-by` /
         /// `group-adjacent` consult this — the positional grouping
@@ -469,27 +582,27 @@ pub enum Instr {
     /// `streamable` attribute is accepted and ignored.
     SourceDocument {
         href: Avt,
-        body: Vec<Instr>,
+        body: Body,
     },
     /// `xsl:on-empty` (XSLT 3.0 §16.4.1) — its content is emitted only
     /// if the rest of the containing sequence constructor produces no
     /// significant output.
     OnEmpty {
-        body: Vec<Instr>,
+        body: Body,
     },
     /// `xsl:on-non-empty` (XSLT 3.0 §16.4.2) — its content is emitted
     /// only if the rest of the containing sequence constructor produces
     /// significant output.  Both appear at their own position in the
     /// result.
     OnNonEmpty {
-        body: Vec<Instr>,
+        body: Body,
     },
     /// `xsl:where-populated` (XSLT 3.0 §16.4.3) — evaluate the body but
     /// emit it only if the result is "populated" (contains at least one
     /// node that isn't an empty element/document or a zero-length text
     /// node).  Suppresses empty wrapper elements.
     WherePopulated {
-        body: Vec<Instr>,
+        body: Body,
     },
     /// `xsl:fork` (XSLT 3.0 §19) — in streamed processing the prongs
     /// share one pass over the input; for a tree-based engine it is
@@ -497,7 +610,7 @@ pub enum Instr {
     /// `xsl:for-each-group` children) in order and concatenating the
     /// results, so we model it as a plain body.
     Fork {
-        body: Vec<Instr>,
+        body: Body,
     },
     /// `xsl:evaluate` (XSLT 3.0 §10.4) — evaluate a dynamically
     /// constructed XPath expression.  `xpath` yields the expression
@@ -519,7 +632,7 @@ pub enum Instr {
     /// `current-merge-group()` / `current-merge-key()` in scope.
     Merge {
         sources: Vec<MergeSource>,
-        action:  Vec<Instr>,
+        action:  Body,
     },
     /// `xsl:analyze-string` (XSLT 2.0 §15.1) — partitions the
     /// `select` string into matching / non-matching substrings against
@@ -530,8 +643,8 @@ pub enum Instr {
         select:        Expr,
         regex:         Avt,
         flags:         Avt,
-        matching:      Vec<Instr>,
-        non_matching:  Vec<Instr>,
+        matching:      Body,
+        non_matching:  Body,
     },
     /// `xsl:perform-sort` (XSLT 2.0 §13.3) — sorts a sequence and
     /// emits the sorted items.  Behaves like `xsl:for-each` with
@@ -545,13 +658,13 @@ pub enum Instr {
     PerformSort {
         select: Option<Expr>,
         sort:   Vec<Sort>,
-        body:   Vec<Instr>,
+        body:   Body,
     },
     /// `xsl:document` (XSLT 2.0 §14.4) — wraps the body's sequence
     /// constructor in a document node (an RTF in our value model).
     /// The optional `type=`/`validation=` attributes are ignored.
     Document {
-        body: Vec<Instr>,
+        body: Body,
     },
     /// `xsl:result-document` (XSLT 2.0 §19.1) — evaluates its body into
     /// a result tree written to the resolved `href`, separate from the
@@ -573,14 +686,14 @@ pub enum Instr {
         /// re-walking the source.  `None` prefix is the default
         /// namespace.
         format_namespaces: Vec<(Option<String>, String)>,
-        body: Vec<Instr>,
+        body: Body,
     },
     /// `xsl:namespace name="x" [select="uri"]` (XSLT 2.0 §11.7) —
     /// emits a namespace node on the surrounding result-tree element.
     Namespace {
         name:   Avt,
         select: Option<Expr>,
-        body:   Vec<Instr>,
+        body:   Body,
     },
 
     /// XSLT 3.0 §15 `xsl:try` / `xsl:catch` — evaluate the body;
@@ -592,7 +705,7 @@ pub enum Instr {
     /// `$err:line-number` / `$err:column-number` variables
     /// describe the caught error.
     Try {
-        body:    Vec<Instr>,
+        body:    Body,
         catches: Vec<TryCatch>,
     },
 
@@ -606,7 +719,7 @@ pub enum Instr {
     /// reaches it.
     Unsupported {
         name:     String,
-        fallback: Vec<Instr>,
+        fallback: Body,
     },
 }
 
@@ -622,7 +735,7 @@ pub struct TryCatch {
     /// Sequence-constructor body of the catch.  When the
     /// handler matches, its body runs with the `err:*` variables
     /// in scope.
-    pub body:   Vec<Instr>,
+    pub body:   Body,
 }
 
 /// One name-test inside an `xsl:catch` `errors=` list.
@@ -712,7 +825,7 @@ pub struct AccumulatorRule {
     /// `select=` for the new value; `None` when the new value comes
     /// from the rule's sequence-constructor body.
     pub select:        Option<Expr>,
-    pub body:          Vec<Instr>,
+    pub body:          Body,
 }
 
 /// Whether an accumulator rule fires on the node's pre-order (`start`)
@@ -742,7 +855,7 @@ pub struct MergeSource {
 pub struct WithParam {
     pub name:   QName,
     pub select: Option<Expr>,
-    pub body:   Vec<Instr>,
+    pub body:   Body,
     /// XSLT 2.0 `tunnel="yes"` — the value enters the tunnel-param
     /// pool that propagates through every downstream apply / call
     /// until a tunnel-typed `xsl:param` consumes it.
@@ -795,7 +908,7 @@ pub struct Key {
     /// Empty when the key uses the `use=` attribute; otherwise the
     /// `use=` expression is absent and the key value is computed by
     /// evaluating this constructor at each matched node.
-    pub body:  Vec<Instr>,
+    pub body:  Body,
     /// Effective collation URI for value comparison.  `None` means
     /// the codepoint collation (the XSLT default); a recognised
     /// non-codepoint URI changes how key('name', 'value') matches
@@ -816,7 +929,7 @@ pub struct AttributeSet {
     /// each entry runs through the standard attribute instruction
     /// path, which emits the resulting attribute onto the current
     /// element via the open ResultBuilder.
-    pub attributes:           Vec<Instr>,
+    pub attributes:           Body,
     /// XSLT 1.0 §2.6.2 import precedence — same scheme as Template.
     /// `apply_attribute_set_one` applies same-named sets in
     /// precedence order so a higher-precedence import overrides a
@@ -1030,7 +1143,7 @@ pub struct UserFunction {
     /// Callers must supply exactly this many arguments.
     pub params: Vec<Param>,
     /// Sequence constructor — runs to produce the function's value.
-    pub body:   Vec<Instr>,
+    pub body:   Body,
     /// XSLT 2.0 `as="xs:T"` on xsl:function — the declared return
     /// type.  Mismatches at call time raise XTTE0780.  `None` means
     /// `item()*` (any sequence is accepted).

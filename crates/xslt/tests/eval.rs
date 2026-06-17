@@ -451,3 +451,193 @@ fn document_dynamic_uri_errors_clearly() {
     assert!(msg.contains("runtime loader") || msg.contains("string literal"),
             "diagnostic should point at the dynamic-URI limitation, got: {msg}");
 }
+
+// ── xsl:number focus inside xsl:function (XSLT 2.0 §10.3 / §13.1) ──
+
+/// Inside an `xsl:function` the focus is undefined, but an
+/// `xsl:for-each` over a node sequence establishes a new node focus —
+/// so a contained `xsl:number` counts the iterated node rather than
+/// raising XTTE0990.  Regression test for the SchXslt `redux:location`
+/// pattern.
+#[test]
+fn xsl_number_in_function_for_each_over_nodes() {
+    let sheet = r#"<xsl:transform version="2.0"
+        xmlns:xsl="http://www.w3.org/1999/XSL/Transform"
+        xmlns:xs="http://www.w3.org/2001/XMLSchema"
+        xmlns:my="urn:test">
+      <xsl:function name="my:pos" as="xs:integer">
+        <xsl:param name="context" as="node()"/>
+        <xsl:variable name="n" as="xs:integer">
+          <xsl:for-each select="$context"><xsl:number/></xsl:for-each>
+        </xsl:variable>
+        <xsl:sequence select="$n"/>
+      </xsl:function>
+      <xsl:template match="/">
+        <out><xsl:value-of select="my:pos(/root/foo[2])"/></out>
+      </xsl:template>
+    </xsl:transform>"#;
+    let xslt = Stylesheet::compile_str(sheet).expect("compile");
+    let doc = parse_str("<root><foo/><foo/><foo/></root>", &ParseOptions::default()).unwrap();
+    let result = xslt.apply(&doc).expect("apply");
+    // <xsl:number/> on the second <foo> counts among same-name
+    // siblings → 2.
+    assert_eq!(text_of(first_element(&result.children)), "2");
+}
+
+/// An `xsl:for-each` over an *atomic* sequence inside a function does
+/// not establish a node focus, so `xsl:number` with no `select=` must
+/// still raise XTTE0990.
+#[test]
+fn xsl_number_in_function_for_each_over_atomics_errors() {
+    let sheet = r#"<xsl:transform version="2.0"
+        xmlns:xsl="http://www.w3.org/1999/XSL/Transform"
+        xmlns:xs="http://www.w3.org/2001/XMLSchema"
+        xmlns:my="urn:test">
+      <xsl:function name="my:f" as="xs:string">
+        <xsl:value-of>
+          <xsl:for-each select="1 to 3"><xsl:number/></xsl:for-each>
+        </xsl:value-of>
+      </xsl:function>
+      <xsl:template match="/"><out><xsl:value-of select="my:f()"/></out></xsl:template>
+    </xsl:transform>"#;
+    let xslt = Stylesheet::compile_str(sheet).expect("compile");
+    let doc = parse_str("<r/>", &ParseOptions::default()).unwrap();
+    let err = xslt.apply(&doc).unwrap_err();
+    assert!(format!("{err}").contains("XTTE0990"),
+        "expected XTTE0990 for atomic for-each, got: {err}");
+}
+
+/// A runtime XSLT error carries the failing instruction's source
+/// position — file (when known), 1-based line/column, and the
+/// ground-truth byte offset it was derived from.
+#[test]
+fn xsl_number_error_carries_source_position() {
+    // `<xsl:number/>` sits on line 6; its name starts at column 50.
+    let sheet = "\
+<xsl:transform version=\"2.0\"\n\
+\x20 xmlns:xsl=\"http://www.w3.org/1999/XSL/Transform\"\n\
+\x20 xmlns:xs=\"http://www.w3.org/2001/XMLSchema\"\n\
+\x20 xmlns:my=\"urn:test\">\n\
+\x20 <xsl:function name=\"my:f\" as=\"xs:string\">\n\
+\x20   <xsl:value-of><xsl:for-each select=\"1 to 3\"><xsl:number/></xsl:for-each></xsl:value-of>\n\
+\x20 </xsl:function>\n\
+\x20 <xsl:template match=\"/\"><out><xsl:value-of select=\"my:f()\"/></out></xsl:template>\n\
+</xsl:transform>";
+    let xslt = Stylesheet::compile_str(sheet).expect("compile");
+    let doc = parse_str("<r/>", &ParseOptions::default()).unwrap();
+    match xslt.apply(&doc).unwrap_err() {
+        sup_xml_xslt::XsltError::Xpath(e) => {
+            assert!(e.message.contains("XTTE0990"), "msg: {}", e.message);
+            assert_eq!(e.line, Some(6), "line");
+            assert_eq!(e.column, Some(50), "column");
+            assert!(e.byte_offset.is_some(), "byte offset set");
+        }
+        other => panic!("expected positioned Xpath error, got: {other:?}"),
+    }
+}
+
+/// General coverage: an XPath error raised inside a template
+/// instruction's `select=` is attributed to that instruction's source
+/// line/column — not just xsl:number.  Here an invalid xs:integer cast
+/// fails at runtime.
+#[test]
+fn xpath_error_in_select_carries_source_position() {
+    // `<xsl:value-of>` is on line 5; its name starts at column 7.
+    let sheet = "\
+<xsl:stylesheet version=\"2.0\"\n\
+\x20 xmlns:xsl=\"http://www.w3.org/1999/XSL/Transform\"\n\
+\x20 xmlns:xs=\"http://www.w3.org/2001/XMLSchema\">\n\
+\x20 <xsl:template match=\"/\">\n\
+\x20     <xsl:value-of select=\"xs:integer('nope')\"/>\n\
+\x20 </xsl:template>\n\
+</xsl:stylesheet>";
+    let xslt = Stylesheet::compile_str(sheet).expect("compile");
+    let doc = parse_str("<r/>", &ParseOptions::default()).unwrap();
+    match xslt.apply(&doc).unwrap_err() {
+        sup_xml_xslt::XsltError::Xpath(e) => {
+            assert_eq!(e.line, Some(5), "line");
+            assert_eq!(e.column, Some(8), "column");
+            assert!(e.byte_offset.is_some(), "byte offset set");
+        }
+        other => panic!("expected positioned Xpath error, got: {other:?}"),
+    }
+}
+
+/// General coverage: an `as=` type-coercion failure on `xsl:variable`
+/// is attributed to the variable's source position.
+#[test]
+fn type_coercion_error_carries_source_position() {
+    // `<xsl:variable>` is on line 5; its name starts at column 7.
+    let sheet = "\
+<xsl:stylesheet version=\"2.0\"\n\
+\x20 xmlns:xsl=\"http://www.w3.org/1999/XSL/Transform\"\n\
+\x20 xmlns:xs=\"http://www.w3.org/2001/XMLSchema\">\n\
+\x20 <xsl:template match=\"/\">\n\
+\x20     <xsl:variable name=\"n\" as=\"xs:integer\" select=\"'banana'\"/>\n\
+\x20     <out><xsl:value-of select=\"$n\"/></out>\n\
+\x20 </xsl:template>\n\
+</xsl:stylesheet>";
+    let xslt = Stylesheet::compile_str(sheet).expect("compile");
+    let doc = parse_str("<r/>", &ParseOptions::default()).unwrap();
+    match xslt.apply(&doc).unwrap_err() {
+        sup_xml_xslt::XsltError::Xpath(e) => {
+            assert_eq!(e.line, Some(5), "line: {e:?}");
+            assert!(e.column.is_some() && e.byte_offset.is_some(), "col+offset set: {e:?}");
+        }
+        other => panic!("expected positioned Xpath error, got: {other:?}"),
+    }
+}
+
+/// A runtime error raised inside an `xsl:function` whose body is lowered
+/// to a single `xsl:sequence` (the desugaring path) is still attributed
+/// to source — the lowered body carries the originating line/column
+/// rather than dropping to an unpositioned error.
+#[test]
+fn desugared_function_body_error_carries_source_position() {
+    // The `<xsl:function>` and its `<xsl:sequence>` both sit on line 5,
+    // so the assertion holds whether the position is attributed to the
+    // function element (desugar fires) or the sequence (it doesn't).
+    let sheet = "\
+<xsl:stylesheet version=\"2.0\"\n\
+\x20 xmlns:xsl=\"http://www.w3.org/1999/XSL/Transform\"\n\
+\x20 xmlns:xs=\"http://www.w3.org/2001/XMLSchema\"\n\
+\x20 xmlns:my=\"urn:test\">\n\
+\x20 <xsl:function name=\"my:f\" as=\"xs:integer\"><xsl:sequence select=\"xs:integer('nope')\"/></xsl:function>\n\
+\x20 <xsl:template match=\"/\"><out><xsl:value-of select=\"my:f()\"/></out></xsl:template>\n\
+</xsl:stylesheet>";
+    let xslt = Stylesheet::compile_str(sheet).expect("compile");
+    let doc = parse_str("<r/>", &ParseOptions::default()).unwrap();
+    match xslt.apply(&doc).unwrap_err() {
+        sup_xml_xslt::XsltError::Xpath(e) => {
+            assert_eq!(e.line, Some(5), "line: {e:?}");
+            assert!(e.column.is_some() && e.byte_offset.is_some(), "col+offset set: {e:?}");
+        }
+        other => panic!("expected positioned Xpath error, got: {other:?}"),
+    }
+}
+
+/// Each instruction in a sequence constructor keeps its *own* source
+/// position: an error in the second of two sibling `xsl:value-of`s
+/// reports the second one's line, not the body's first line.  Guards
+/// the side-array `positions` indexing after the direct-push refactor.
+#[test]
+fn per_instruction_source_position_is_distinct() {
+    // Two value-ofs on lines 5 and 6; only the second fails.
+    let sheet = "\
+<xsl:stylesheet version=\"2.0\"\n\
+\x20 xmlns:xsl=\"http://www.w3.org/1999/XSL/Transform\"\n\
+\x20 xmlns:xs=\"http://www.w3.org/2001/XMLSchema\">\n\
+\x20 <xsl:template match=\"/\"><out>\n\
+\x20   <xsl:value-of select=\"1 + 1\"/>\n\
+\x20   <xsl:value-of select=\"xs:integer('nope')\"/>\n\
+\x20 </out></xsl:template>\n\
+</xsl:stylesheet>";
+    let xslt = Stylesheet::compile_str(sheet).expect("compile");
+    let doc = parse_str("<r/>", &ParseOptions::default()).unwrap();
+    match xslt.apply(&doc).unwrap_err() {
+        sup_xml_xslt::XsltError::Xpath(e) => {
+            assert_eq!(e.line, Some(6), "should point at the failing instruction: {e:?}");
+        }
+        other => panic!("expected positioned Xpath error, got: {other:?}"),
+    }
+}

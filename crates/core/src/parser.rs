@@ -847,6 +847,10 @@ fn drive(
                     {
                         el.full_line = raw_line;
                     }
+                    // Byte offset of the element name — the ground truth
+                    // from which line/column are derived on demand
+                    // (`scanner::compute_line_col`).  Saturates at u32.
+                    el.source_offset = name_offset.min(u32::MAX as usize) as u32;
                 }
                 // Entity-stream start tags carry their attrs pre-
                 // parsed (the lazy iterator can't surface bytes that
@@ -1260,6 +1264,21 @@ mod tests {
         let doc = parse("<r/>");
         assert_eq!(doc.root().name(), "r");
         assert!(doc.root().children().next().is_none());
+    }
+
+    #[test]
+    fn element_records_source_offset_for_line_col_derivation() {
+        // `<b>` opens at byte 9 (after "<a>\n  <b>" — the name `b` is
+        // at offset 9).  Line/column derive from that offset via
+        // `compute_line_col`, the single source of truth.
+        let xml = "<a>\n  <b/></a>";
+        let doc = parse(xml);
+        let b = doc.root().children()
+            .find(|n| n.is_element() && n.name() == "b")
+            .expect("found <b>");
+        assert_eq!(b.source_offset, 7, "byte offset of `b` name");
+        let (line, col) = crate::compute_line_col(xml.as_bytes(), b.source_offset as usize);
+        assert_eq!((line, col), (2, 4), "derived line/col");
     }
 
     // ── XML 1.0 § 3.3.3 attribute-value normalization for xmlns ──

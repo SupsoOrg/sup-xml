@@ -570,6 +570,12 @@ pub struct Node<'doc> {
     /// 1-based source line of the opening tag.  0 for nodes constructed
     /// programmatically.
     pub line:            u32,
+    /// 0-based byte offset of the opening tag's name in the source
+    /// buffer.  0 for nodes not produced by the parser.  Saturates at
+    /// `u32::MAX` for inputs past 4 GiB.  Line and column are derived
+    /// from this offset against the document's source buffer
+    /// ([`Document::source`]) — the offset is the single ground truth.
+    pub source_offset:   u32,
 }
 
 /// libxml2-shape Node (c-abi build).  Byte-exact match with `_xmlNode`
@@ -619,6 +625,13 @@ pub struct Node<'doc> {
     /// and recurses in `xmlGetLineNo`; a dedicated field is exact (no
     /// neighbour-line guessing for childless nodes like `<br/>`).
     pub full_line:       u32,
+    /// 0-based byte offset of the opening tag's name in the source
+    /// buffer.  0 for nodes not produced by the parser.  Saturates at
+    /// `u32::MAX` for inputs past 4 GiB.  Outside the libxml2 ABI
+    /// window, so it does not affect `_xmlNode` compatibility.  Line and
+    /// column are derived from this offset against the document's source
+    /// buffer ([`Document::source`]) — the offset is the ground truth.
+    pub source_offset:   u32,
 }
 
 // ── compile-time layout assertions (c-abi build) ────────────────────────────
@@ -1338,6 +1351,7 @@ impl DocumentBuilder {
                 prev_sibling:    Cell::new(None),
                 content:         Cell::new(content),
                 line:            0,
+                source_offset:   0,
             })
         }
         #[cfg(feature = "c-abi")]
@@ -1378,6 +1392,7 @@ impl DocumentBuilder {
                 _pad_extra:      [0u8; 4],
                 last_attribute:  Cell::new(None),
                 full_line:       0,
+                source_offset:   0,
             })
         }
     }
@@ -1992,6 +2007,21 @@ impl Drop for Document {
 }
 
 impl Document {
+    /// The original source bytes this document was parsed from, when the
+    /// parser stashed them (the borrow-from-source path).  `None` in
+    /// pure-copy mode or for programmatically built documents.  Element
+    /// byte offsets ([`Node::source_offset`]) index into this buffer.
+    pub fn source(&self) -> Option<&[u8]> {
+        if self.source_ptr.is_null() {
+            None
+        } else {
+            // SAFETY: `source_ptr`/`source_len` describe a `Box::leak`ed
+            // buffer owned by this `Document` (reclaimed in `Drop`), so it
+            // stays valid for `&self`.
+            Some(unsafe { std::slice::from_raw_parts(self.source_ptr, self.source_len) })
+        }
+    }
+
     /// The document root.  Lifetime is bound to `&self`, so node references
     /// cannot outlive the `Document`.
     pub fn root<'a>(&'a self) -> &'a Node<'a> {
@@ -2523,6 +2553,7 @@ impl Document {
                 prev_sibling:    Cell::new(None),
                 content:         Cell::new(content),
                 line:            0,
+                source_offset:   0,
             })
         }
         #[cfg(feature = "c-abi")]
@@ -2563,6 +2594,7 @@ impl Document {
                 _pad_extra:      [0u8; 4],
                 last_attribute:  Cell::new(None),
                 full_line:       0,
+                source_offset:   0,
             })
         }
     }
