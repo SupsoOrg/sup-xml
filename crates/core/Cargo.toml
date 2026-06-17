@@ -44,7 +44,7 @@ html = ["dep:html5ever", "dep:markup5ever"]
 c-abi = ["sup-xml-tree/c-abi"]
 
 [dependencies]
-sup-xml-tree = { path = "../tree", version = "1.1.0" }
+sup-xml-tree = { path = "../tree", version = "1.2.0" }
 # License gate: every document-parse entry point verifies a Supso license
 # certificate once per process (cached) before producing a tree.  Offline
 # hybrid (Ed25519 + ML-DSA-44) verification, no network, no C toolchain.
