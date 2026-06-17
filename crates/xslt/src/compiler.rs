@@ -2706,9 +2706,22 @@ fn compile_with_imports_inner(
             Some((src, pkg_base)) => {
                 let before_fns = acc.functions.len();
                 let before_vars = acc.global_variables.len();
+                let before_params = acc.global_params.len();
+                let before_templates = acc.templates.len();
+                let before_attr_sets = acc.attribute_sets.len();
                 *precedence_counter -= 1;
                 acc = compile_with_imports_inner(
                     &src, loader, pkg_base.as_deref(), acc, precedence_counter)?;
+                // XSLT 3.0 §3.5.1 / XTSE3058 — every component declared
+                // inside xsl:override must override (be homonymous with) a
+                // component of the used package.
+                check_override_homonyms(
+                    &up.overrides,
+                    &acc.templates[before_templates..],
+                    &acc.functions[before_fns..],
+                    &acc.global_variables[before_vars..],
+                    &acc.global_params[before_params..],
+                    &acc.attribute_sets[before_attr_sets..])?;
                 // XSLT 3.0 §3.5.2 — the using package may not reference
                 // the used package's private components.
                 if let Some(refs) = &pkg_refs {
@@ -2878,6 +2891,45 @@ fn check_used_package_privates(
 /// Merge a sub-stylesheet's components into `acc` at import precedence
 /// `prec` — used for `xsl:override` declarations (XSLT 3.0 §3.5.1),
 /// which must outrank the used package's originals.
+/// XSLT 3.0 §3.5.1 / XTSE3058 — every component declared as a child of
+/// `xsl:override` must be homonymous with (same kind and name as) a
+/// component of the used package.  `used_*` are the slices of the used
+/// package's freshly-merged components.
+fn check_override_homonyms(
+    overrides:      &StylesheetAst,
+    used_templates: &[Template],
+    used_functions: &[UserFunction],
+    used_variables: &[Variable],
+    used_params:    &[Param],
+    used_attr_sets: &[AttributeSet],
+) -> Result<(), XsltError> {
+    use std::collections::HashSet;
+    let t_names: HashSet<String> = used_templates.iter()
+        .filter_map(|t| t.name.as_ref().map(qname_key)).collect();
+    let f_names: HashSet<String> = used_functions.iter().map(|f| qname_key(&f.name)).collect();
+    let v_names: HashSet<String> = used_variables.iter().map(|v| qname_key(&v.name))
+        .chain(used_params.iter().map(|p| qname_key(&p.name))).collect();
+    let a_names: HashSet<String> = used_attr_sets.iter().map(|s| qname_key(&s.name)).collect();
+    let err = |kind: &str, name: String| Err(XsltError::InvalidStylesheet(format!(
+        "xsl:override {kind} '{name}' does not override a component of the \
+         used package (XTSE3058)")));
+    for t in &overrides.templates {
+        if let Some(n) = &t.name {
+            if !t_names.contains(&qname_key(n)) { return err("template", qname_key(n)); }
+        }
+    }
+    for f in &overrides.functions {
+        if !f_names.contains(&qname_key(&f.name)) { return err("function", qname_key(&f.name)); }
+    }
+    for v in &overrides.global_variables {
+        if !v_names.contains(&qname_key(&v.name)) { return err("variable", qname_key(&v.name)); }
+    }
+    for s in &overrides.attribute_sets {
+        if !a_names.contains(&qname_key(&s.name)) { return err("attribute-set", qname_key(&s.name)); }
+    }
+    Ok(())
+}
+
 fn merge_package_components(acc: &mut StylesheetAst, sub: &StylesheetAst, prec: i32) {
     for t in &sub.templates {
         let mut t = t.clone();
