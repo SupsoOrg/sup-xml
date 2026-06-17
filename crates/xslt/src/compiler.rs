@@ -2740,6 +2740,26 @@ fn compile_with_imports_inner(
                     let own: Vec<_> = acc.namespace_aliases.split_off(before_aliases);
                     acc.package_aliases.entry(pkg_id).or_default().extend(own);
                 }
+                // Decimal-formats are package-local (XSLT 3.0 §3.5).  The
+                // main merge above precedence-resolves the used package's
+                // formats against the principal, erasing the local
+                // values, so re-derive them from an isolated side-compile
+                // of the package.  Cheap (compile-time only) and it
+                // doesn't disturb the main merge.  The package-id counter
+                // is saved/restored so the throwaway compile's own
+                // use-packages don't perturb the real id assignment.
+                let saved_ctr = PACKAGE_ID_COUNTER.with(|c| c.get());
+                let mut tmp_prec = TOP_LEVEL_IMPORT_PRECEDENCE;
+                if let Ok(pure) = compile_with_imports_inner(
+                    &src, loader, pkg_base.as_deref(),
+                    StylesheetAst::default(), &mut tmp_prec)
+                {
+                    if !pure.decimal_formats.is_empty() {
+                        acc.package_decimal_formats.entry(pkg_id)
+                            .or_default().extend(pure.decimal_formats);
+                    }
+                }
+                PACKAGE_ID_COUNTER.with(|c| c.set(saved_ctr));
                 // XSLT 3.0 §3.5.1 / XTSE3058 — every component declared
                 // inside xsl:override must override (be homonymous with) a
                 // component of the used package.

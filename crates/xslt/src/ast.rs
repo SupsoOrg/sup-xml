@@ -1143,6 +1143,13 @@ pub struct StylesheetAst {
     /// template aliases with its own declarations, not the user's.
     pub package_aliases:    std::collections::HashMap<u32,
                                 Vec<(String, String, Option<String>)>>,
+    /// Per-package decimal-format tables, keyed by `package_id` (XSLT
+    /// 3.0 §3.5: decimal-formats are local to a package).  The principal
+    /// package's stay in [`StylesheetAst::decimal_formats`] (id 0);
+    /// `format-number` consults the table for the executing package.
+    pub package_decimal_formats: std::collections::HashMap<u32,
+                                std::collections::HashMap<String,
+                                    crate::format_number::DecimalFormat>>,
     /// `<xsl:mode>` declarations (XSLT 3.0 §6.6).  A mode named here
     /// overrides the default built-in-template behaviour for that mode
     /// via its `on-no-match` action.  The unnamed (default) mode has

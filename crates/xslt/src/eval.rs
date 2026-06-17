@@ -268,6 +268,16 @@ struct XsltBindings<'a, I: DocIndexLike> {
     source_types:         Option<&'a SourceTypes>,
 }
 
+// Every field is a shared reference or a `Copy` primitive, so the
+// binding context is itself `Copy` — letting a function call cheaply
+// derive a per-package variant (`XsltBindings { decimal_formats: …,
+// ..*self }`) that only swaps the decimal-format reference.  Hand-
+// written so the impls don't pick up a spurious `I: Copy` bound.
+impl<'a, I: DocIndexLike> Clone for XsltBindings<'a, I> {
+    fn clone(&self) -> Self { *self }
+}
+impl<'a, I: DocIndexLike> Copy for XsltBindings<'a, I> {}
+
 #[cfg(feature = "xsd")]
 impl<'a, I: DocIndexLike> XsltBindings<'a, I> {
     /// Produce the typed atomic value of `lexical` interpreted as the
@@ -702,9 +712,23 @@ impl<'a, I: DocIndexLike> XPathBindings for XsltBindings<'a, I> {
                         "cannot call abstract function {} — no implementation \
                          was supplied by the using package (XTDE3052)", name))));
                 }
-                return Some(call_user_function_pure_xpath(
-                    uf, args, self.idx, xpath_context_node, self, self.style,
-                ));
+                // A used-package function (rare) runs in its own
+                // package's static context: derive a binding context
+                // that differs only in the decimal-format table (a
+                // reference swap; XSLT 3.0 §3.5 — decimal-formats are
+                // package-local).  Principal functions (the common case)
+                // reuse `self` unchanged — zero overhead.
+                return Some(if uf.package_id == 0 {
+                    call_user_function_pure_xpath(
+                        uf, args, self.idx, xpath_context_node, self, self.style)
+                } else {
+                    let fn_bindings = XsltBindings {
+                        decimal_formats: pkg_decimal_formats(self.style, uf.package_id),
+                        ..*self
+                    };
+                    call_user_function_pure_xpath(
+                        uf, args, self.idx, xpath_context_node, &fn_bindings, self.style)
+                });
             }
         }
         // Schema-aware: `{uri}typeName(value)` is a constructor function
@@ -2073,7 +2097,7 @@ impl<'a> EvalState<'a> {
             idx:               self.idx,
             style:             self.style,
             documents:         self.documents,
-            decimal_formats:   &self.style.decimal_formats,
+            decimal_formats:   pkg_decimal_formats(self.style, self.current_package_id),
             unparsed_entities: &self.unparsed_entities,
             user_exts:            self.user_exts,
             current_group:        if self.current_group.is_empty() {
@@ -8331,6 +8355,21 @@ fn current_alias_table<'s>(state: &'s EvalState) -> &'s [(String, String, Option
     }
 }
 
+/// The decimal-format table for a given package (XSLT 3.0 §3.5 —
+/// decimal-formats are package-local).  Package 0 (principal) returns
+/// the global table directly (the hot path — no lookup); used packages
+/// consult their own table, falling back to the global if they declared
+/// none.
+fn pkg_decimal_formats(
+    style: &crate::ast::StylesheetAst, package_id: u32,
+) -> &HashMap<String, crate::format_number::DecimalFormat> {
+    if package_id == 0 {
+        &style.decimal_formats
+    } else {
+        style.package_decimal_formats.get(&package_id).unwrap_or(&style.decimal_formats)
+    }
+}
+
 fn apply_namespace_alias(state: &EvalState, name: &QName) -> QName {
     // XSLT 1.0 §7.1.1 — the source-side of an alias may be the null
     // namespace (stylesheet-prefix="#default" with no default xmlns
@@ -8606,7 +8645,7 @@ fn sort_items_for_iter(
     let namespaces  = state.namespaces;
     let keys        = state.keys;
     let documents   = state.documents;
-    let decimal_formats = &state.style.decimal_formats;
+    let decimal_formats = pkg_decimal_formats(state.style, state.current_package_id);
     let unparsed_entities = &state.unparsed_entities;
     let user_exts   = state.user_exts;
     let current_group = if state.current_group.is_empty() { None } else { Some(state.current_group.as_slice()) };
@@ -8662,7 +8701,7 @@ fn sort_group_indices(
     let namespaces = state.namespaces;
     let keys = state.keys;
     let documents = state.documents;
-    let decimal_formats = &state.style.decimal_formats;
+    let decimal_formats = pkg_decimal_formats(state.style, state.current_package_id);
     let unparsed_entities = &state.unparsed_entities;
     let user_exts = state.user_exts;
     let user_functions = (!style.functions.is_empty()).then_some(style.functions.as_slice());
@@ -8813,7 +8852,7 @@ fn with_sort_key_eval<R>(
     let namespaces  = state.namespaces;
     let keys        = state.keys;
     let documents   = state.documents;
-    let decimal_formats = &state.style.decimal_formats;
+    let decimal_formats = pkg_decimal_formats(state.style, state.current_package_id);
     let unparsed_entities = &state.unparsed_entities;
     let user_exts   = state.user_exts;
     let current_group = if state.current_group.is_empty() { None } else { Some(state.current_group.as_slice()) };
