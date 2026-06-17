@@ -135,6 +135,11 @@ pub struct Template {
     /// XSLT 3.0 `visibility=` (§3.5.2).  `None` = the package default
     /// (private).  Used to validate xsl:expose consistency.
     pub visibility:    Option<String>,
+    /// XSLT 3.0 package this template belongs to (`0` = the principal
+    /// package).  Used-package components get a non-zero id so their
+    /// package-local static context (namespace-aliases, …) applies when
+    /// the template runs (§3.5).
+    pub package_id:    u32,
 }
 
 /// `xsl:param` — typed enough to carry name + default value.  Top-
@@ -183,6 +188,9 @@ pub struct Variable {
     /// (private).  A using package can only reference this global if
     /// it is `public`/`final`/`abstract`.
     pub visibility: Option<String>,
+    /// XSLT 3.0 package this global belongs to (`0` = principal).
+    /// See [`Template::package_id`].
+    pub package_id: u32,
 }
 
 // ── instructions ────────────────────────────────────────────────
@@ -1128,6 +1136,13 @@ pub struct StylesheetAst {
     /// `xsl:expose` declarations (XSLT 3.0 §3.5.2), validated for
     /// component existence once the package is fully assembled.
     pub exposes:            Vec<ExposeDecl>,
+    /// Per-package namespace-alias tables, keyed by `package_id`
+    /// (XSLT 3.0 §3.5: aliases are local to a package).  The principal
+    /// package's aliases stay in [`StylesheetAst::namespace_aliases`]
+    /// (id 0); used packages' aliases live here so a used-package
+    /// template aliases with its own declarations, not the user's.
+    pub package_aliases:    std::collections::HashMap<u32,
+                                Vec<(String, String, Option<String>)>>,
     /// `<xsl:mode>` declarations (XSLT 3.0 §6.6).  A mode named here
     /// overrides the default built-in-template behaviour for that mode
     /// via its `on-no-match` action.  The unnamed (default) mode has
@@ -1229,4 +1244,7 @@ pub struct UserFunction {
     /// visible to a using package; `abstract` has no body and must be
     /// overridden before it can be called (XTDE3052).
     pub visibility: Option<String>,
+    /// XSLT 3.0 package this function belongs to (`0` = principal).
+    /// See [`Template::package_id`].
+    pub package_id: u32,
 }

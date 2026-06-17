@@ -43,6 +43,9 @@ thread_local! {
     /// extensions — so per-element XTSE0090 / XTSE0010 validators
     /// must defer to runtime rather than refuse the stylesheet.
     static FORWARDS_COMPAT_MODE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// Monotonic counter assigning a distinct `package_id` to each
+    /// `xsl:use-package`-d package during a compile (0 = principal).
+    static PACKAGE_ID_COUNTER: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
     /// Evaluated `<xsl:param static="yes">` values (XSLT 3.0 §3.5),
     /// keyed by expanded-name.  Available to `use-when` and shadow
     /// attributes at compile time.  Populated by the static-param
@@ -2032,7 +2035,7 @@ fn compile_function(node: &Node) -> Result<UserFunction, XsltError> {
     }
     let as_type = read_attribute(node, "as").map(str::to_string);
     let visibility = read_attribute(node, "visibility").map(str::to_string);
-    Ok(UserFunction { name: qname, params, body, as_type, visibility })
+    Ok(UserFunction { name: qname, params, body, as_type, visibility, package_id: 0 })
 }
 
 /// Walk `body` for instructions that reference the dynamic focus —
@@ -2439,6 +2442,7 @@ pub fn compile_with_imports(
     // module across the whole import/include/use-package tree has merged,
     // since a higher-precedence declaration may resolve a lower-precedence
     // clash — so the check runs here, after the recursive build.
+    PACKAGE_ID_COUNTER.with(|c| c.set(0));
     #[cfg_attr(not(feature = "xsd"), allow(unused_mut))]
     let mut ast = compile_with_imports_inner(text, loader, base, acc, precedence_counter)?;
     finalize_decimal_format_conflicts(&ast)?;
@@ -2709,9 +2713,33 @@ fn compile_with_imports_inner(
                 let before_params = acc.global_params.len();
                 let before_templates = acc.templates.len();
                 let before_attr_sets = acc.attribute_sets.len();
+                let before_aliases = acc.namespace_aliases.len();
+                // Assign this used package a distinct id.  Components it
+                // contributes directly (still id 0 after the recursive
+                // compile — its own transitively-used packages stamp
+                // theirs) get this id so their package-local static
+                // context applies at run time (XSLT 3.0 §3.5).
+                let pkg_id = PACKAGE_ID_COUNTER.with(|c| { let n = c.get() + 1; c.set(n); n });
                 *precedence_counter -= 1;
                 acc = compile_with_imports_inner(
                     &src, loader, pkg_base.as_deref(), acc, precedence_counter)?;
+                for t in &mut acc.templates[before_templates..] {
+                    if t.package_id == 0 { t.package_id = pkg_id; }
+                }
+                for f in &mut acc.functions[before_fns..] {
+                    if f.package_id == 0 { f.package_id = pkg_id; }
+                }
+                for v in &mut acc.global_variables[before_vars..] {
+                    if v.package_id == 0 { v.package_id = pkg_id; }
+                }
+                // Namespace-alias declarations are package-local: move
+                // this package's own aliases out of the global table into
+                // its per-package table (transitive packages already
+                // moved theirs during the recursion above).
+                if acc.namespace_aliases.len() > before_aliases {
+                    let own: Vec<_> = acc.namespace_aliases.split_off(before_aliases);
+                    acc.package_aliases.entry(pkg_id).or_default().extend(own);
+                }
                 // XSLT 3.0 §3.5.1 / XTSE3058 — every component declared
                 // inside xsl:override must override (be homonymous with) a
                 // component of the used package.
@@ -3113,6 +3141,7 @@ fn compile_template(node: &Node) -> Result<Template, XsltError> {
         source_path: Vec::new(),
         params, body, as_type,
         visibility: read_attribute(node, "visibility").map(str::to_string),
+        package_id: 0,
     })
 }
 
@@ -3135,7 +3164,7 @@ fn compile_variable(node: &Node) -> Result<Variable, XsltError> {
     // ancestor chain on every variable binding.
     let base_uri = effective_xml_base(node);
     let visibility = read_attribute(node, "visibility").map(str::to_string);
-    Ok(Variable { name, select, body, as_type, base_uri, visibility })
+    Ok(Variable { name, select, body, as_type, base_uri, visibility, package_id: 0 })
 }
 
 fn compile_param(node: &Node) -> Result<Param, XsltError> {
@@ -7013,6 +7042,7 @@ fn compile_simplified(root: &Node) -> Result<StylesheetAst, XsltError> {
         body: body_of_one(root, lre),
         as_type: None,
         visibility: None,
+        package_id: 0,
     };
     ast.templates.push(template);
     ast.documents_to_load = crate::walk::collect_static_document_uris(&ast);

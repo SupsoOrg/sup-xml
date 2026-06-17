@@ -1889,6 +1889,12 @@ struct EvalState<'a> {
     /// evaluation).  Updated at every template invocation and
     /// for-each iteration.
     xslt_current: NodeId,
+    /// XSLT 3.0 package whose template/function is currently executing
+    /// (`0` = principal).  Selects the package-local static context
+    /// (namespace-aliases) when emitting literal result elements.  Set
+    /// on component entry; a missed entry point simply falls back to the
+    /// principal context (the pre-package-locality behavior).
+    current_package_id: u32,
     variables:  VariableScope,
     /// Result-tree-fragment storage for variables / params bound
     /// with a body sequence-constructor.  XSLT 1.0 §11.3: such
@@ -2448,6 +2454,7 @@ pub fn apply_stylesheet_full_with_params_and_initial(
         // caller actually did supply one.
         documents:  Some(&documents),
         xslt_current: 0,
+        current_package_id: 0,
         variables:  VariableScope::default(),
         rtfs:       HashMap::new(),
         rtf_scopes: Vec::new(),
@@ -2932,6 +2939,10 @@ fn run_template_body(
     // apply-templates can update without losing the outer current.
     let prev_current = state.xslt_current;
     state.xslt_current = ctx_node;
+    // Enter this template's package so literal result elements alias
+    // with the package's own namespace-alias table (XSLT 3.0 §3.5).
+    let prev_pkg = state.current_package_id;
+    state.current_package_id = template.package_id;
     // Bind params: explicit args override defaults; XSLT 2.0
     // tunnel-marked params pull from the propagating tunnel pool
     // instead of the per-call args list.
@@ -3000,6 +3011,7 @@ fn run_template_body(
         eval_body(state, &template.body, ctx_node, pos, size)
     };
     state.xslt_current = prev_current;
+    state.current_package_id = prev_pkg;
     rtf_scope_leave(state);
     state.variables.leave();
     result
@@ -6581,6 +6593,7 @@ fn build_rtf_nodes_no_merge(
         keys: state.keys,
         documents: state.documents,
         xslt_current: state.xslt_current,
+        current_package_id: state.current_package_id,
         rtf_base_uris: state.rtf_base_uris,
         static_ctx: state.static_ctx,
         variables: std::mem::take(&mut state.variables),
@@ -7547,6 +7560,7 @@ fn build_rtf_nodes(
         keys: state.keys,
         documents: state.documents,
         xslt_current: state.xslt_current,
+        current_package_id: state.current_package_id,
         rtf_base_uris: state.rtf_base_uris,
         static_ctx: state.static_ctx,
         variables: std::mem::take(&mut state.variables),
@@ -7969,6 +7983,7 @@ fn stringify_into_string(
         keys: state.keys,
         documents: state.documents,
         xslt_current: state.xslt_current,
+        current_package_id: state.current_package_id,
         rtf_base_uris: state.rtf_base_uris,
         static_ctx: state.static_ctx,
         variables: std::mem::take(&mut state.variables),
@@ -8300,12 +8315,28 @@ fn attribute_qname(state: &EvalState, node: NodeId) -> QName {
 /// rewrite to the result-side URI.  Prefix is dropped (caller can
 /// regenerate from the URI) since the source-side prefix is no
 /// longer meaningful.
+/// The namespace-alias table for the currently-executing package
+/// (XSLT 3.0 §3.5 — aliases are package-local).  The principal package
+/// (id 0) uses the global table; used packages use their own.
+fn current_alias_table<'s>(state: &'s EvalState) -> &'s [(String, String, Option<String>)] {
+    if state.current_package_id == 0 {
+        &state.style.namespace_aliases
+    } else {
+        // A used package with no alias declarations applies no aliasing
+        // (not the principal's) — its components are package-local.
+        state.style.package_aliases
+            .get(&state.current_package_id)
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
+    }
+}
+
 fn apply_namespace_alias(state: &EvalState, name: &QName) -> QName {
     // XSLT 1.0 §7.1.1 — the source-side of an alias may be the null
     // namespace (stylesheet-prefix="#default" with no default xmlns
     // in scope at the alias declaration).  Don't short-circuit on
     // an empty URI; let the alias table decide.
-    for (style_uri, result_uri, result_prefix) in &state.style.namespace_aliases {
+    for (style_uri, result_uri, result_prefix) in current_alias_table(state) {
         if name.uri == *style_uri {
             // The alias's `result-prefix` (captured at compile time)
             // is the authoritative qualifier for the emitted name.
