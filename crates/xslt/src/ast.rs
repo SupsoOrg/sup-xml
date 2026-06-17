@@ -132,6 +132,9 @@ pub struct Template {
     /// the value produced by the body.  XTTE0505 fires when the
     /// produced value doesn't match.  `None` means no constraint.
     pub as_type:       Option<String>,
+    /// XSLT 3.0 `visibility=` (§3.5.2).  `None` = the package default
+    /// (private).  Used to validate xsl:expose consistency.
+    pub visibility:    Option<String>,
 }
 
 /// `xsl:param` — typed enough to carry name + default value.  Top-
@@ -833,6 +836,8 @@ pub struct ExposeDecl {
     /// `component=` — a kind (template / function / variable /
     /// attribute-set / mode) or `*` for all kinds.
     pub component:   String,
+    /// `visibility=` value assigned by this declaration.
+    pub visibility:  String,
     /// `names=` tokens (raw lexical form, including wildcards).
     pub names:       Vec<String>,
     /// In-scope `prefix -> uri` bindings, for resolving the tokens to

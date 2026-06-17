@@ -3060,6 +3060,7 @@ fn compile_template(node: &Node) -> Result<Template, XsltError> {
         import_precedence: TOP_LEVEL_IMPORT_PRECEDENCE,
         source_path: Vec::new(),
         params, body, as_type,
+        visibility: read_attribute(node, "visibility").map(str::to_string),
     })
 }
 
@@ -3345,6 +3346,8 @@ fn validate_expose(node: &Node) -> Result<crate::ast::ExposeDecl, XsltError> {
     }
     Ok(ExposeDecl {
         component: component.unwrap_or_default(),
+        visibility: read_attribute(node, "visibility")
+            .map(|v| v.trim().to_string()).unwrap_or_default(),
         names,
         namespaces: ns,
     })
@@ -3406,11 +3409,43 @@ pub(crate) fn validate_package_exposes(ast: &StylesheetAst) -> Result<(), XsltEr
     let attr_sets: HashSet<String> = ast.attribute_sets.iter().map(|s| qname_key(&s.name)).collect();
     let modes: HashSet<String> = ast.modes.iter()
         .filter_map(|m| m.name.as_ref().map(qname_key)).collect();
+    // Components that carry an *explicit* declared visibility, keyed by
+    // (kind, expanded-name) — for the XTSE3010 consistency check.
+    let mut declared_vis: std::collections::HashMap<(&str, String), &str> =
+        std::collections::HashMap::new();
+    for t in &ast.templates {
+        if let (Some(n), Some(v)) = (&t.name, &t.visibility) {
+            declared_vis.insert(("template", qname_key(n)), v.as_str());
+        }
+    }
+    for f in &ast.functions {
+        if let Some(v) = &f.visibility {
+            declared_vis.insert(("function", qname_key(&f.name)), v.as_str());
+        }
+    }
+    for v in &ast.global_variables {
+        if let Some(vis) = &v.visibility {
+            declared_vis.insert(("variable", qname_key(&v.name)), vis.as_str());
+        }
+    }
     for ex in &ast.exposes {
         for tok in &ex.names {
             // Wildcards never raise XTSE3020.
             if tok == "*" || tok.starts_with("*:") || tok.ends_with(":*") { continue; }
             let key = expand_component_token(tok, &ex.namespaces);
+            // XTSE3010 — a specifically-named xsl:expose whose visibility
+            // differs from the component's explicit declared visibility
+            // is inconsistent (the component declaration fixes it).
+            if !ex.visibility.is_empty() {
+                if let Some(decl) = declared_vis.get(&(ex.component.as_str(), key.clone())) {
+                    if *decl != ex.visibility {
+                        return Err(XsltError::InvalidStylesheet(format!(
+                            "xsl:expose visibility='{}' is inconsistent with the \
+                             declared visibility '{decl}' of component '{tok}' (XTSE3010)",
+                            ex.visibility)));
+                    }
+                }
+            }
             let found = match ex.component.as_str() {
                 "template"      => templates.contains(&key),
                 "function"      => functions.contains(&key),
@@ -6925,6 +6960,7 @@ fn compile_simplified(root: &Node) -> Result<StylesheetAst, XsltError> {
         params: Vec::new(),
         body: body_of_one(root, lre),
         as_type: None,
+        visibility: None,
     };
     ast.templates.push(template);
     ast.documents_to_load = crate::walk::collect_static_document_uris(&ast);
