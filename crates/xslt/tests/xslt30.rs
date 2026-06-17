@@ -1375,6 +1375,50 @@ fn has_exponent_literal(s: &str) -> bool {
 /// Attempt to run a single test case.  Returns Some(true) on pass,
 /// Some(Some(reason)) on fail, None on skip.  Stored in a flat enum so
 /// the diagnostic mode can bucket the failures.
+/// The `name=` declared on a package file's `xsl:package` root.  The
+/// catalog's `<package uri=…>` is only a label and frequently differs
+/// from the file's real package name (which is what `xsl:use-package`
+/// resolves against), so the library is keyed by both.
+fn package_internal_name(text: &str) -> Option<String> {
+    let mut reader = XmlReader::from_str(text);
+    while let Ok(ev) = reader.next() {
+        match ev {
+            Event::StartElement(tag) => {
+                let n = tag.name().to_string();
+                let local = n.rsplit(':').next().unwrap_or(&n).to_string();
+                if local == "package" {
+                    for a in tag.attrs().flatten() {
+                        if a.name() == "name" { return Some(a.value().to_string()); }
+                    }
+                    return None;
+                }
+            }
+            Event::Eof => break,
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Build the `xsl:use-package` library from a case's declared packages,
+/// keyed by both the catalog name and each file's internal package name.
+fn build_package_library(
+    case: &TestCase, ts_dir: &Path,
+) -> HashMap<String, (String, Option<String>)> {
+    let mut packages = HashMap::new();
+    for (name, file) in &case.packages {
+        let path = ts_dir.join(file);
+        if let Ok(text) = std::fs::read_to_string(&path) {
+            let base = Some(path.to_string_lossy().to_string());
+            if let Some(internal) = package_internal_name(&text) {
+                packages.insert(internal, (text.clone(), base.clone()));
+            }
+            packages.insert(name.clone(), (text, base));
+        }
+    }
+    packages
+}
+
 fn run_case_detailed(case: &TestCase, ts_dir: &Path) -> Option<Result<(), FailReason>> {
     // Three run modes, all through this timeout-safe worker harness:
     //   * default              — XSLT 1.0-level cases only (stable baseline).
@@ -1454,15 +1498,7 @@ fn run_case_detailed(case: &TestCase, ts_dir: &Path) -> Option<Result<(), FailRe
     let loader = FilesystemLoader::new(vec![ts_dir.to_path_buf()]);
     let base = ts_dir.join(stylesheet_path).to_string_lossy().to_string();
     // Build the xsl:use-package library: package name → (source, base).
-    let mut packages: std::collections::HashMap<String, (String, Option<String>)> =
-        std::collections::HashMap::new();
-    for (name, file) in &case.packages {
-        let path = ts_dir.join(file);
-        if let Ok(text) = std::fs::read_to_string(&path) {
-            packages.insert(name.clone(),
-                (text, Some(path.to_string_lossy().to_string())));
-        }
-    }
+    let packages = build_package_library(case, ts_dir);
     let compiled = if packages.is_empty() {
         Stylesheet::compile_str_with_loader(&xsl_text, &loader, Some(&base))
     } else {
@@ -2799,15 +2835,7 @@ fn dump_case() {
                 let xsl = std::fs::read_to_string(ts_dir.join(sp)).unwrap_or_default();
                 println!("--- stylesheet {sp} ---\n{xsl}");
                 let base = ts_dir.join(sp).to_string_lossy().to_string();
-                let mut packages: std::collections::HashMap<String, (String, Option<String>)> =
-                    std::collections::HashMap::new();
-                for (name, file) in &case.packages {
-                    let path = ts_dir.join(file);
-                    if let Ok(text) = std::fs::read_to_string(&path) {
-                        packages.insert(name.clone(),
-                            (text, Some(path.to_string_lossy().to_string())));
-                    }
-                }
+                let packages = build_package_library(case, ts_dir);
                 let compiled = if packages.is_empty() {
                     Stylesheet::compile_str_with_loader(&xsl, &loader, Some(&base))
                 } else {
