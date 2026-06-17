@@ -14,20 +14,27 @@
 //!    `(namespace, name)`.  Best for the common case of a few
 //!    short helpers:
 //!
-//!    ```ignore
+//!    ```no_run
+//!    # fn main() -> Result<(), Box<dyn std::error::Error>> {
 //!    use sup_xml_xslt::{Extensions, XPathValue, Stylesheet};
 //!
 //!    let mut exts = Extensions::new();
 //!    exts.register("urn:app", "double", |args| {
 //!        let n = match args.first() {
-//!            Some(XPathValue::Number(n)) => *n,
+//!            Some(XPathValue::Number(n)) => n.as_f64(),
 //!            Some(XPathValue::String(s)) => s.parse().unwrap_or(0.0),
 //!            _ => 0.0,
 //!        };
-//!        Ok(XPathValue::Number(n * 2.0))
+//!        Ok(XPathValue::Number((n * 2.0).into()))
 //!    });
-//!    let style = Stylesheet::compile_str(/* ... */).unwrap();
+//!    # let style = Stylesheet::compile_str(
+//!    #     r#"<xsl:stylesheet version="1.0" xmlns:xsl="http://www.w3.org/1999/XSL/Transform"/>"#)?;
+//!    # let source_doc =
+//!    #     sup_xml_core::parse_str("<r/>", &sup_xml_core::ParseOptions::default())?;
 //!    let result = style.apply_with_extensions(&source_doc, &exts)?;
+//!    # let _ = result;
+//!    # Ok(())
+//!    # }
 //!    ```
 //!
 //! 2. **Custom [`ExtensionFunctions`] impl** — for cases that need

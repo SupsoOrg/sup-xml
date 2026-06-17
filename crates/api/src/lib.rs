@@ -231,7 +231,8 @@ pub mod xsd {
     //!
     //! # Quick start
     //!
-    //! ```ignore
+    //! ```no_run
+    //! # fn main() -> Result<(), Box<dyn std::error::Error>> {
     //! use sup_xml::xsd::Schema;
     //!
     //! let schema = Schema::compile_str(r#"
@@ -241,6 +242,8 @@ pub mod xsd {
     //!     </xs:schema>"#)?;
     //!
     //! schema.validate_str(r#"<port xmlns="urn:demo">8080</port>"#)?;
+    //! # Ok(())
+    //! # }
     //! ```
     pub use sup_xml_core::xsd::{
         BuiltinType, FsResolver, InMemoryResolver, NoResolver, Schema, SchemaCompileError,
@@ -258,7 +261,8 @@ pub mod xslt {
     //!
     //! # Quick start
     //!
-    //! ```ignore
+    //! ```no_run
+    //! # fn main() -> Result<(), Box<dyn std::error::Error>> {
     //! use sup_xml::{parse_str, ParseOptions};
     //! use sup_xml::xslt::Stylesheet;
     //!
@@ -272,6 +276,8 @@ pub mod xslt {
     //! let doc  = parse_str("<r>hello</r>", &opts)?;
     //! let result = style.apply(&doc)?;
     //! println!("{}", result.to_string()?);
+    //! # Ok(())
+    //! # }
     //! ```
     pub use sup_xml_xslt::{
         Stylesheet, XsltError,
