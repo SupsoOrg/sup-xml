@@ -1793,6 +1793,7 @@ fn compile_top_level(node: &Node, ast: &mut StylesheetAst, pos: u32) -> Result<(
             }
         }
         "use-package"     => ast.use_packages.push(compile_use_package(node)?),
+        "expose"          => validate_expose(node)?,
         "output"          => ast.outputs.push(compile_output(node)?),
         "strip-space"     => collect_whitespace_rules(node, true,  &mut ast.whitespace_rules)?,
         "preserve-space"  => collect_whitespace_rules(node, false, &mut ast.whitespace_rules)?,
@@ -1939,7 +1940,7 @@ const KNOWN_TOP_LEVEL_XSLT_ELEMENTS: &[&str] = &[
     "function", "character-map", "import-schema",
     "result-document", "use-package", "package", "accumulator",
     "mode", "global-context-item", "merge-source", "merge-key",
-    "merge-action", "context-item",
+    "merge-action", "context-item", "expose",
 ];
 
 /// Compile an `<xsl:function name="my:foo">` declaration into a
@@ -3284,6 +3285,66 @@ fn compile_use_package(node: &Node) -> Result<UsePackage, XsltError> {
         }
     }
     Ok(UsePackage { name, version, overrides: Box::new(overrides) })
+}
+
+/// Validate an `<xsl:expose>` declaration's attribute values (XSLT 3.0
+/// §3.5.2).  Component-existence and visibility-compatibility checks
+/// need the assembled component model and are applied separately; this
+/// covers the value-level static errors (XTSE0020).
+fn validate_expose(node: &Node) -> Result<(), XsltError> {
+    if let Some(v) = read_attribute(node, "visibility") {
+        if !matches!(v.trim(),
+            "public" | "private" | "final" | "abstract" | "hidden")
+        {
+            return Err(XsltError::InvalidStylesheet(format!(
+                "xsl:expose visibility='{v}' is not a valid visibility (XTSE0020)")));
+        }
+    }
+    if let Some(c) = read_attribute(node, "component") {
+        if !matches!(c.trim(),
+            "template" | "function" | "attribute-set" | "variable" | "mode" | "*")
+        {
+            return Err(XsltError::InvalidStylesheet(format!(
+                "xsl:expose component='{c}' is not a valid component type (XTSE0020)")));
+        }
+    }
+    if let Some(names) = read_attribute(node, "names") {
+        let ns: std::collections::HashMap<String, String> =
+            collect_in_scope_namespaces(node).into_iter()
+                .filter_map(|(p, u)| p.map(|p| (p, u)))
+                .collect();
+        for tok in names.split_whitespace() {
+            validate_component_token(tok, &ns, "xsl:expose")?;
+        }
+    }
+    Ok(())
+}
+
+/// Validate a single token of an `xsl:expose` / `xsl:accept` `names=`
+/// list.  Permitted: `*`, `*:NCName`, `NCName:*`, an NCName, or an
+/// EQName (`prefix:local` or `Q{uri}local`).  The special mode tokens
+/// (`#unnamed` / `#default` / `#all`) are not permitted, and any prefix
+/// used must be in scope (XTSE0020).
+fn validate_component_token(
+    tok: &str,
+    ns: &std::collections::HashMap<String, String>,
+    who: &str,
+) -> Result<(), XsltError> {
+    if tok.starts_with('#') {
+        return Err(XsltError::InvalidStylesheet(format!(
+            "{who} names token '{tok}' is not permitted (XTSE0020)")));
+    }
+    // `*`, `*:local`, and explicit-URI EQNames carry no prefix to check.
+    if tok == "*" || tok.starts_with("*:") || tok.starts_with("Q{") {
+        return Ok(());
+    }
+    if let Some((prefix, _)) = tok.split_once(':') {
+        if !ns.contains_key(prefix) {
+            return Err(XsltError::InvalidStylesheet(format!(
+                "{who} names token '{tok}' uses undeclared prefix '{prefix}' (XTSE0020)")));
+        }
+    }
+    Ok(())
 }
 
 /// Compile an `<xsl:accumulator>` declaration (XSLT 3.0 §18).
