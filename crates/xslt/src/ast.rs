@@ -696,6 +696,13 @@ pub enum Instr {
         /// re-walking the source.  `None` prefix is the default
         /// namespace.
         format_namespaces: Vec<(Option<String>, String)>,
+        /// Serialization-parameter attributes set directly on the
+        /// `xsl:result-document` element (XSLT 2.0 §19.1) — `method`,
+        /// `encoding`, `standalone`, `indent`, `doctype-*`,
+        /// `cdata-section-elements`, … .  They override the principal
+        /// (or `format=`-named) output for this document only.  Only
+        /// fields explicitly present are `Some`.
+        output: Box<OutputSpec>,
         body: Body,
     },
     /// `xsl:namespace name="x" [select="uri"]` (XSLT 2.0 §11.7) —

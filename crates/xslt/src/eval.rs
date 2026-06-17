@@ -2667,38 +2667,28 @@ pub fn apply_stylesheet_full_with_params_and_initial(
         return Err(XsltError::InvalidStylesheet(msg));
     }
     let children = state.builder.finish();
-    // Merge xsl:output specs into one — last wins for scalar
-    // fields; cdata_section_elements concatenates.
-    let mut output = crate::ast::OutputSpec::default();
-    // Only the principal (unnamed) output declarations merge into the
-    // effective output; named definitions are resolved separately by
-    // xsl:result-document format=.
-    for o in style.outputs.iter().filter(|o| o.name.is_none()) {
-        if o.method.is_some() { output.method = o.method.clone(); }
-        if o.encoding.is_some() { output.encoding = o.encoding.clone(); }
-        if o.indent.is_some() { output.indent = o.indent; }
-        if o.omit_xml_declaration.is_some() { output.omit_xml_declaration = o.omit_xml_declaration; }
-        if o.standalone.is_some() { output.standalone = o.standalone; }
-        if o.escape_uri_attributes.is_some() { output.escape_uri_attributes = o.escape_uri_attributes; }
-        if o.include_content_type.is_some() { output.include_content_type = o.include_content_type; }
-        if o.media_type.is_some() { output.media_type = o.media_type.clone(); }
-        if o.doctype_public.is_some() { output.doctype_public = o.doctype_public.clone(); }
-        if o.doctype_system.is_some() { output.doctype_system = o.doctype_system.clone(); }
-        if o.version.is_some() { output.version = o.version.clone(); }
-        output.cdata_section_elements.extend(o.cdata_section_elements.iter().cloned());
-        output.use_character_maps.extend(o.use_character_maps.iter().cloned());
-    }
+    // The principal output is the merge of the unnamed xsl:output
+    // declarations, unless an href-less xsl:result-document overrode it
+    // with its own inline serialization parameters.
+    let merged = merge_principal_output(style);
+    let output = take_principal_output_override()
+        .map(|ov| overlay_output(&merged, &ov))
+        .unwrap_or(merged);
     let character_map = flatten_character_maps(
         &output.use_character_maps, &style.character_maps);
-    // Wrap each captured secondary document (xsl:result-document) in a
-    // ResultTree, inheriting the principal output settings.
+    // Each captured secondary document (xsl:result-document) carries its
+    // own effective output (principal/format base + inline overrides).
     let secondary = take_secondary_docs().into_iter()
-        .map(|(uri, nodes)| (uri, ResultTree {
-            children: nodes,
-            output: output.clone(),
-            character_map: character_map.clone(),
-            secondary: Vec::new(),
-        }))
+        .map(|(uri, nodes, doc_output)| {
+            let cmap = flatten_character_maps(
+                &doc_output.use_character_maps, &style.character_maps);
+            (uri, ResultTree {
+                children: nodes,
+                output: doc_output,
+                character_map: cmap,
+                secondary: Vec::new(),
+            })
+        })
         .collect();
     Ok(ResultTree { children, output, character_map, secondary })
 }
@@ -3085,8 +3075,13 @@ thread_local! {
     /// href="…"` during the current apply: `(resolved-href, body
     /// nodes)`.  Drained into [`ResultTree::secondary`] when the apply
     /// finishes; reset at apply entry so they don't leak across runs.
-    static SECONDARY_DOCS: std::cell::RefCell<Vec<(String, Vec<ResultNode>)>> =
+    static SECONDARY_DOCS: std::cell::RefCell<Vec<(String, Vec<ResultNode>, crate::ast::OutputSpec)>> =
         const { std::cell::RefCell::new(Vec::new()) };
+    /// Effective output set by an `href`-less `xsl:result-document` whose
+    /// inline serialization parameters override the principal output.
+    /// At most one (the principal URI must be written exactly once).
+    static PRINCIPAL_OUTPUT_OVERRIDE: std::cell::RefCell<Option<crate::ast::OutputSpec>> =
+        const { std::cell::RefCell::new(None) };
     /// Nesting depth of TEMPORARY output destinations — a variable /
     /// param / function body, an attribute / comment value, or a
     /// nested xsl:result-document.  `xsl:result-document` is illegal
@@ -3192,10 +3187,73 @@ impl Drop for AtomicForEachGuard {
 
 fn reset_secondary_docs() {
     SECONDARY_DOCS.with(|d| d.borrow_mut().clear());
+    PRINCIPAL_OUTPUT_OVERRIDE.with(|d| *d.borrow_mut() = None);
     TEMP_OUTPUT_DEPTH.with(|c| c.set(0));
 }
-fn take_secondary_docs() -> Vec<(String, Vec<ResultNode>)> {
+fn take_secondary_docs() -> Vec<(String, Vec<ResultNode>, crate::ast::OutputSpec)> {
     SECONDARY_DOCS.with(|d| std::mem::take(&mut *d.borrow_mut()))
+}
+fn take_principal_output_override() -> Option<crate::ast::OutputSpec> {
+    PRINCIPAL_OUTPUT_OVERRIDE.with(|d| d.borrow_mut().take())
+}
+
+/// Merge the unnamed `xsl:output` declarations into the principal
+/// output (last-wins for scalars; cdata-section-elements and
+/// use-character-maps accumulate).  Named definitions are excluded —
+/// they're resolved separately by `xsl:result-document format=`.
+fn merge_principal_output(style: &StylesheetAst) -> crate::ast::OutputSpec {
+    let mut output = crate::ast::OutputSpec::default();
+    for o in style.outputs.iter().filter(|o| o.name.is_none()) {
+        overlay_output_into(&mut output, o);
+    }
+    output
+}
+
+/// Overlay the `Some`/non-empty fields of `ov` onto `base` in place.
+fn overlay_output_into(base: &mut crate::ast::OutputSpec, ov: &crate::ast::OutputSpec) {
+    if ov.method.is_some() { base.method = ov.method.clone(); }
+    if ov.encoding.is_some() { base.encoding = ov.encoding.clone(); }
+    if ov.indent.is_some() { base.indent = ov.indent; }
+    if ov.omit_xml_declaration.is_some() { base.omit_xml_declaration = ov.omit_xml_declaration; }
+    if ov.standalone.is_some() { base.standalone = ov.standalone; }
+    if ov.escape_uri_attributes.is_some() { base.escape_uri_attributes = ov.escape_uri_attributes; }
+    if ov.include_content_type.is_some() { base.include_content_type = ov.include_content_type; }
+    if ov.media_type.is_some() { base.media_type = ov.media_type.clone(); }
+    if ov.doctype_public.is_some() { base.doctype_public = ov.doctype_public.clone(); }
+    if ov.doctype_system.is_some() { base.doctype_system = ov.doctype_system.clone(); }
+    if ov.version.is_some() { base.version = ov.version.clone(); }
+    if !ov.cdata_section_elements.is_empty() {
+        base.cdata_section_elements = ov.cdata_section_elements.clone();
+    }
+    base.use_character_maps.extend(ov.use_character_maps.iter().cloned());
+}
+
+/// Return a fresh output spec = `base` overlaid with `ov`.
+fn overlay_output(base: &crate::ast::OutputSpec, ov: &crate::ast::OutputSpec)
+    -> crate::ast::OutputSpec
+{
+    let mut out = base.clone();
+    overlay_output_into(&mut out, ov);
+    out
+}
+
+/// Compute the effective output for an `xsl:result-document`: the
+/// `format=`-named output (if any) else the principal output, overlaid
+/// with the element's own inline serialization parameters.
+fn result_document_output(
+    style: &StylesheetAst,
+    format_name: Option<&QName>,
+    inline: &crate::ast::OutputSpec,
+) -> crate::ast::OutputSpec {
+    let base = match format_name {
+        Some(name) => style.outputs.iter()
+            .find(|o| o.name.as_ref()
+                .is_some_and(|n| n.uri == name.uri && n.local == name.local))
+            .cloned()
+            .unwrap_or_else(|| merge_principal_output(style)),
+        None => merge_principal_output(style),
+    };
+    overlay_output(&base, inline)
 }
 
 fn iterate_control_active() -> bool {
@@ -3748,29 +3806,41 @@ fn eval_instr(
                 r?;
             }
         }
-        Instr::ResultDocument { href, format, format_namespaces, body } => {
+        Instr::ResultDocument { href, format, format_namespaces, output, body } => {
             use crate::result_tree::ResultBuilder;
             // XSLT 2.0 §19.1.1 / XTDE1460 — the `format=` AVT
             // expansion must be a valid EQName (a non-empty NCName,
             // or `prefix:local` whose prefix is bound in this
             // element's in-scope namespaces) AND it must name a
-            // declared `xsl:output`.  We currently track only the
-            // prefix-resolution side; an unbound prefix is the most
-            // common failure shape and is enough to catch the
-            // expected error in the W3C suite.
-            if let Some(fmt_avt) = format {
-                let fmt = render_avt(state, fmt_avt, ctx_node, pos, size)?;
-                let fmt = fmt.trim();
-                if let Some((prefix, _)) = fmt.split_once(':') {
-                    let bound = format_namespaces.iter().any(|(p, _)|
-                        p.as_deref() == Some(prefix));
-                    if !bound {
-                        return Err(XsltError::InvalidStylesheet(format!(
-                            "xsl:result-document format='{fmt}' references \
-                             undeclared prefix '{prefix}' (XTDE1460)")));
-                    }
+            // declared `xsl:output`.  Resolve it to an expanded name so
+            // the named output definition can be looked up.
+            let format_name: Option<QName> = match format {
+                Some(fmt_avt) => {
+                    let fmt = render_avt(state, fmt_avt, ctx_node, pos, size)?;
+                    let fmt = fmt.trim();
+                    let (prefix, local) = match fmt.split_once(':') {
+                        Some((p, l)) => (Some(p.to_string()), l.to_string()),
+                        None         => (None, fmt.to_string()),
+                    };
+                    let uri = match &prefix {
+                        Some(p) => match format_namespaces.iter()
+                            .find(|(pp, _)| pp.as_deref() == Some(p.as_str()))
+                        {
+                            Some((_, u)) => u.clone(),
+                            None => return Err(XsltError::InvalidStylesheet(format!(
+                                "xsl:result-document format='{fmt}' references \
+                                 undeclared prefix '{p}' (XTDE1460)"))),
+                        },
+                        None => String::new(),
+                    };
+                    Some(QName { prefix, local, uri })
                 }
-            }
+                None => None,
+            };
+            // Effective serialization for this document: the principal
+            // (or format=-named) output overlaid with the element's own
+            // inline serialization parameters.
+            let doc_output = result_document_output(state.style, format_name.as_ref(), output);
             // XTDE1480: an xsl:result-document is illegal while the current
             // output state is *temporary* — inside a variable/function
             // body, or an attribute/comment/PI value.  Being nested inside
@@ -3788,6 +3858,9 @@ fn eval_instr(
             // principal is valid only when it is still empty — otherwise two
             // sources write the same destination (XTRE1495).
             if uri.is_empty() {
+                // The element's serialization parameters override the
+                // principal output for the final result.
+                PRINCIPAL_OUTPUT_OVERRIDE.with(|d| *d.borrow_mut() = Some(doc_output));
                 if let Some(principal) = state.principal_buf.take() {
                     let secondary = std::mem::replace(&mut state.builder, principal);
                     if !state.builder.is_empty() {
@@ -3811,7 +3884,7 @@ fn eval_instr(
                 return Ok(());
             }
             // XTRE1495: two result documents must not share a URI.
-            if SECONDARY_DOCS.with(|d| d.borrow().iter().any(|(u, _)| *u == uri)) {
+            if SECONDARY_DOCS.with(|d| d.borrow().iter().any(|(u, _, _)| *u == uri)) {
                 return Err(XsltError::InvalidStylesheet(format!(
                     "two xsl:result-document instructions write to the same \
                      URI '{uri}' (XTRE1495)")));
@@ -3832,7 +3905,7 @@ fn eval_instr(
                 .unwrap_or_else(|| state.principal_buf.take().expect("principal stashed"));
             let written = std::mem::replace(&mut state.builder, restored);
             r?;
-            SECONDARY_DOCS.with(|d| d.borrow_mut().push((uri, written.finish())));
+            SECONDARY_DOCS.with(|d| d.borrow_mut().push((uri, written.finish(), doc_output)));
         }
         Instr::Try { body, catches } => {
             run_try_instr(state, body, catches, ctx_node, pos, size)?;

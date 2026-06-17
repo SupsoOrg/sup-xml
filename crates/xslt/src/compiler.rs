@@ -4197,8 +4197,13 @@ fn compile_raw_instr_into(
             } else {
                 Vec::new()
             };
+            // Capture the inline serialization-parameter attributes
+            // (method, encoding, standalone, doctype-*, …) the same way
+            // xsl:output does; they override the principal/format output
+            // for this document.
+            let output = Box::new(compile_output(node)?);
             Instr::ResultDocument {
-                href, format, format_namespaces, body: compile_body(node)?,
+                href, format, format_namespaces, output, body: compile_body(node)?,
             }
         }
 
