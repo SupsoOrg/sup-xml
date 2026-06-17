@@ -5350,13 +5350,7 @@ fn compile_copy(node: &Node) -> Result<Instr, XsltError> {
     // whether the namespace nodes of the copied element are carried to
     // the copy.  `no` keeps only the bindings its own name needs.
     let copy_namespaces = match read_attribute(node, "copy-namespaces") {
-        Some(v) => match v.trim() {
-            "yes" => true,
-            "no"  => false,
-            _ => return Err(XsltError::InvalidStylesheet(format!(
-                "xsl:copy copy-namespaces='{v}' must be 'yes' or 'no' (XTSE0020)"
-            ))),
-        },
+        Some(v) => parse_bool_attr(&v, "xsl:copy", "copy-namespaces")?,
         None => true,
     };
     Ok(Instr::Copy {
@@ -5399,13 +5393,7 @@ fn compile_copy_of(node: &Node) -> Result<Instr, XsltError> {
     // `no` copies only the namespaces needed for the element's and its
     // attributes' own names, dropping inherited in-scope declarations.
     let copy_namespaces = match read_attribute(node, "copy-namespaces") {
-        Some(v) => match v.trim() {
-            "yes" => true,
-            "no"  => false,
-            _ => return Err(XsltError::InvalidStylesheet(format!(
-                "xsl:copy-of copy-namespaces='{v}' must be 'yes' or 'no' (XTSE0020)"
-            ))),
-        },
+        Some(v) => parse_bool_attr(&v, "xsl:copy-of", "copy-namespaces")?,
         None => true,
     };
     // XSLT 1.0 §11.3: xsl:copy-of has no content.  Non-whitespace
@@ -7489,6 +7477,23 @@ fn parse_yesno_strict(s: &str, who: &str, attr: &str) -> Result<bool, XsltError>
     match s.trim() {
         "yes" | "true" | "1"  => Ok(true),
         "no"  | "false" | "0" => Ok(false),
+        other => Err(XsltError::InvalidStylesheet(format!(
+            "{who} {attr}='{other}' must be 'yes' or 'no' (XTSE0020)"
+        ))),
+    }
+}
+
+/// Parse a yes/no attribute whose lexical space is version-dependent.
+/// XSLT 2.0 accepts only `yes` / `no`; XSLT 3.0 widened the boolean
+/// type to also accept `true` / `false` / `1` / `0` (with surrounding
+/// whitespace permitted).  We key on forwards-compatible mode, which
+/// is on exactly when the stylesheet's `version` exceeds 2.0.
+fn parse_bool_attr(s: &str, who: &str, attr: &str) -> Result<bool, XsltError> {
+    match s.trim() {
+        "yes" => Ok(true),
+        "no"  => Ok(false),
+        "true"  | "1" if in_forwards_compat_mode() => Ok(true),
+        "false" | "0" if in_forwards_compat_mode() => Ok(false),
         other => Err(XsltError::InvalidStylesheet(format!(
             "{who} {attr}='{other}' must be 'yes' or 'no' (XTSE0020)"
         ))),
