@@ -2760,6 +2760,7 @@ fn compile_with_imports_inner(
                 let before_templates = acc.templates.len();
                 let before_attr_sets = acc.attribute_sets.len();
                 let before_aliases = acc.namespace_aliases.len();
+                let before_exposes = acc.exposes.len();
                 // Assign this used package a distinct id.  Components it
                 // contributes directly (still id 0 after the recursive
                 // compile — its own transitively-used packages stamp
@@ -2828,6 +2829,32 @@ fn compile_with_imports_inner(
                     let tail = acc.attribute_sets.split_off(before_attr_sets);
                     acc.attribute_sets.extend(tail.into_iter()
                         .filter(|a| !overridden_sets.contains(&qname_key(&a.name))));
+                }
+                // XSLT 3.0 §3.5.2 — a component's visibility for the using
+                // package is its declared visibility as adjusted by the used
+                // package's xsl:expose declarations.  Apply them now so the
+                // privates check below (and override homonymy) see the
+                // effective visibility, not just the local visibility=.
+                let used_exposes: Vec<crate::ast::ExposeDecl> =
+                    acc.exposes[before_exposes..].to_vec();
+                if !used_exposes.is_empty() {
+                    for f in &mut acc.functions[before_fns..] {
+                        if let Some(v) = expose_visibility(&used_exposes, "function", &f.name) {
+                            f.visibility = Some(v);
+                        }
+                    }
+                    for v in &mut acc.global_variables[before_vars..] {
+                        if let Some(vis) = expose_visibility(&used_exposes, "variable", &v.name) {
+                            v.visibility = Some(vis);
+                        }
+                    }
+                    for t in &mut acc.templates[before_templates..] {
+                        if let Some(name) = t.name.clone() {
+                            if let Some(vis) = expose_visibility(&used_exposes, "template", &name) {
+                                t.visibility = Some(vis);
+                            }
+                        }
+                    }
                 }
                 // XSLT 3.0 §3.5.2 — the using package may not reference
                 // the used package's private components.
@@ -3606,6 +3633,40 @@ fn expand_component_token(tok: &str, ns: &std::collections::HashMap<String, Stri
 }
 
 /// XSLT 3.0 §3.5.2 / XTSE3020 — every non-wildcard token in an
+/// The visibility a used-package component of the given kind and name
+/// acquires from the most specific matching `xsl:expose` declaration
+/// (XSLT 3.0 §3.5.2).  Specificity: an exact name beats a `prefix:*` /
+/// `*:local` wildcard, which beats `*`.  `None` if no declaration matches
+/// (the component keeps its locally-declared visibility).
+fn expose_visibility(
+    exposes: &[crate::ast::ExposeDecl], kind: &str, name: &QName,
+) -> Option<String> {
+    let key = qname_key(name);
+    let mut best: Option<(u8, &str)> = None;
+    for ex in exposes {
+        if ex.component != kind && ex.component != "*" { continue; }
+        for tok in &ex.names {
+            let spec: Option<u8> = if tok == "*" {
+                Some(0)
+            } else if let Some(prefix) = tok.strip_suffix(":*") {
+                ex.namespaces.get(prefix).filter(|uri| name.uri == ***uri).map(|_| 1)
+            } else if let Some(local) = tok.strip_prefix("*:") {
+                (name.local == local).then_some(1)
+            } else if expand_component_token(tok, &ex.namespaces) == key {
+                Some(2)
+            } else {
+                None
+            };
+            if let Some(s) = spec {
+                if best.map_or(true, |(bs, _)| s >= bs) {
+                    best = Some((s, ex.visibility.as_str()));
+                }
+            }
+        }
+    }
+    best.map(|(_, v)| v.to_string())
+}
+
 /// `xsl:expose` names= list must match a component of the named kind
 /// declared in the (fully assembled) package.  Run from `finalize`,
 /// after includes/imports/used-package components are merged.

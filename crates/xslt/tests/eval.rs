@@ -485,6 +485,34 @@ fn package_override_function_calls_xsl_original() {
 }
 
 #[test]
+fn package_expose_raises_visibility_for_using_package() {
+    // XSLT 3.0 §3.5.2 — a used package's xsl:expose sets the effective
+    // visibility of its components.  A variable declared with no
+    // visibility= (private) but exposed public is referenceable from the
+    // using package; without applying expose it would be rejected as
+    // private (XPST0008).
+    let base = r#"<xsl:package version="3.0" name="base"
+        xmlns:xsl="http://www.w3.org/1999/XSL/Transform">
+        <xsl:expose component="variable" names="*" visibility="public"/>
+        <xsl:variable name="v1" select="42"/>
+    </xsl:package>"#;
+    let mut packages = std::collections::HashMap::new();
+    packages.insert("base".to_string(), (base.to_string(), None));
+    let main = r#"<xsl:package version="3.0" name="main"
+        xmlns:xsl="http://www.w3.org/1999/XSL/Transform">
+        <xsl:use-package name="base"/>
+        <xsl:template name="main" visibility="public"><r><xsl:value-of select="$v1"/></r></xsl:template>
+    </xsl:package>"#;
+    let xslt = Stylesheet::compile_str_with_packages(
+        main, &sup_xml_xslt::loader::NullLoader, None, packages).unwrap();
+    let doc = parse_str("<x/>", &ParseOptions::default()).unwrap();
+    let out = xslt
+        .apply_with_params_initial_and_mode(&doc, &sup_xml_xslt::loader::NullLoader, None, &[], Some("main"), None)
+        .unwrap().to_string().unwrap();
+    assert!(out.contains("<r>42</r>"), "got: {out}");
+}
+
+#[test]
 fn document_apply_without_loader_errors_when_used() {
     // The stylesheet references document('foo.xml'); without a Loader,
     // pre-loading fails at apply time.
