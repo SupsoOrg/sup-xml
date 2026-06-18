@@ -30,6 +30,11 @@ use crate::XSLT_NS;
 // threading a `CompileCtx` through every `compile_*` free function.
 thread_local! {
     static XSLT_2_0_MODE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// True when the surrounding stylesheet declares `version="3.0"` (or
+    /// higher).  Gates recognition of the XSLT 3.0-only instructions
+    /// (`xsl:iterate`, …) and lexical forms (`true`/`false`/`1`/`0` for
+    /// boolean attributes) independently of forwards-compatible mode.
+    static XSLT_3_0_MODE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     /// Independent toggle for XPath 2.0 grammar.  Usually moves in
     /// lockstep with [`XSLT_2_0_MODE`], but the simplified-stylesheet
     /// path enables XSLT 2.0 instructions while keeping XPath 1.0
@@ -221,25 +226,33 @@ pub(crate) fn is_xslt_2_0_compile() -> bool {
     XSLT_2_0_MODE.with(|c| c.get())
 }
 
+/// True when the stylesheet being compiled declares `version="3.0"` or
+/// higher — used to recognise XSLT 3.0-only constructs.
+pub(crate) fn is_xslt_3_0_compile() -> bool {
+    XSLT_3_0_MODE.with(|c| c.get())
+}
+
 pub(crate) fn is_xpath_2_0_compile() -> bool {
     XPATH_2_0_MODE.with(|c| c.get())
 }
 
 /// RAII guard that flips the thread-local for the duration of one
 /// `compile()` call and restores the previous value when dropped.
-struct XsltModeGuard { prev_xslt: bool, prev_xpath: bool, prev_fwd: bool }
+struct XsltModeGuard { prev_xslt: bool, prev_xslt3: bool, prev_xpath: bool, prev_fwd: bool }
 impl XsltModeGuard {
-    fn enter_full(xslt_2_0: bool, xpath_2_0: bool, fwd: bool) -> Self {
+    fn enter_full(xslt_2_0: bool, xslt_3_0: bool, xpath_2_0: bool, fwd: bool) -> Self {
         let prev_xslt  = XSLT_2_0_MODE.with(|c| c.replace(xslt_2_0));
+        let prev_xslt3 = XSLT_3_0_MODE.with(|c| c.replace(xslt_3_0));
         let prev_xpath = XPATH_2_0_MODE.with(|c| c.replace(xpath_2_0));
         let prev_fwd   = FORWARDS_COMPAT_MODE.with(|c| c.replace(fwd));
-        Self { prev_xslt, prev_xpath, prev_fwd }
+        Self { prev_xslt, prev_xslt3, prev_xpath, prev_fwd }
     }
 }
 impl Drop for XsltModeGuard {
     fn drop(&mut self) {
-        let (px, py, pf) = (self.prev_xslt, self.prev_xpath, self.prev_fwd);
+        let (px, p3, py, pf) = (self.prev_xslt, self.prev_xslt3, self.prev_xpath, self.prev_fwd);
         XSLT_2_0_MODE.with(|c| c.set(px));
+        XSLT_3_0_MODE.with(|c| c.set(p3));
         XPATH_2_0_MODE.with(|c| c.set(py));
         FORWARDS_COMPAT_MODE.with(|c| c.set(pf));
     }
@@ -804,6 +817,13 @@ pub(crate) fn version_enables_2_0(version: &str) -> bool {
     matches!(major, Some(n) if n >= 2)
 }
 
+/// True for `version="3.0"` and higher — gates the XSLT 3.0-only
+/// constructs the engine recognises.
+pub(crate) fn version_enables_3_0(version: &str) -> bool {
+    let major = version.trim().split('.').next().and_then(|s| s.parse::<u32>().ok());
+    matches!(major, Some(n) if n >= 3)
+}
+
 /// True iff `s` is a valid `xs:decimal` lexical form per XSD §3.3.3:
 /// optional sign, then either a non-empty integer part, an optional
 /// `.` plus a non-empty fractional part, or both.  No exponent,
@@ -839,6 +859,19 @@ fn version_is_greater_than(version: &str, threshold: &str) -> bool {
     }
 }
 
+/// The highest XSLT version this processor implements.  A stylesheet
+/// declaring a higher version is processed in forwards-compatible mode
+/// (XSLT 3.0 §3.8) — unknown constructs are tolerated rather than
+/// rejected, and many static checks are relaxed.  We implement enough of
+/// XSLT 3.0 to claim it, so only versions beyond 3.0 trigger that mode.
+const SUPPORTED_XSLT_VERSION: &str = "3.0";
+
+/// True iff `version` exceeds the version this processor supports, i.e.
+/// the stylesheet should run in forwards-compatible mode.
+fn enables_forwards_compat(version: &str) -> bool {
+    version_is_greater_than(version, SUPPORTED_XSLT_VERSION)
+}
+
 /// True iff any ancestor of `node` carries a `version` attribute (on
 /// an XSLT-namespace element) or `xsl:version` attribute (on a
 /// literal-result-element) that exceeds the processor's supported
@@ -855,7 +888,7 @@ fn ancestor_enables_forwards_compat(node: &Node) -> bool {
                 read_xsl_attribute(n, "version")
             };
             if let Some(v) = v {
-                if version_is_greater_than(v, "2.0") { return true; }
+                if enables_forwards_compat(v) { return true; }
             }
         }
         cur = n.parent.get();
@@ -986,12 +1019,20 @@ pub fn compile(doc: &Document) -> Result<StylesheetAst, XsltError> {
         "use-when", "default-mode", "expand-text",
         "input-type-annotations",
     ];
-    let in_forwards_compat = version_is_greater_than(&ast.version, "2.0");
+    let in_forwards_compat = enables_forwards_compat(&ast.version);
     if !in_forwards_compat {
         for attr in root.attributes() {
             let name = attr.name();
             if attr.namespace.get().is_some() || name.starts_with("xmlns") || name.contains(':') { continue; }
-            if !ALLOWED_ROOT_ATTRS.contains(&name) {
+            // XSLT 3.0 §3.8.2 — a shadow attribute `_X` supplies `X`.
+            let name = if version_enables_3_0(&ast.version) {
+                name.strip_prefix('_').unwrap_or(name)
+            } else { name };
+            // xsl:package (XSLT 3.0 §3.5) additionally carries name,
+            // package-version, and declared-modes.
+            let package_attr = local == "package"
+                && matches!(name, "name" | "package-version" | "declared-modes");
+            if !ALLOWED_ROOT_ATTRS.contains(&name) && !package_attr {
                 return Err(XsltError::InvalidStylesheet(format!(
                     "xsl:{local} has unrecognised attribute '{name}' (XTSE0090)"
                 )));
@@ -1081,8 +1122,9 @@ pub fn compile(doc: &Document) -> Result<StylesheetAst, XsltError> {
     // backwards-compat cases (1.0 stylesheet, 2.0-grammar XPath)
     // can't even compile.
     let xslt_2_0_on = version_enables_2_0(&ast.version);
-    let in_fwd_compat = version_is_greater_than(&ast.version, "2.0");
-    let _xslt_mode = XsltModeGuard::enter_full(xslt_2_0_on, true, in_fwd_compat);
+    let xslt_3_0_on = version_enables_3_0(&ast.version);
+    let in_fwd_compat = enables_forwards_compat(&ast.version);
+    let _xslt_mode = XsltModeGuard::enter_full(xslt_2_0_on, xslt_3_0_on, true, in_fwd_compat);
 
     // Capture every xmlns declaration on the stylesheet root so
     // the runtime can resolve prefixes used inside XPath
@@ -1698,7 +1740,7 @@ fn compile_top_level(node: &Node, ast: &mut StylesheetAst, pos: u32) -> Result<(
     // outright.  Any errors in its attributes (including a use-when
     // that references an unknown function) are suppressed because
     // the element wouldn't have contributed anything regardless.
-    let forwards_compat = version_is_greater_than(ast.version.as_str(), "2.0");
+    let forwards_compat = enables_forwards_compat(ast.version.as_str());
     let is_unknown_xslt = is_xslt_element(node)
         && !KNOWN_TOP_LEVEL_XSLT_ELEMENTS.contains(&node.local_name());
     if forwards_compat && is_unknown_xslt {
@@ -1878,7 +1920,7 @@ fn compile_top_level(node: &Node, ast: &mut StylesheetAst, pos: u32) -> Result<(
         // which case we silently accept and ignore.
         "stylesheet" | "transform" => {
             let v = ast.version.as_str();
-            if !version_is_greater_than(v, "2.0") {
+            if !enables_forwards_compat(v) {
                 return Err(XsltError::InvalidStylesheet(format!(
                     "xsl:{} may only appear as the stylesheet root \
                      (XTSE0010)", node.local_name()
@@ -1898,7 +1940,7 @@ fn compile_top_level(node: &Node, ast: &mut StylesheetAst, pos: u32) -> Result<(
         // versions, where unknown 3.0+ elements are permissible).
         other => {
             let v = ast.version.as_str();
-            let in_forwards_compat = version_is_greater_than(v, "2.0");
+            let in_forwards_compat = enables_forwards_compat(v);
             if !in_forwards_compat {
                 return Err(XsltError::InvalidStylesheet(format!(
                     "unknown XSLT top-level element xsl:{other} \
@@ -1954,12 +1996,11 @@ fn compile_function(node: &Node) -> Result<UserFunction, XsltError> {
     // XSLT 2.0 §10.3 — closed attribute set.  XTSE0090 / XTSE0020 on
     // unrecognised attributes or invalid override= values.
     validate_xslt_only_attributes(node, "xsl:function",
-        &["name", "as", "override", "visibility", "streamability", "cache", "new-each-time"])?;
-    if let Some(v) = read_attribute(node, "override") {
-        if !matches!(v.trim(), "yes" | "no") {
-            return Err(XsltError::InvalidStylesheet(format!(
-                "xsl:function override='{v}' must be 'yes' or 'no' (XTSE0020)"
-            )));
+        &["name", "as", "override", "override-extension-function", "visibility",
+          "streamability", "cache", "new-each-time"])?;
+    for attr in ["override", "override-extension-function"] {
+        if let Some(v) = read_attribute(node, attr) {
+            parse_bool_attr(&v, "xsl:function", attr)?;
         }
     }
     let name = read_attribute(node, "name").ok_or_else(||
@@ -3016,6 +3057,26 @@ fn compile_template(node: &Node) -> Result<Template, XsltError> {
     // `validate_xslt_only_attributes`.  XSLT 3.0 adds `visibility`.
     validate_xslt_only_attributes(node, "xsl:template",
         &["match", "name", "priority", "mode", "as", "visibility"])?;
+    // XSLT 3.0 §6.3 — xsl:context-item, if present, must be the first
+    // child element of xsl:template (preceding any xsl:param) and may
+    // appear at most once.
+    if is_xslt_3_0_compile() {
+        let mut seen_other = false;
+        let mut seen_ci = false;
+        for child in node.children() {
+            if !child.is_element() { continue; }
+            if is_xslt_element(child) && child.local_name() == "context-item" {
+                if seen_other || seen_ci {
+                    return Err(XsltError::InvalidStylesheet(
+                        "xsl:context-item must be the first child of xsl:template \
+                         and may appear only once (XTSE0010)".into()));
+                }
+                seen_ci = true;
+            } else {
+                seen_other = true;
+            }
+        }
+    }
     let match_pattern = match read_attribute(node, "match") {
         Some(s) => {
             // XSLT 2.0 §5.5.2 / XTSE0340 — parenthesised expressions
@@ -3279,7 +3340,7 @@ fn select_or_body(node: &Node, who: &str) -> Result<Body, XsltError> {
 fn compile_key(node: &Node) -> Result<Key, XsltError> {
     // XSLT 2.0 §16.3 adds `collation` to the 1.0 `name`/`match`/`use`.
     validate_xslt_only_attributes(node, "xsl:key",
-        &["name", "match", "use", "collation"])?;
+        &["name", "match", "use", "collation", "composite"])?;
     let name = required_qname_attr(node, "name", "xsl:key")?;
     reject_reserved_name(&name, "xsl:key")?;
     // XSLT 2.0 §16.3 / XTSE1210 — when the optional collation= URI
@@ -3344,6 +3405,7 @@ fn compile_mode(node: &Node) -> Result<ModeDecl, XsltError> {
     validate_xslt_only_attributes(node, "xsl:mode", &[
         "name", "streamable", "on-no-match", "on-multiple-match",
         "warning-on-no-match", "warning-on-multiple-match", "typed", "visibility",
+        "use-accumulators",
     ])?;
     validate_must_be_empty(node, "xsl:mode")?;
     let name = match read_attribute(node, "name") {
@@ -3632,7 +3694,7 @@ fn compile_accumulator_rule(node: &Node) -> Result<AccumulatorRule, XsltError> {
 
 fn compile_attribute_set(node: &Node) -> Result<AttributeSet, XsltError> {
     validate_xslt_only_attributes(node, "xsl:attribute-set",
-        &["name", "use-attribute-sets"])?;
+        &["name", "use-attribute-sets", "streamable", "visibility"])?;
     let name = required_qname_attr(node, "name", "xsl:attribute-set")?;
     reject_reserved_name(&name, "xsl:attribute-set")?;
     let use_attribute_sets = parse_qname_list(
@@ -3681,7 +3743,11 @@ fn compile_output(node: &Node) -> Result<OutputSpec, XsltError> {
     let require_yesno = |n: &Node, attr: &str| -> Result<(), XsltError> {
         if in_forwards_compat_mode() { return Ok(()); }
         if let Some(v) = read_attribute(n, attr) {
-            if !matches!(v.trim(), "yes" | "no") {
+            // XSLT 3.0 widened the boolean lexical space to also accept
+            // true / false / 1 / 0.
+            let ok = matches!(v.trim(), "yes" | "no")
+                || (is_xslt_3_0_compile() && matches!(v.trim(), "true" | "false" | "1" | "0"));
+            if !ok {
                 return Err(XsltError::InvalidStylesheet(format!(
                     "xsl:output {attr}='{v}' must be 'yes' or 'no' (XTSE0020)"
                 )));
@@ -3697,7 +3763,9 @@ fn compile_output(node: &Node) -> Result<OutputSpec, XsltError> {
     require_yesno(node, "undeclare-prefixes")?;
     if !in_forwards_compat_mode() {
         if let Some(v) = read_attribute(node, "standalone") {
-            if !matches!(v.trim(), "yes" | "no" | "omit") {
+            let ok = matches!(v.trim(), "yes" | "no" | "omit")
+                || (is_xslt_3_0_compile() && matches!(v.trim(), "true" | "false" | "1" | "0"));
+            if !ok {
                 return Err(XsltError::InvalidStylesheet(format!(
                     "xsl:output standalone='{v}' must be 'yes', 'no', or 'omit' (XTSE0020)"
                 )));
@@ -3786,10 +3854,10 @@ fn compile_output(node: &Node) -> Result<OutputSpec, XsltError> {
     if let Some(m) = &out.method {
         match m.split_once(':') {
             None => if !matches!(m.as_str(),
-                "xml" | "html" | "xhtml" | "text") {
+                "xml" | "html" | "xhtml" | "text" | "json" | "adaptive") {
                 return Err(XsltError::InvalidStylesheet(format!(
                     "xsl:output method='{m}' is not one of \
-                     xml / html / xhtml / text (XTSE1570)"
+                     xml / html / xhtml / text / json / adaptive (XTSE1570)"
                 )));
             },
             Some(_) => {
@@ -4460,7 +4528,7 @@ fn compile_raw_instr_into(
                 // sequence constructor.  This is an XSLT 3.0 feature —
                 // in 2.0 the select attribute is mandatory (XTSE0010).
                 None => {
-                    if !in_forwards_compat_mode() {
+                    if !is_xslt_3_0_compile() {
                         return Err(XsltError::InvalidStylesheet(
                             "xsl:sequence requires a select attribute; a contained \
                              sequence constructor is only permitted in XSLT 3.0 \
@@ -4506,9 +4574,34 @@ fn compile_raw_instr_into(
         // declares a version greater than 2.0.  In a 2.0 stylesheet
         // they are unknown elements and (outside forwards-compat) a
         // static error, which is what the W3C suite expects.
-        "iterate"        if in_forwards_compat_mode() => compile_iterate(node)?,
-        "next-iteration" if in_forwards_compat_mode() => compile_next_iteration(node)?,
-        "break"          if in_forwards_compat_mode() => compile_break(node)?,
+        "iterate"        if is_xslt_3_0_compile() => compile_iterate(node)?,
+        "next-iteration" if is_xslt_3_0_compile() => compile_next_iteration(node)?,
+        "break"          if is_xslt_3_0_compile() => compile_break(node)?,
+        // xsl:context-item (XSLT 3.0 §6.3) declares the required context
+        // item type as the first child of xsl:template.  We validate it
+        // statically; the declared type itself is not yet enforced.
+        "context-item"   if is_xslt_3_0_compile() => {
+            validate_xslt_only_attributes(node, "xsl:context-item", &["use", "as"])?;
+            if let Some(u) = read_attribute(node, "use") {
+                if !matches!(u.trim(), "required" | "optional" | "absent") {
+                    return Err(XsltError::InvalidStylesheet(format!(
+                        "xsl:context-item use='{u}' must be 'required', 'optional', \
+                         or 'absent' (XTSE0020)"
+                    )));
+                }
+            }
+            if let Some(a) = read_attribute(node, "as") {
+                // The context item is always a single item, so its
+                // declared type may not carry an occurrence indicator.
+                if a.trim_end().ends_with(['?', '*', '+']) {
+                    return Err(XsltError::InvalidStylesheet(format!(
+                        "xsl:context-item as='{a}' must not have an occurrence \
+                         indicator (XTSE0020)"
+                    )));
+                }
+            }
+            Instr::Fallback { body: Body::new() }
+        }
         // xsl:result-document — XSLT 2.0 §19.1.  With `href=` the body
         // becomes a secondary result document written to the resolved
         // URI; without `href=` (or with an empty one) it targets the
@@ -4822,8 +4915,19 @@ fn validate_xslt_only_attributes(
         // Foreign-namespace attributes are extension data and pass
         // through.
         if attr.namespace.get().is_some() || n.contains(':') { continue; }
-        if !allowed.iter().any(|a| *a == n)
-            && !GENERIC_XSLT_ATTRS.iter().any(|a| *a == n)
+        // XSLT 3.0 §3.8.2 — a shadow attribute `_X` supplies attribute
+        // `X` through a compile-time AVT; it is permitted wherever `X`
+        // itself is.
+        let resolved = if is_xslt_3_0_compile() {
+            n.strip_prefix('_').unwrap_or(n)
+        } else { n };
+        // XSLT 3.0 §3.6 added default-mode and default-validation to the
+        // attributes permitted on any XSLT element.
+        let generic_3_0 = is_xslt_3_0_compile()
+            && matches!(resolved, "default-mode" | "default-validation");
+        if !allowed.iter().any(|a| *a == resolved)
+            && !GENERIC_XSLT_ATTRS.iter().any(|a| *a == resolved)
+            && !generic_3_0
         {
             return Err(XsltError::InvalidStylesheet(format!(
                 "{who}: unrecognised attribute '{n}' (XTSE0090)"
@@ -5744,9 +5848,15 @@ fn compile_copy_of(node: &Node) -> Result<Instr, XsltError> {
             .map(|ns| ns.href() == "http://www.w3.org/1999/XSL/Transform")
             .unwrap_or(false);
         if !in_xsl_ns && (attr.namespace.get().is_some() || n.contains(':')) { continue; }
+        // XSLT 3.0 §3.8.2 shadow attribute `_X` supplies `X`.
+        let local = if is_xslt_3_0_compile() {
+            local.strip_prefix('_').unwrap_or(local)
+        } else { local };
         let is_2_0_attr = two_oh && matches!(local,
             "copy-namespaces" | "validation" | "type");
-        if local != "select" && !is_2_0_attr {
+        // XSLT 3.0 §11.9.3 adds copy-accumulators.
+        let is_3_0_attr = is_xslt_3_0_compile() && local == "copy-accumulators";
+        if local != "select" && !is_2_0_attr && !is_3_0_attr {
             return Err(XsltError::InvalidStylesheet(format!(
                 "xsl:copy-of: unrecognised attribute '{n}' (XTSE0090)"
             )));
@@ -6044,6 +6154,7 @@ fn compile_literal_element(node: &Node) -> Result<Instr, XsltError> {
                 "exclude-result-prefixes", "extension-element-prefixes",
                 "xpath-default-namespace", "expand-text",
                 "type", "use-when", "validation", "inherit-namespaces",
+                "default-mode", "default-validation",
             ];
             if !LRE_ALLOWED_XSL_ATTRS.contains(&aname.local.as_str())
                 && !in_forwards_compat_mode()
@@ -7119,8 +7230,9 @@ fn compile_simplified(root: &Node) -> Result<StylesheetAst, XsltError> {
     // "not implemented in this build".  Drop guard restores the
     // previous mode when this fn returns.
     let xslt_2_0_on = version_enables_2_0(&ast.version);
-    let in_fwd_compat = version_is_greater_than(&ast.version, "2.0");
-    let _xslt_mode = XsltModeGuard::enter_full(xslt_2_0_on, true, in_fwd_compat);
+    let xslt_3_0_on = version_enables_3_0(&ast.version);
+    let in_fwd_compat = enables_forwards_compat(&ast.version);
+    let _xslt_mode = XsltModeGuard::enter_full(xslt_2_0_on, xslt_3_0_on, true, in_fwd_compat);
     for (prefix, uri) in root.ns_declarations() {
         match prefix {
             Some(p) => { ast.namespaces.insert(p.to_string(), uri.to_string()); }
@@ -7317,6 +7429,18 @@ fn parse_name_test_token(context_node: &Node, tok: &str) -> Result<QName, XsltEr
 
 fn parse_qname_on(context_node: &Node, s: &str) -> Result<QName, XsltError> {
     let s = s.trim();
+    // XPath 3.0 URIQualifiedName `Q{uri}local` — an EQName that gives
+    // the namespace URI directly, with no prefix.
+    if let Some(rest) = s.strip_prefix("Q{") {
+        if let Some((uri, local)) = rest.split_once('}') {
+            if is_valid_ncname(local) {
+                return Ok(QName { prefix: None, local: local.to_string(), uri: uri.to_string() });
+            }
+        }
+        return Err(XsltError::InvalidStylesheet(format!(
+            "qname '{s}' is not a valid QName (XTSE0020)"
+        )));
+    }
     let (prefix, local) = match s.split_once(':') {
         Some((p, l)) => (Some(p.to_string()), l.to_string()),
         None         => (None, s.to_string()),
@@ -7862,8 +7986,8 @@ fn parse_bool_attr(s: &str, who: &str, attr: &str) -> Result<bool, XsltError> {
     match s.trim() {
         "yes" => Ok(true),
         "no"  => Ok(false),
-        "true"  | "1" if in_forwards_compat_mode() => Ok(true),
-        "false" | "0" if in_forwards_compat_mode() => Ok(false),
+        "true"  | "1" if is_xslt_3_0_compile() => Ok(true),
+        "false" | "0" if is_xslt_3_0_compile() => Ok(false),
         other => Err(XsltError::InvalidStylesheet(format!(
             "{who} {attr}='{other}' must be 'yes' or 'no' (XTSE0020)"
         ))),
@@ -8222,6 +8346,42 @@ mod tests {
         assert!(out(r#"method="xml" undeclare-prefixes="yes" version="1.1""#).is_ok());
         assert!(out(r#"method="xml" doctype-public="-//W3C//DTD HTML 4.01//EN""#).is_ok());
         assert!(out(r#"method="xhtml" html-version="5.0""#).is_ok());
+    }
+
+    #[test]
+    fn xslt3_recognition_and_validation() {
+        let ss = |body: &str| {
+            let doc = parse(&format!(
+                r#"<xsl:stylesheet version="3.0"
+                    xmlns:xsl="http://www.w3.org/1999/XSL/Transform"
+                    xmlns:xs="http://www.w3.org/2001/XMLSchema">{body}</xsl:stylesheet>"#));
+            compile(&doc)
+        };
+        // XSLT 3.0 constructs are recognized as a supported version (no
+        // longer tolerated only via forwards-compat).
+        assert!(ss(r#"<xsl:template name="t">
+            <xsl:iterate select="1 to 3"><xsl:sequence select="."/></xsl:iterate>
+        </xsl:template>"#).is_ok(), "xsl:iterate");
+        // default-mode is a generic 3.0 attribute on any XSLT element.
+        assert!(ss(r#"<xsl:mode name="m"/>
+            <xsl:template match="/" default-mode="m"><x/></xsl:template>"#).is_ok(),
+            "default-mode");
+        // json output method (XSLT 3.0).
+        assert!(ss(r#"<xsl:output method="json"/>
+            <xsl:template match="/"><x/></xsl:template>"#).is_ok(), "method=json");
+        // EQName Q{uri}local.
+        assert!(ss(r#"<xsl:attribute-set name="Q{http://e/}s"/>
+            <xsl:template match="/"><x/></xsl:template>"#).is_ok(), "EQName");
+        // xsl:context-item static validation.
+        assert!(ss(r#"<xsl:template name="t"><xsl:context-item use="bogus"/></xsl:template>"#)
+            .is_err(), "bad use=");
+        assert!(ss(r#"<xsl:template name="t"><xsl:param name="p"/>
+            <xsl:context-item as="xs:string"/></xsl:template>"#).is_err(), "misplaced context-item");
+        assert!(ss(r#"<xsl:template name="t"><xsl:context-item as="xs:integer?"/></xsl:template>"#)
+            .is_err(), "occurrence indicator");
+        assert!(ss(r#"<xsl:template name="t">
+            <xsl:context-item use="optional" as="xs:string"/>
+            <xsl:sequence select="1"/></xsl:template>"#).is_ok(), "valid context-item");
     }
 
     // ── xsl:namespace-alias ─────────────────────────────────────
