@@ -3060,6 +3060,7 @@ fn compile_template(node: &Node) -> Result<Template, XsltError> {
     // XSLT 3.0 §6.3 — xsl:context-item, if present, must be the first
     // child element of xsl:template (preceding any xsl:param) and may
     // appear at most once.
+    let mut context_item_as: Option<String> = None;
     if is_xslt_3_0_compile() {
         let mut seen_other = false;
         let mut seen_ci = false;
@@ -3072,6 +3073,11 @@ fn compile_template(node: &Node) -> Result<Template, XsltError> {
                          and may appear only once (XTSE0010)".into()));
                 }
                 seen_ci = true;
+                // use="absent" means the template runs with no context
+                // item, so a declared type isn't enforced against one.
+                if read_attribute(child, "use").as_deref().map(str::trim) != Some("absent") {
+                    context_item_as = read_attribute(child, "as").map(|s| s.trim().to_string());
+                }
             } else {
                 seen_other = true;
             }
@@ -3228,6 +3234,7 @@ fn compile_template(node: &Node) -> Result<Template, XsltError> {
         params, body, as_type,
         visibility: read_attribute(node, "visibility").map(str::to_string),
         package_id: 0,
+        context_item_as,
     })
 }
 
@@ -7256,6 +7263,7 @@ fn compile_simplified(root: &Node) -> Result<StylesheetAst, XsltError> {
         as_type: None,
         visibility: None,
         package_id: 0,
+        context_item_as: None,
     };
     ast.templates.push(template);
     ast.documents_to_load = crate::walk::collect_static_document_uris(&ast);

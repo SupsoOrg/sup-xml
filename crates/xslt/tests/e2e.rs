@@ -2280,6 +2280,31 @@ fn xsl_number_word_form_hyphenates_compounds() {
     assert!(out.contains(r#"round="forty""#), "got: {out}");  // no trailing hyphen
 }
 
+/// XSLT 3.0 §6.3 — a template's `xsl:context-item` node-kind required
+/// type is checked against the actual context item (XTTE0590).
+#[test]
+fn xslt3_context_item_type_check() {
+    let xslt = r#"<xsl:stylesheet version="3.0"
+        xmlns:xsl="http://www.w3.org/1999/XSL/Transform">
+        <xsl:output method="xml" omit-xml-declaration="yes"/>
+        <xsl:template match="/*"><xsl:call-template name="t"/></xsl:template>
+        <xsl:template name="t">
+            <xsl:context-item as="element(foo)"/>
+            <ok/>
+        </xsl:template>
+    </xsl:stylesheet>"#;
+    // Context is the document element; the named template requires
+    // element(foo).  A <bar> root mismatches → XTTE0590.
+    let sheet = Stylesheet::compile_str(xslt).expect("compile");
+    let bad = parse_str("<bar/>", &ParseOptions::default()).expect("parse");
+    let err = sheet.apply(&bad).err().expect("type mismatch must error").to_string();
+    assert!(err.contains("XTTE0590") || err.contains("context item"), "got: {err}");
+    // A <foo> root matches → the template runs.
+    let good = parse_str("<foo/>", &ParseOptions::default()).expect("parse");
+    let out = sheet.apply(&good).expect("match must succeed").to_string().expect("ser");
+    assert!(out.contains("<ok/>"), "got: {out}");
+}
+
 /// XSLT 2.0 `xsl:analyze-string` — partitions input by regex matches,
 /// `regex-group(n)` exposes captures inside `<xsl:matching-substring>`.
 #[test]

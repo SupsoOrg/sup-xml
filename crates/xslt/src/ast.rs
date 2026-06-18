@@ -140,6 +140,11 @@ pub struct Template {
     /// package-local static context (namespace-aliases, …) applies when
     /// the template runs (§3.5).
     pub package_id:    u32,
+    /// XSLT 3.0 §6.3 `xsl:context-item` declaration on the template: the
+    /// `as=` required type (if any) of the context item the template is
+    /// invoked with.  Checked against the actual context at entry
+    /// (XTTE0590).  `None` = no declaration.
+    pub context_item_as: Option<String>,
 }
 
 /// `xsl:param` — typed enough to carry name + default value.  Top-

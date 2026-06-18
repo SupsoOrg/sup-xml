@@ -2980,6 +2980,28 @@ fn run_template_body(
     // apply-templates can update without losing the outer current.
     let prev_current = state.xslt_current;
     state.xslt_current = ctx_node;
+    // XSLT 3.0 §6.3 / XTTE0590 — when the template declares a required
+    // context-item type, the supplied context item must match it.  We
+    // can enforce node-kind types: a synthetic atomic (for-each over an
+    // atomic sequence) or a real node of the wrong kind fails.  Atomic
+    // required types over an untyped node always match under the
+    // function-conversion rules, so they are not enforced here.
+    if let Some(as_t) = &template.context_item_as {
+        if let Some(st) = parse_as_atomic_type(as_t) {
+            use sup_xml_core::xpath::ast::ItemType;
+            let node_kind = !matches!(st.item, ItemType::Atomic(_) | ItemType::Any);
+            if node_kind
+                && (in_atomic_for_each()
+                    || !node_matches_kind_test(&st.item, ctx_node, state.idx))
+            {
+                return Err(XsltError::Xpath(
+                    sup_xml_core::xpath::eval::xpath_err(format!(
+                        "context item does not match the required type '{as_t}' \
+                         declared by xsl:context-item (XTTE0590)"))
+                    .with_xpath_code("XTTE0590")));
+            }
+        }
+    }
     // Enter this template's package so literal result elements alias
     // with the package's own namespace-alias table (XSLT 3.0 §3.5).
     let prev_pkg = state.current_package_id;
