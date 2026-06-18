@@ -11511,8 +11511,9 @@ fn english_cardinal(n: i64) -> String {
         let t = (n / 10) as usize;
         let r = (n % 10) as usize;
         if r == 0 { return TENS[t].to_string(); }
-        // British / W3C-suite convention: space-separated, no hyphen.
-        return format!("{} {}", TENS[t], UNDER_20[r]);
+        // Compound numbers 21-99 are hyphenated ("forty-two"), as the
+        // W3C suite's exact-match assertions expect.
+        return format!("{}-{}", TENS[t], UNDER_20[r]);
     }
     if n < 1000 {
         let h = (n / 100) as i64;
@@ -11568,8 +11569,8 @@ fn english_ordinal(n: i64) -> String {
         let t = (n / 10) as usize;
         let r = (n % 10) as usize;
         if r == 0 { return ORDINAL_TENS[t].to_string(); }
-        // British: space-separated, no hyphen.
-        return format!("{} {}", TENS[t], ORDINAL_UNDER_20[r]);
+        // Compound ordinals 21st-99th are hyphenated ("twenty-first").
+        return format!("{}-{}", TENS[t], ORDINAL_UNDER_20[r]);
     }
     // 100+: cardinal head + ordinal tail (with "and" between
     // hundreds and tens for the British convention the W3C suite

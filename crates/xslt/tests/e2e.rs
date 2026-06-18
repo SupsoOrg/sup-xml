@@ -2138,9 +2138,7 @@ fn xpath31_format_integer() {
     assert!(out.contains(r#"alpha="ab""#), "got: {out}");       // 28 -> ab
     assert!(out.contains(r#"ALPHA="AB""#), "got: {out}");
     assert!(out.contains(r#"roman="MMXXIV""#), "got: {out}");
-    // Word form delegates to the xsl:number numberer (separator style is
-    // that numberer's concern, not format-integer's).
-    assert!(out.contains(r#"word="forty"#) && out.contains("two\""), "got: {out}");
+    assert!(out.contains(r#"word="forty-two""#), "got: {out}");
     assert!(out.contains(r#"ord="21st""#), "got: {out}");
     assert!(out.contains(r#"neg="-012""#), "got: {out}");
 }
@@ -2256,6 +2254,30 @@ fn xpath31_transform_initial_template() {
     </xsl:stylesheet>"#;
     let out = transform(xslt, "<x/>");
     assert!(out.contains("&lt;hi&gt;named&lt;/hi&gt;"), "got: {out}");
+}
+
+/// English word numbering hyphenates compound numbers 21-99
+/// ("forty-two", "twenty-first"), matching the W3C suite's exact-match
+/// assertions; the tens/units inside larger numbers hyphenate too.
+#[test]
+fn xsl_number_word_form_hyphenates_compounds() {
+    let xslt = r#"<xsl:stylesheet version="3.0"
+        xmlns:xsl="http://www.w3.org/1999/XSL/Transform">
+        <xsl:output method="xml" omit-xml-declaration="yes"/>
+        <xsl:template match="/">
+            <out card="{format-integer(42, 'w')}"
+                 title="{format-integer(21, 'Ww')}"
+                 ord="{format-integer(21, 'w;o')}"
+                 hundreds="{format-integer(123, 'w')}"
+                 round="{format-integer(40, 'w')}"/>
+        </xsl:template>
+    </xsl:stylesheet>"#;
+    let out = transform(xslt, "<x/>");
+    assert!(out.contains(r#"card="forty-two""#), "got: {out}");
+    assert!(out.contains(r#"title="Twenty-One""#), "got: {out}");
+    assert!(out.contains(r#"ord="twenty-first""#), "got: {out}");
+    assert!(out.contains(r#"hundreds="one hundred and twenty-three""#), "got: {out}");
+    assert!(out.contains(r#"round="forty""#), "got: {out}");  // no trailing hyphen
 }
 
 /// XSLT 2.0 `xsl:analyze-string` — partitions input by regex matches,
