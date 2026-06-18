@@ -266,7 +266,7 @@ fn digit_family(token: char) -> Option<DigitFamily> {
 
 /// English ordinal suffix for `n` ("st"/"nd"/"rd"/"th").  11/12/13 are
 /// the irregular `th` cases regardless of last digit.
-fn ordinal_suffix(n: i64) -> &'static str {
+pub fn ordinal_suffix(n: i64) -> &'static str {
     match (n.abs() % 100, n.abs() % 10) {
         (11..=13, _) => "th",
         (_, 1)       => "st",

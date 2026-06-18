@@ -350,6 +350,7 @@ pub(crate) fn dispatch<I: DocIndexLike>(
         "function-available" => function_available_fn(&args, idx, namespaces, user_functions),
         "key" => key_fn(&args, idx, keys, namespaces, xpath_context_node, xslt_version),
         "format-number"     => format_number_fn(&args, idx, decimal_formats, namespaces),
+        "format-integer"    => format_integer_fn(&args, idx),
         "document"          => document_fn(&args, idx, documents, dyn_doc_loader),
         "json-to-xml"       => json_to_xml_fn(&args, idx),
         "json-doc"          => json_doc_fn(&args, idx, unparsed_texts),
@@ -1080,7 +1081,7 @@ const FN_NAMES: &[&str] = &[
     // XPath 3.0 / 3.1 additions
     "parse-xml", "parse-xml-fragment", "serialize",
     "contains-token", "has-children", "innermost", "outermost",
-    "characters", "unparsed-text-lines",
+    "characters", "unparsed-text-lines", "format-integer",
     // EXSLT families dispatch by namespace, not by unqualified
     // name — those don't show up here.
 ];
@@ -1109,6 +1110,7 @@ fn builtin_arity_ok(name: &str, arity: usize) -> bool {
             => arity == 2,
         // 2 or 3 args.
         "substring" | "format-number" | "id" | "contains-token"
+        | "format-integer"
             => (2..=3).contains(&arity),
         // Exactly one arg.
         "parse-xml" | "parse-xml-fragment" | "characters"
@@ -1258,6 +1260,92 @@ fn format_number_fn<I: DocIndexLike>(
     };
     let formatted = format_number(n, &picture, &df).map_err(err)?;
     Ok(Value::String(formatted))
+}
+
+// ── format-integer() ──────────────────────────────────────────────
+
+fn format_integer_fn<I: DocIndexLike>(args: &[Value], idx: &I) -> Result<Value> {
+    if args.len() < 2 || args.len() > 3 {
+        return Err(err("format-integer() takes 2 or 3 arguments"));
+    }
+    // XPath 3.1 §4.6.1 — an empty `$value` yields a zero-length string.
+    let empty = matches!(&args[0], Value::Sequence(s) if s.is_empty())
+        || matches!(&args[0], Value::NodeSet(n) if n.is_empty());
+    if empty {
+        return Ok(Value::String(String::new()));
+    }
+    let n = value_to_number(&args[0], idx);
+    if !n.is_finite() {
+        return Err(err("format-integer(): $value is not an integer (FORG0006)"));
+    }
+    let picture = value_to_string(&args[1], idx);
+    if picture.is_empty() {
+        return Err(err("format-integer(): picture string is empty (FODF1310)"));
+    }
+    let lang = args.get(2).map(|v| value_to_string(v, idx)).filter(|s| !s.is_empty());
+    Ok(Value::String(format_integer(n as i64, &picture, lang)))
+}
+
+/// XPath 3.1 §4.6.1 — format an integer per a picture string: a primary
+/// format token, optionally followed by `;` and a format modifier.
+/// Decimal-digit patterns (with grouping separators / optional-digit
+/// signs) format numerically; other tokens reuse the xsl:number
+/// formatter (alphabetic, roman, word, Unicode digit families).
+fn format_integer(n: i64, picture: &str, lang: Option<String>) -> String {
+    let (primary, modifier) = match picture.split_once(';') {
+        Some((p, m)) => (p, m.trim()),
+        None         => (picture, ""),
+    };
+    let ordinal = modifier.starts_with('o');
+    // An `o(...)` parenthetical selects an ordinal scheme variant.
+    let ordinal_scheme = ordinal
+        .then(|| modifier.find('(').and_then(|i| modifier[i + 1..]
+            .find(')').map(|j| modifier[i + 1..i + 1 + j].to_string())))
+        .flatten();
+    if let Some(s) = format_integer_decimal(n, primary) {
+        if ordinal { return format!("{s}{}", crate::number::ordinal_suffix(n)); }
+        return s;
+    }
+    let opts = crate::number::FormatOptions { ordinal, lang, ordinal_scheme };
+    crate::number::format_one_opts(n, primary, &opts)
+}
+
+/// Format `n` against a decimal-digit pattern (mandatory digits, `#`
+/// optional digits, regular grouping separators), handling zero-padding
+/// and the sign uniformly for negatives.  Returns `None` for tokens that
+/// aren't decimal-digit patterns (e.g. `a`, `I`, `Ww`, Unicode digit
+/// families), which the xsl:number formatter handles instead.
+fn format_integer_decimal(n: i64, pattern: &str) -> Option<String> {
+    if !pattern.chars().any(|c| c.is_ascii_digit()) { return None; }
+    // Letters disqualify it as a decimal pattern (it's a numbering token).
+    if pattern.chars().any(|c| c.is_alphabetic()) { return None; }
+    let mut mandatory = 0usize;
+    let mut digit_pos = 0usize;
+    let mut sep_char: Option<char> = None;
+    let mut sep_at:   Vec<usize> = Vec::new();
+    for c in pattern.chars().rev() {
+        if c == '#' { digit_pos += 1; }
+        else if c.is_ascii_digit() { mandatory += 1; digit_pos += 1; }
+        else { sep_char = Some(c); sep_at.push(digit_pos); }
+    }
+    let mut digits = n.unsigned_abs().to_string();
+    if digits.len() < mandatory {
+        digits = format!("{digits:0>mandatory$}");
+    }
+    let body = match (regular_grouping_size(&sep_at), sep_char) {
+        (Some(g), Some(sc)) => crate::number::apply_grouping(&digits, &sc.to_string(), g),
+        _                   => digits,
+    };
+    Some(if n < 0 { format!("-{body}") } else { body })
+}
+
+/// The grouping interval if the separator positions (counted in digit
+/// places from the right) are all positive multiples of the smallest —
+/// i.e. regular grouping like `#,###,###`.  `None` for irregular
+/// grouping, which we render without separators.
+fn regular_grouping_size(sep_at: &[usize]) -> Option<usize> {
+    let g = *sep_at.iter().filter(|&&p| p > 0).min()?;
+    sep_at.iter().all(|&p| p > 0 && p % g == 0).then_some(g)
 }
 
 // ── key() ─────────────────────────────────────────────────────────

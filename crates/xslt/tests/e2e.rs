@@ -2114,6 +2114,37 @@ fn xslt3_message_error_code() {
         "expected error-code surfaced: {err}");
 }
 
+/// XPath 3.1 `fn:format-integer($value, $picture [, $lang])` — decimal
+/// padding/grouping, alphabetic, roman, word, and ordinal pictures.
+#[test]
+fn xpath31_format_integer() {
+    let xslt = r#"<xsl:stylesheet version="3.0"
+        xmlns:xsl="http://www.w3.org/1999/XSL/Transform">
+        <xsl:output method="xml" omit-xml-declaration="yes"/>
+        <xsl:template match="/">
+            <out pad="{format-integer(5, '001')}"
+                 group="{format-integer(1234567, '#,##0')}"
+                 alpha="{format-integer(28, 'a')}"
+                 ALPHA="{format-integer(28, 'A')}"
+                 roman="{format-integer(2024, 'I')}"
+                 word="{format-integer(42, 'w')}"
+                 ord="{format-integer(21, '1;o')}"
+                 neg="{format-integer(-12, '000')}"/>
+        </xsl:template>
+    </xsl:stylesheet>"#;
+    let out = transform(xslt, "<x/>");
+    assert!(out.contains(r#"pad="005""#), "got: {out}");
+    assert!(out.contains(r#"group="1,234,567""#), "got: {out}");
+    assert!(out.contains(r#"alpha="ab""#), "got: {out}");       // 28 -> ab
+    assert!(out.contains(r#"ALPHA="AB""#), "got: {out}");
+    assert!(out.contains(r#"roman="MMXXIV""#), "got: {out}");
+    // Word form delegates to the xsl:number numberer (separator style is
+    // that numberer's concern, not format-integer's).
+    assert!(out.contains(r#"word="forty"#) && out.contains("two\""), "got: {out}");
+    assert!(out.contains(r#"ord="21st""#), "got: {out}");
+    assert!(out.contains(r#"neg="-012""#), "got: {out}");
+}
+
 /// XSLT 2.0 `xsl:analyze-string` — partitions input by regex matches,
 /// `regex-group(n)` exposes captures inside `<xsl:matching-substring>`.
 #[test]
