@@ -2836,6 +2836,29 @@ fn compile_with_imports_inner(
                     let used_vars = acc.global_variables[before_vars..].to_vec();
                     check_used_package_privates(refs, &used_fns, &used_vars)?;
                 }
+                // XSLT 3.0 §3.5.1 — `xsl:original` inside an override
+                // refers to the overridden component.  Expose each
+                // overridden used-package function under the name
+                // `xsl:original` (resolved by name + arity) so the
+                // override body can invoke it.  Added after the
+                // privates check so the synthetic name isn't mistaken
+                // for a private reference.
+                let mut orig_fns: Vec<crate::ast::UserFunction> = Vec::new();
+                for ov in &up.overrides.functions {
+                    let (key, arity) = (qname_key(&ov.name), ov.params.len());
+                    if let Some(orig) = acc.functions[before_fns..].iter()
+                        .find(|f| qname_key(&f.name) == key && f.params.len() == arity)
+                    {
+                        let mut clone = orig.clone();
+                        clone.name = QName {
+                            prefix: Some("xsl".into()), local: "original".into(),
+                            uri: "http://www.w3.org/1999/XSL/Transform".into(),
+                        };
+                        clone.visibility = None;
+                        orig_fns.push(clone);
+                    }
+                }
+                acc.functions.extend(orig_fns);
             }
             None => return Err(XsltError::InvalidStylesheet(format!(
                 "xsl:use-package: no package named '{}' is available (XTSE3000)",

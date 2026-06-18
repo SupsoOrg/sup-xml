@@ -448,6 +448,43 @@ fn package_override_attribute_set_replaces_original() {
 }
 
 #[test]
+fn package_override_function_calls_xsl_original() {
+    // XSLT 3.0 §3.5.1 — within xsl:override, xsl:original invokes the
+    // overridden component (the used package's version).
+    let base = r#"<xsl:package version="3.0" name="base"
+        xmlns:xsl="http://www.w3.org/1999/XSL/Transform"
+        xmlns:xs="http://www.w3.org/2001/XMLSchema" xmlns:p="urn:p">
+        <xsl:function name="p:f" as="xs:string" visibility="public">
+            <xsl:param name="x" as="xs:string"/>
+            <xsl:sequence select="concat('base:', $x)"/>
+        </xsl:function>
+    </xsl:package>"#;
+    let mut packages = std::collections::HashMap::new();
+    packages.insert("base".to_string(), (base.to_string(), None));
+    let main = r#"<xsl:package version="3.0" name="main"
+        xmlns:xsl="http://www.w3.org/1999/XSL/Transform"
+        xmlns:xs="http://www.w3.org/2001/XMLSchema" xmlns:p="urn:p">
+        <xsl:use-package name="base">
+            <xsl:override>
+                <xsl:function name="p:f" as="xs:string" visibility="public">
+                    <xsl:param name="x" as="xs:string"/>
+                    <xsl:sequence select="concat('over:', xsl:original($x))"/>
+                </xsl:function>
+            </xsl:override>
+        </xsl:use-package>
+        <xsl:template name="main" visibility="public"><r><xsl:value-of select="p:f('hi')"/></r></xsl:template>
+    </xsl:package>"#;
+    let xslt = Stylesheet::compile_str_with_packages(
+        main, &sup_xml_xslt::loader::NullLoader, None, packages).unwrap();
+    let doc = parse_str("<x/>", &ParseOptions::default()).unwrap();
+    let out = xslt
+        .apply_with_params_initial_and_mode(&doc, &sup_xml_xslt::loader::NullLoader, None, &[], Some("main"), None)
+        .unwrap().to_string().unwrap();
+    // The override wraps the result of the overridden (base) function.
+    assert!(out.contains("over:base:hi"), "got: {out}");
+}
+
+#[test]
 fn document_apply_without_loader_errors_when_used() {
     // The stylesheet references document('foo.xml'); without a Loader,
     // pre-loading fails at apply time.
