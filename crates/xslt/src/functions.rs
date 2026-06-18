@@ -354,6 +354,7 @@ pub(crate) fn dispatch<I: DocIndexLike>(
         "document"          => document_fn(&args, idx, documents, dyn_doc_loader),
         "json-to-xml"       => json_to_xml_fn(&args, idx),
         "json-doc"          => json_doc_fn(&args, idx, unparsed_texts),
+        "transform"         => transform_fn(&args, idx),
         "unparsed-entity-uri" => unparsed_entity_uri_fn(
             &args, idx, unparsed_entities, xpath_context_node),
         "unparsed-entity-public-id" =>
@@ -1082,7 +1083,7 @@ const FN_NAMES: &[&str] = &[
     "parse-xml", "parse-xml-fragment", "serialize",
     "contains-token", "has-children", "innermost", "outermost",
     "characters", "unparsed-text-lines", "format-integer", "parse-ietf-date",
-    "random-number-generator",
+    "random-number-generator", "transform",
     // EXSLT families dispatch by namespace, not by unqualified
     // name — those don't show up here.
 ];
@@ -1115,6 +1116,7 @@ fn builtin_arity_ok(name: &str, arity: usize) -> bool {
             => (2..=3).contains(&arity),
         // Exactly one arg.
         "parse-xml" | "parse-xml-fragment" | "characters" | "parse-ietf-date"
+        | "transform"
             => arity == 1,
         // 1 or 2 args.
         "unparsed-text-lines"
@@ -1261,6 +1263,117 @@ fn format_number_fn<I: DocIndexLike>(
     };
     let formatted = format_number(n, &picture, &df).map_err(err)?;
     Ok(Value::String(formatted))
+}
+
+// ── transform() ───────────────────────────────────────────────────
+
+/// Parse XML text into a namespace-aware source document for a nested
+/// transform.
+fn parse_transform_source(xml: &str) -> Result<sup_xml_tree::dom::Document> {
+    sup_xml_core::parse_str(xml, &sup_xml_core::ParseOptions {
+        namespace_aware: true, ..Default::default()
+    }).map_err(|e| err(format!("transform(): cannot parse source/result: {e}")))
+}
+
+/// Deliver one result tree per the `delivery-format` option: `serialized`
+/// → the serialized string; `document` (default) → a document node
+/// grafted into the running index.
+fn deliver_transform_result<I: DocIndexLike>(
+    tree: &crate::result_tree::ResultTree, format: &str, idx: &I,
+) -> Result<Value> {
+    let serialized = tree.to_string()
+        .map_err(|e| err(format!("transform(): serialization failed: {e}")))?;
+    match format {
+        "serialized" => Ok(Value::String(serialized)),
+        "document" | "" => {
+            let doc = parse_transform_source(&serialized)?;
+            match idx.graft_dynamic_document(&doc) {
+                Some(id) => Ok(Value::NodeSet(vec![id])),
+                None => Err(err("transform(): delivery-format='document' is not \
+                                 supported in this evaluation context")),
+            }
+        }
+        other => Err(err(format!(
+            "transform(): unsupported delivery-format {other:?} (only 'document' \
+             and 'serialized')"))),
+    }
+}
+
+/// `fn:transform($options as map(*))` (XPath 3.1 §14.7.4) — run a nested
+/// transformation.  Supported options: `stylesheet-text` / `stylesheet-node`,
+/// `source-node`, `stylesheet-params`, `initial-template`, `initial-mode`,
+/// `delivery-format` (`document` | `serialized`).  The principal result is
+/// returned under the key `output`; secondary results under their URIs.
+fn transform_fn<I: DocIndexLike>(args: &[Value], idx: &I) -> Result<Value> {
+    if args.len() != 1 {
+        return Err(err("transform() takes exactly 1 argument"));
+    }
+    let Value::Map(opts) = &args[0] else {
+        return Err(err("transform(): the argument must be a map (FOXT0002)"));
+    };
+    let get = |key: &str| opts.iter()
+        .find(|(k, _)| value_to_string(k, idx) == key).map(|(_, v)| v);
+    let node_arg = |v: &Value| match v {
+        Value::NodeSet(ns) => ns.first().copied(),
+        _ => None,
+    };
+
+    // Stylesheet: from text, or by serializing a supplied node.
+    let style_text = if let Some(v) = get("stylesheet-text") {
+        value_to_string(v, idx)
+    } else if let Some(id) = get("stylesheet-node").and_then(node_arg) {
+        sup_xml_core::xpath::eval::node_to_xml_string(idx, id)
+    } else if get("stylesheet-location").is_some() {
+        return Err(err("transform(): stylesheet-location is not supported; use \
+                        stylesheet-text or stylesheet-node"));
+    } else {
+        return Err(err("transform(): no stylesheet supplied (FOXT0002)"));
+    };
+    let stylesheet = crate::Stylesheet::compile_str(&style_text)
+        .map_err(|e| err(format!("transform(): stylesheet compilation failed: {e}")))?;
+
+    // Source: serialize the supplied node and re-parse; synthesize an
+    // empty document when only a named entry point is used.
+    let source_doc = match get("source-node").and_then(node_arg) {
+        Some(id) => parse_transform_source(&sup_xml_core::xpath::eval::node_to_xml_string(idx, id))?,
+        None     => parse_transform_source("<transform-no-source/>")?,
+    };
+
+    // Stylesheet parameters (matched by local name; values stringified).
+    let local_of = |v: &Value| {
+        let s = value_to_string(v, idx);
+        let after_brace = s.rsplit('}').next().unwrap_or(&s);
+        after_brace.rsplit(':').next().unwrap_or(after_brace).to_string()
+    };
+    let params: Vec<(String, String)> = match get("stylesheet-params") {
+        Some(Value::Map(pm)) => pm.iter()
+            .map(|(k, v)| (local_of(k), value_to_string(v, idx))).collect(),
+        _ => Vec::new(),
+    };
+    let initial_template = get("initial-template").map(local_of);
+    let initial_mode     = get("initial-mode").map(local_of);
+    let delivery = get("delivery-format")
+        .map(|v| value_to_string(v, idx)).unwrap_or_default();
+
+    // Run the nested transform, isolating the enclosing apply's
+    // thread-local state.
+    let result = {
+        let _guard = crate::eval::NestedApplyGuard::enter();
+        stylesheet.apply_with_params_initial_and_mode(
+            &source_doc, &crate::loader::NullLoader, None,
+            &params, initial_template.as_deref(), initial_mode.as_deref(),
+        ).map_err(|e| err(format!("transform(): transformation failed: {e}")))?
+    };
+
+    let mut entries: Vec<(Value, Value)> = vec![(
+        Value::String("output".into()),
+        deliver_transform_result(&result, &delivery, idx)?,
+    )];
+    for (uri, sub) in &result.secondary {
+        entries.push((Value::String(uri.clone()),
+            deliver_transform_result(sub, &delivery, idx)?));
+    }
+    Ok(Value::Map(Box::new(entries)))
 }
 
 // ── format-integer() ──────────────────────────────────────────────

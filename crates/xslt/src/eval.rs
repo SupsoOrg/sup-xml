@@ -3143,6 +3143,53 @@ thread_local! {
     static TEMP_OUTPUT_DEPTH: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
 }
 
+/// RAII guard isolating the per-apply thread-local evaluation state
+/// while a *nested* transformation runs (`fn:transform`).  The inner
+/// `Stylesheet::apply` resets and drains these (especially
+/// `SECONDARY_DOCS`); without isolation it would clobber the state the
+/// enclosing transformation is mid-flight using.  `enter` saves the
+/// caller's state and installs clean defaults; `Drop` restores it.
+pub(crate) struct NestedApplyGuard {
+    iterate:            Option<IterateControl>,
+    context_undefined:  bool,
+    schema_suppressed:  bool,
+    atomic_depth:       u32,
+    secondary:          Vec<(String, Vec<ResultNode>, crate::ast::OutputSpec)>,
+    principal_override: Option<crate::ast::OutputSpec>,
+    temp_depth:         u32,
+}
+
+impl NestedApplyGuard {
+    pub(crate) fn enter() -> Self {
+        let g = NestedApplyGuard {
+            iterate:            ITERATE_CONTROL.with(|c| c.borrow_mut().take()),
+            context_undefined:  CONTEXT_UNDEFINED.with(|c| c.get()),
+            schema_suppressed:  SCHEMA_SUPPRESSED.with(|c| c.get()),
+            atomic_depth:       ATOMIC_FOR_EACH_DEPTH.with(|c| c.get()),
+            secondary:          SECONDARY_DOCS.with(|c| std::mem::take(&mut *c.borrow_mut())),
+            principal_override: PRINCIPAL_OUTPUT_OVERRIDE.with(|c| c.borrow_mut().take()),
+            temp_depth:         TEMP_OUTPUT_DEPTH.with(|c| c.get()),
+        };
+        CONTEXT_UNDEFINED.with(|c| c.set(false));
+        SCHEMA_SUPPRESSED.with(|c| c.set(false));
+        ATOMIC_FOR_EACH_DEPTH.with(|c| c.set(0));
+        TEMP_OUTPUT_DEPTH.with(|c| c.set(0));
+        g
+    }
+}
+
+impl Drop for NestedApplyGuard {
+    fn drop(&mut self) {
+        ITERATE_CONTROL.with(|c| *c.borrow_mut() = self.iterate.take());
+        CONTEXT_UNDEFINED.with(|c| c.set(self.context_undefined));
+        SCHEMA_SUPPRESSED.with(|c| c.set(self.schema_suppressed));
+        ATOMIC_FOR_EACH_DEPTH.with(|c| c.set(self.atomic_depth));
+        SECONDARY_DOCS.with(|c| *c.borrow_mut() = std::mem::take(&mut self.secondary));
+        PRINCIPAL_OUTPUT_OVERRIDE.with(|c| *c.borrow_mut() = self.principal_override.take());
+        TEMP_OUTPUT_DEPTH.with(|c| c.set(self.temp_depth));
+    }
+}
+
 /// RAII guard marking a temporary output destination for the duration
 /// of a body evaluation (used by the temp-tree builders so a contained
 /// `xsl:result-document` reports XTDE1480).

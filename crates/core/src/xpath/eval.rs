@@ -5748,6 +5748,16 @@ fn collect_node_ids(v: &Value) -> Vec<NodeId> {
     }
 }
 
+/// Serialize a node (and descendants) to XML markup — the public entry
+/// behind `fn:serialize()`'s xml method, also used by the XSLT layer's
+/// `fn:transform` to bridge an in-index node back to parseable text.
+pub fn node_to_xml_string<I: DocIndexLike>(idx: &I, id: NodeId) -> String {
+    let mut out = String::new();
+    let mut scope: Vec<(String, String)> = Vec::new();
+    serialize_node_xml(idx, id, &mut scope, &mut out);
+    out
+}
+
 /// Serialize a node (and descendants) addressed by `idx` + `NodeId` to
 /// XML markup, for `fn:serialize()`'s xml/html/adaptive methods.  Walks
 /// the index abstraction so it works uniformly over source nodes, RTF

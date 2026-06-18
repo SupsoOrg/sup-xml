@@ -2198,6 +2198,66 @@ fn xpath31_random_number_generator() {
     assert!(out.contains(r#"permstable="true""#), "got: {out}");    // same generator → same order
 }
 
+/// XPath 3.1 `fn:transform($options)` runs a nested transformation and
+/// returns a result map keyed by `output`.  Exercises stylesheet-text,
+/// source-node, delivery-format, stylesheet-params, and initial-template.
+#[test]
+fn xpath31_transform() {
+    let xslt = r#"<xsl:stylesheet version="3.0"
+        xmlns:xsl="http://www.w3.org/1999/XSL/Transform"
+        xmlns:map="http://www.w3.org/2005/xpath-functions/map">
+        <xsl:output method="xml" omit-xml-declaration="yes"/>
+        <xsl:variable name="ss" select="'&lt;xsl:stylesheet version=&quot;3.0&quot; xmlns:xsl=&quot;http://www.w3.org/1999/XSL/Transform&quot;&gt;&lt;xsl:param name=&quot;p&quot;/&gt;&lt;xsl:template match=&quot;/data&quot;&gt;&lt;r n=&quot;{count(item)}&quot; p=&quot;{$p}&quot;/&gt;&lt;/xsl:template&gt;&lt;/xsl:stylesheet&gt;'"/>
+        <xsl:template match="/">
+            <!-- serialized delivery: the principal result is a string -->
+            <xsl:variable name="ser" select="transform(map{
+                'stylesheet-text': $ss,
+                'source-node': /,
+                'delivery-format': 'serialized',
+                'stylesheet-params': map{ 'p': 'hi' }
+            })"/>
+            <!-- document delivery: the principal result is a node -->
+            <xsl:variable name="doc" select="transform(map{
+                'stylesheet-text': $ss,
+                'source-node': /
+            })"/>
+            <out ser="{$ser?output}"
+                 docn="{$doc?output/r/@n}"
+                 docp="{$doc?output/r/@p}"/>
+        </xsl:template>
+    </xsl:stylesheet>"#;
+    let out = transform(xslt, r#"<data><item/><item/><item/></data>"#);
+    // serialized principal result reflects the param and the node count
+    // (it also carries an XML declaration — the nested stylesheet didn't
+    // request omit-xml-declaration).
+    assert!(out.contains(r#"&lt;r n=&quot;3&quot; p=&quot;hi&quot;/&gt;"#),
+        "serialized result wrong: {out}");
+    // document principal result is navigable; default param is empty.
+    assert!(out.contains(r#"docn="3""#), "got: {out}");
+    assert!(out.contains(r#"docp="""#), "got: {out}");
+}
+
+/// `fn:transform` with `initial-template` invokes a named template with
+/// no source document required.
+#[test]
+fn xpath31_transform_initial_template() {
+    let xslt = r#"<xsl:stylesheet version="3.0"
+        xmlns:xsl="http://www.w3.org/1999/XSL/Transform"
+        xmlns:map="http://www.w3.org/2005/xpath-functions/map">
+        <xsl:output method="xml" omit-xml-declaration="yes"/>
+        <xsl:variable name="ss" select="'&lt;xsl:stylesheet version=&quot;3.0&quot; xmlns:xsl=&quot;http://www.w3.org/1999/XSL/Transform&quot;&gt;&lt;xsl:output omit-xml-declaration=&quot;yes&quot;/&gt;&lt;xsl:template name=&quot;go&quot;&gt;&lt;hi&gt;named&lt;/hi&gt;&lt;/xsl:template&gt;&lt;/xsl:stylesheet&gt;'"/>
+        <xsl:template match="/">
+            <out><xsl:value-of select="transform(map{
+                'stylesheet-text': $ss,
+                'initial-template': 'go',
+                'delivery-format': 'serialized'
+            })?output"/></out>
+        </xsl:template>
+    </xsl:stylesheet>"#;
+    let out = transform(xslt, "<x/>");
+    assert!(out.contains("&lt;hi&gt;named&lt;/hi&gt;"), "got: {out}");
+}
+
 /// XSLT 2.0 `xsl:analyze-string` — partitions input by regex matches,
 /// `regex-group(n)` exposes captures inside `<xsl:matching-substring>`.
 #[test]
