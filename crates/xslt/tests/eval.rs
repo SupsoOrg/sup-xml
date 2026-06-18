@@ -414,6 +414,40 @@ fn accumulator_applies_to_doc_loaded_document() {
 }
 
 #[test]
+fn package_override_attribute_set_replaces_original() {
+    // XSLT 3.0 §3.5.1 — an xsl:override of an attribute-set replaces the
+    // used package's definition; it must not merge additively.
+    let base = r#"<xsl:package version="3.0" name="base"
+        xmlns:xsl="http://www.w3.org/1999/XSL/Transform">
+        <xsl:attribute-set name="s" visibility="public">
+            <xsl:attribute name="from-base">B</xsl:attribute>
+        </xsl:attribute-set>
+    </xsl:package>"#;
+    let mut packages = std::collections::HashMap::new();
+    packages.insert("base".to_string(), (base.to_string(), None));
+    let main = r#"<xsl:package version="3.0" name="main"
+        xmlns:xsl="http://www.w3.org/1999/XSL/Transform">
+        <xsl:use-package name="base">
+            <xsl:override>
+                <xsl:attribute-set name="s" visibility="public">
+                    <xsl:attribute name="from-override">O</xsl:attribute>
+                </xsl:attribute-set>
+            </xsl:override>
+        </xsl:use-package>
+        <xsl:template name="main"><e xsl:use-attribute-sets="s"/></xsl:template>
+    </xsl:package>"#;
+    let xslt = Stylesheet::compile_str_with_packages(
+        main, &sup_xml_xslt::loader::NullLoader, None, packages).unwrap();
+    let doc = parse_str("<r/>", &ParseOptions::default()).unwrap();
+    let out = xslt
+        .apply_with_params_initial_and_mode(&doc, &sup_xml_xslt::loader::NullLoader, None, &[], Some("main"), None)
+        .unwrap().to_string().unwrap();
+    // Only the override's attribute, not the base's.
+    assert!(out.contains(r#"from-override="O""#), "got: {out}");
+    assert!(!out.contains("from-base"), "base attr should be hidden: {out}");
+}
+
+#[test]
 fn document_apply_without_loader_errors_when_used() {
     // The stylesheet references document('foo.xml'); without a Loader,
     // pre-loading fails at apply time.

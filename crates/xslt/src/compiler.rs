@@ -2816,6 +2816,19 @@ fn compile_with_imports_inner(
                     &acc.global_variables[before_vars..],
                     &acc.global_params[before_params..],
                     &acc.attribute_sets[before_attr_sets..])?;
+                // XSLT 3.0 §3.5.1 — an overriding component replaces the
+                // used package's homonymous one.  Templates / functions /
+                // variables resolve by import precedence so the override
+                // already wins; attribute-sets apply additively by name,
+                // so the used package's definition must be removed or it
+                // would merge with the override's.
+                let overridden_sets: std::collections::HashSet<String> =
+                    up.overrides.attribute_sets.iter().map(|a| qname_key(&a.name)).collect();
+                if !overridden_sets.is_empty() {
+                    let tail = acc.attribute_sets.split_off(before_attr_sets);
+                    acc.attribute_sets.extend(tail.into_iter()
+                        .filter(|a| !overridden_sets.contains(&qname_key(&a.name))));
+                }
                 // XSLT 3.0 §3.5.2 — the using package may not reference
                 // the used package's private components.
                 if let Some(refs) = &pkg_refs {
