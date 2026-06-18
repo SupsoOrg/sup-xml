@@ -1081,7 +1081,7 @@ const FN_NAMES: &[&str] = &[
     // XPath 3.0 / 3.1 additions
     "parse-xml", "parse-xml-fragment", "serialize",
     "contains-token", "has-children", "innermost", "outermost",
-    "characters", "unparsed-text-lines", "format-integer",
+    "characters", "unparsed-text-lines", "format-integer", "parse-ietf-date",
     // EXSLT families dispatch by namespace, not by unqualified
     // name — those don't show up here.
 ];
@@ -1113,7 +1113,7 @@ fn builtin_arity_ok(name: &str, arity: usize) -> bool {
         | "format-integer"
             => (2..=3).contains(&arity),
         // Exactly one arg.
-        "parse-xml" | "parse-xml-fragment" | "characters"
+        "parse-xml" | "parse-xml-fragment" | "characters" | "parse-ietf-date"
             => arity == 1,
         // 1 or 2 args.
         "unparsed-text-lines"

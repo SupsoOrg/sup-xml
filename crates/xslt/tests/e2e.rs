@@ -2145,6 +2145,29 @@ fn xpath31_format_integer() {
     assert!(out.contains(r#"neg="-012""#), "got: {out}");
 }
 
+/// XPath 3.1 `fn:parse-ietf-date($value)` — RFC 822/1123 and asctime
+/// date forms parse to an xs:dateTime.
+#[test]
+fn xpath31_parse_ietf_date() {
+    let xslt = r#"<xsl:stylesheet version="3.0"
+        xmlns:xsl="http://www.w3.org/1999/XSL/Transform">
+        <xsl:output method="xml" omit-xml-declaration="yes"/>
+        <xsl:template match="/">
+            <out rfc="{parse-ietf-date('Wed, 06 Jun 1994 07:29:35 GMT')}"
+                 dash="{parse-ietf-date('6-Jun-1994 07:29:35 -0500')}"
+                 asc="{parse-ietf-date('Wed Jun 6 07:29:35 1994')}"
+                 yy="{parse-ietf-date('06 Jun 94 07:29:35 EST')}"
+                 cmp="{parse-ietf-date('Wed, 06 Jun 1994 07:29:35 GMT') = xs:dateTime('1994-06-06T07:29:35Z')}"/>
+        </xsl:template>
+    </xsl:stylesheet>"#;
+    let out = transform(xslt, "<x/>");
+    assert!(out.contains(r#"rfc="1994-06-06T07:29:35Z""#), "got: {out}");
+    assert!(out.contains(r#"dash="1994-06-06T07:29:35-05:00""#), "got: {out}");
+    assert!(out.contains(r#"asc="1994-06-06T07:29:35""#), "got: {out}");  // asctime: no tz
+    assert!(out.contains(r#"yy="1994-06-06T07:29:35-05:00""#), "got: {out}"); // EST, 2-digit year
+    assert!(out.contains(r#"cmp="true""#), "got: {out}");
+}
+
 /// XSLT 2.0 `xsl:analyze-string` — partitions input by regex matches,
 /// `regex-group(n)` exposes captures inside `<xsl:matching-substring>`.
 #[test]

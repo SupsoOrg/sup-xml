@@ -5574,6 +5574,91 @@ fn parse_xml_fn<I: DocIndexLike>(s: &str, fragment: bool, idx: &I) -> Result<Val
         "parse-xml(): building nodes is not supported in this evaluation context"))
 }
 
+/// Parse an IETF / RFC 822-1123 (or asctime) date string into a
+/// canonical `xs:dateTime` lexical form (F&O §9.9.4 `fn:parse-ietf-date`).
+/// Returns `None` when the input doesn't match the grammar.  A two-digit
+/// year is mapped into 1950–2049; a missing timezone yields a dateTime
+/// with no timezone.
+fn parse_ietf_date(input: &str) -> Option<String> {
+    const DAYNAMES: [&str; 7] = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"];
+    const MONTHS: [&str; 12] = ["jan", "feb", "mar", "apr", "may", "jun",
+                                "jul", "aug", "sep", "oct", "nov", "dec"];
+    // Tokenize on whitespace; split date-internal dashes ("06-Jun-1994")
+    // but keep a leading +/- (timezone offset) and time (`hh:mm`) intact.
+    let mut toks: Vec<String> = Vec::new();
+    for w in input.split_whitespace() {
+        let w = w.trim_end_matches(',');
+        if w.is_empty() { continue; }
+        if w.starts_with('+') || w.starts_with('-') || w.contains(':') {
+            toks.push(w.to_string());
+        } else if w.contains('-') {
+            toks.extend(w.split('-').filter(|p| !p.is_empty()).map(str::to_string));
+        } else {
+            toks.push(w.to_string());
+        }
+    }
+    let is_day = |t: &str| t.get(..3)
+        .is_some_and(|p| DAYNAMES.iter().any(|d| p.eq_ignore_ascii_case(d)));
+    if toks.first().is_some_and(|t| is_day(t)) { toks.remove(0); }
+    if toks.len() < 4 { return None; }
+    let month_of = |t: &str| t.get(..3).and_then(|p|
+        MONTHS.iter().position(|m| p.eq_ignore_ascii_case(m)).map(|i| i as u32 + 1));
+    // asctime ("Jun 06 07:29:35 1994") starts with the month name;
+    // otherwise it's the datespec form ("06 Jun 1994 07:29:35 GMT").
+    let (day_s, month, year_s, time_s, tz_s) = match month_of(&toks[0]) {
+        Some(mo) => (toks[1].clone(), mo, toks[3].clone(),
+                     toks[2].clone(), toks.get(4).cloned()),
+        None     => (toks[0].clone(), month_of(&toks[1])?, toks[2].clone(),
+                     toks[3].clone(), toks.get(4).cloned()),
+    };
+    let day: u32 = day_s.parse().ok()?;
+    let mut year: i64 = year_s.parse().ok()?;
+    if year_s.len() <= 2 { year += if year >= 50 { 1900 } else { 2000 }; }
+    let mut tp = time_s.split(':');
+    let hour:   u32 = tp.next()?.parse().ok()?;
+    let minute: u32 = tp.next()?.parse().ok()?;
+    let secs = tp.next().unwrap_or("00");
+    let sec_int: u32 = secs.split('.').next()?.parse().ok()?;
+    if !(1..=12).contains(&month) || !(1..=31).contains(&day)
+        || hour > 24 || minute > 59 || sec_int > 60 { return None; }
+    let sec_fmt = match secs.split_once('.') {
+        Some((i, frac)) => format!("{:02}.{frac}", i.parse::<u32>().ok()?),
+        None            => format!("{sec_int:02}"),
+    };
+    let tz = match tz_s.as_deref() {
+        None    => String::new(),
+        Some(t) => ietf_timezone(t)?,
+    };
+    Some(format!("{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{sec_fmt}{tz}"))
+}
+
+/// Map an IETF timezone token (named US zone, `GMT`/`UT`/`Z`, or a
+/// numeric `±HHMM` / `±HH:MM` offset) to an xs:dateTime timezone suffix.
+fn ietf_timezone(t: &str) -> Option<String> {
+    let mins: i32 = match t.to_ascii_uppercase().as_str() {
+        "UT" | "UTC" | "GMT" | "Z" => return Some("Z".to_string()),
+        "EST" => -300, "EDT" => -240,
+        "CST" => -360, "CDT" => -300,
+        "MST" => -420, "MDT" => -360,
+        "PST" => -480, "PDT" => -420,
+        up => {
+            let (sign, rest) = match up.strip_prefix('+') {
+                Some(r) => (1, r),
+                None    => (-1, up.strip_prefix('-')?),
+            };
+            let digits: String = rest.chars().filter(|c| c.is_ascii_digit()).collect();
+            if digits.len() != 4 { return None; }
+            let hh: i32 = digits[..2].parse().ok()?;
+            let mm: i32 = digits[2..].parse().ok()?;
+            if hh > 14 || mm > 59 { return None; }
+            sign * (hh * 60 + mm)
+        }
+    };
+    if mins == 0 { return Some("Z".to_string()); }
+    let (sign, abs) = if mins < 0 { ('-', -mins) } else { ('+', mins) };
+    Some(format!("{sign}{:02}:{:02}", abs / 60, abs % 60))
+}
+
 /// Flatten an XDM value to the in-index node ids it contains, in order.
 /// Atomic items and externally-loaded (foreign) nodes contribute none.
 fn collect_node_ids(v: &Value) -> Vec<NodeId> {
@@ -8104,6 +8189,27 @@ fn eval_function<I: DocIndexLike>(name: &str, args: &[Expr], ctx: &EvalCtx<'_>, 
                 return Ok(Value::Sequence(Vec::new()));
             }
             parse_xml_fn(&value_to_string(&a, idx), name == "parse-xml-fragment", idx)
+        }
+        // fn:parse-ietf-date($value) as xs:dateTime? (F&O §9.9.4) —
+        // parse an RFC 822 / 1123 or asctime date string.
+        "parse-ietf-date" => {
+            check_args!(1);
+            let a = arg!(0);
+            if matches!(&a, Value::Sequence(s) if s.is_empty())
+                || matches!(&a, Value::NodeSet(n) if n.is_empty())
+            {
+                return Ok(Value::Sequence(Vec::new()));
+            }
+            let s = value_to_string(&a, idx);
+            match parse_ietf_date(s.trim()) {
+                Some(lexical) => Ok(Value::Typed(Box::new(TypedAtomic {
+                    kind: "dateTime", lexical,
+                    numeric: None, boolean: None, user_type: None,
+                }))),
+                None => Err(xpath_err(format!(
+                    "parse-ietf-date(): cannot parse {s:?} (FORG0010)"))
+                    .with_xpath_code("FORG0010")),
+            }
         }
         // fn:contains-token($input as xs:string*, $token [, $collation])
         // (F&O §5.5.6) — true iff a whitespace-delimited token of any
