@@ -548,6 +548,30 @@ fn package_override_default_mode_applies_to_templates_and_apply() {
 }
 
 #[test]
+fn package_override_rejects_non_overridable_component() {
+    // XSLT 3.0 §3.5.1 — xsl:override may only contain declarations of
+    // overridable components; a key/accumulator/mode is a static error.
+    let base = r#"<xsl:package version="3.0" name="base"
+        xmlns:xsl="http://www.w3.org/1999/XSL/Transform">
+        <xsl:key name="k" match="x" use="@id"/>
+    </xsl:package>"#;
+    let mut packages = std::collections::HashMap::new();
+    packages.insert("base".to_string(), (base.to_string(), None));
+    let main = r#"<xsl:package version="3.0" name="main"
+        xmlns:xsl="http://www.w3.org/1999/XSL/Transform">
+        <xsl:use-package name="base">
+            <xsl:override>
+                <xsl:key name="k" match="y" use="@id"/>
+            </xsl:override>
+        </xsl:use-package>
+        <xsl:template name="main" visibility="public"><out/></xsl:template>
+    </xsl:package>"#;
+    let err = Stylesheet::compile_str_with_packages(
+        main, &sup_xml_xslt::loader::NullLoader, None, packages).unwrap_err();
+    assert!(format!("{err}").contains("XTSE0010"), "got: {err}");
+}
+
+#[test]
 fn document_apply_without_loader_errors_when_used() {
     // The stylesheet references document('foo.xml'); without a Loader,
     // pre-loading fails at apply time.

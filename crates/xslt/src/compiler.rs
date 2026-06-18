@@ -3558,6 +3558,16 @@ fn compile_use_package(node: &Node) -> Result<UsePackage, XsltError> {
                 let _guard = default_mode.map(DefaultModeGuard::enter);
                 for decl in child.children() {
                     if !decl.is_element() { continue; }
+                    // XSLT 3.0 §3.5.1 — xsl:override may only contain
+                    // declarations of overridable components.  A key,
+                    // accumulator, or mode (among others) is not overridable.
+                    if is_xslt_element(decl) && !matches!(decl.local_name(),
+                        "template" | "function" | "variable" | "param" | "attribute-set")
+                    {
+                        return Err(XsltError::InvalidStylesheet(format!(
+                            "xsl:override may only contain overridable component \
+                             declarations, not xsl:{} (XTSE0010)", decl.local_name())));
+                    }
                     compile_top_level(decl, &mut overrides, pos)?;
                     pos += 1;
                 }
