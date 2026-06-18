@@ -346,6 +346,7 @@ pub(crate) fn dispatch<I: DocIndexLike>(
         // step that re-sets the context.
         "generate-id" => generate_id_fn(&args, xpath_context_node),
         "system-property" => system_property_fn(&args, idx, xslt_version, namespaces),
+        "available-system-properties" => available_system_properties_fn(&args),
         "element-available" => element_available_fn(&args, idx, instruction_names, xslt_version),
         "function-available" => function_available_fn(&args, idx, namespaces, user_functions),
         "key" => key_fn(&args, idx, keys, namespaces, xpath_context_node, xslt_version),
@@ -952,6 +953,30 @@ fn system_property_fn<I: DocIndexLike>(
     }))
 }
 
+/// `fn:available-system-properties()` (XSLT 3.0 §18.2.1) — the QNames of
+/// every system property for which `system-property()` yields a value.
+/// All ours are in the XSLT namespace.
+fn available_system_properties_fn(args: &[Value]) -> Result<Value> {
+    if !args.is_empty() {
+        return Err(err("available-system-properties() takes no arguments"));
+    }
+    const XSL_NS: &str = "http://www.w3.org/1999/XSL/Transform";
+    const PROPS: &[&str] = &[
+        "version", "vendor", "vendor-url", "product-name", "product-version",
+        "is-schema-aware", "supports-serialization",
+        "supports-backwards-compatibility", "supports-namespace-axis",
+        "supports-streaming", "supports-dynamic-evaluation",
+        "supports-higher-order-functions", "xpath-version", "xsd-version",
+    ];
+    let items = PROPS.iter().map(|p| Value::Typed(Box::new(
+        sup_xml_core::xpath::eval::TypedAtomic {
+            kind: "QName",
+            lexical: format!("{{{XSL_NS}}}{p}"),
+            numeric: None, boolean: None, user_type: None,
+        }))).collect();
+    Ok(Value::Sequence(items))
+}
+
 // ── element-available() / function-available() ───────────────────
 
 /// XSLT 2.0 §15.1.3 — `element-available()` answers true only for
@@ -1083,7 +1108,7 @@ const FN_NAMES: &[&str] = &[
     "parse-xml", "parse-xml-fragment", "serialize",
     "contains-token", "has-children", "innermost", "outermost",
     "characters", "unparsed-text-lines", "format-integer", "parse-ietf-date",
-    "random-number-generator", "transform",
+    "random-number-generator", "transform", "available-system-properties",
     // EXSLT families dispatch by namespace, not by unqualified
     // name — those don't show up here.
 ];
@@ -1118,6 +1143,9 @@ fn builtin_arity_ok(name: &str, arity: usize) -> bool {
         "parse-xml" | "parse-xml-fragment" | "characters" | "parse-ietf-date"
         | "transform"
             => arity == 1,
+        // Zero args.
+        "available-system-properties"
+            => arity == 0,
         // 1 or 2 args.
         "unparsed-text-lines"
             => (1..=2).contains(&arity),

@@ -2305,6 +2305,26 @@ fn xslt3_context_item_type_check() {
     assert!(out.contains("<ok/>"), "got: {out}");
 }
 
+/// XSLT 3.0 `fn:available-system-properties()` returns the QNames of the
+/// available system properties (all in the XSLT namespace).
+#[test]
+fn xpath31_available_system_properties() {
+    let xslt = r#"<xsl:stylesheet version="3.0"
+        xmlns:xsl="http://www.w3.org/1999/XSL/Transform"
+        xmlns:xs="http://www.w3.org/2001/XMLSchema">
+        <xsl:output method="xml" omit-xml-declaration="yes"/>
+        <xsl:template match="/">
+            <out avail="{function-available('available-system-properties', 0)}"
+                 isqname="{available-system-properties()[1] instance of xs:QName}"
+                 hasver="{exists(available-system-properties()[local-name-from-QName(.) = 'version'])}"/>
+        </xsl:template>
+    </xsl:stylesheet>"#;
+    let out = transform(xslt, "<x/>");
+    assert!(out.contains(r#"avail="true""#), "got: {out}");
+    assert!(out.contains(r#"isqname="true""#), "got: {out}");
+    assert!(out.contains(r#"hasver="true""#), "got: {out}");
+}
+
 /// XSLT 2.0 `xsl:analyze-string` — partitions input by regex matches,
 /// `regex-group(n)` exposes captures inside `<xsl:matching-substring>`.
 #[test]
