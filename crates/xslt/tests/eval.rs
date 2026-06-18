@@ -572,6 +572,31 @@ fn package_override_rejects_non_overridable_component() {
 }
 
 #[test]
+fn package_override_template_in_final_mode_is_error() {
+    // XSLT 3.0 §3.5.1 / XTSE3060 — a template rule in xsl:override may not
+    // target a mode the used package declares as final (or private).
+    let base = r#"<xsl:package version="3.0" name="base"
+        xmlns:xsl="http://www.w3.org/1999/XSL/Transform">
+        <xsl:mode name="m" visibility="final"/>
+        <xsl:template match="a" mode="m"><base/></xsl:template>
+    </xsl:package>"#;
+    let mut packages = std::collections::HashMap::new();
+    packages.insert("base".to_string(), (base.to_string(), None));
+    let main = r#"<xsl:package version="3.0" name="main"
+        xmlns:xsl="http://www.w3.org/1999/XSL/Transform">
+        <xsl:use-package name="base">
+            <xsl:override default-mode="m">
+                <xsl:template match="a"><over/></xsl:template>
+            </xsl:override>
+        </xsl:use-package>
+        <xsl:template name="main" visibility="public"><out/></xsl:template>
+    </xsl:package>"#;
+    let err = Stylesheet::compile_str_with_packages(
+        main, &sup_xml_xslt::loader::NullLoader, None, packages).unwrap_err();
+    assert!(format!("{err}").contains("XTSE3060"), "got: {err}");
+}
+
+#[test]
 fn document_apply_without_loader_errors_when_used() {
     // The stylesheet references document('foo.xml'); without a Loader,
     // pre-loading fails at apply time.

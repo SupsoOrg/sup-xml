@@ -1207,6 +1207,10 @@ pub struct ModeDecl {
     /// Action taken by the built-in template when no user template
     /// matches a node in this mode.
     pub on_no_match: OnNoMatch,
+    /// XSLT 3.0 `visibility=` (§3.5.2).  `None` = the package default
+    /// (private).  A used package's final/private mode may not have
+    /// template rules added or overridden by the using package.
+    pub visibility: Option<String>,
 }
 
 /// `on-no-match` action for a mode's built-in template (XSLT 3.0 §6.7).

@@ -2787,6 +2787,7 @@ fn compile_with_imports_inner(
                 let before_attr_sets = acc.attribute_sets.len();
                 let before_aliases = acc.namespace_aliases.len();
                 let before_exposes = acc.exposes.len();
+                let before_modes = acc.modes.len();
                 // Assign this used package a distinct id.  Components it
                 // contributes directly (still id 0 after the recursive
                 // compile — its own transitively-used packages stamp
@@ -2833,6 +2834,28 @@ fn compile_with_imports_inner(
                     }
                 }
                 PACKAGE_ID_COUNTER.with(|c| c.set(saved_ctr));
+                // XSLT 3.0 §3.5.1 / XTSE3060 — a template rule in
+                // xsl:override may not be in a mode that the used package
+                // declares as final or private.
+                let used_mode_vis: std::collections::HashMap<String, &str> =
+                    acc.modes[before_modes..].iter().filter_map(|m| {
+                        let n = m.name.as_ref()?;
+                        Some((qname_key(n), m.visibility.as_deref()?))
+                    }).collect();
+                if !used_mode_vis.is_empty() {
+                    for t in up.overrides.templates.iter().filter(|t| t.match_pattern.is_some()) {
+                        for mode in &t.modes {
+                            if matches!(used_mode_vis.get(&qname_key(mode)).copied(),
+                                Some("final") | Some("private"))
+                            {
+                                return Err(XsltError::InvalidStylesheet(format!(
+                                    "xsl:override cannot override a template rule in mode \
+                                     '{}', which the used package declares final or private \
+                                     (XTSE3060)", mode.local)));
+                            }
+                        }
+                    }
+                }
                 // XSLT 3.0 §3.5.1 / XTSE3058 — every component declared
                 // inside xsl:override must override (be homonymous with) a
                 // component of the used package.
@@ -3526,7 +3549,8 @@ fn compile_mode(node: &Node) -> Result<ModeDecl, XsltError> {
         Some(other) => return Err(XsltError::InvalidStylesheet(format!(
             "xsl:mode on-no-match='{other}' is not a recognised value (XTSE0020)"))),
     };
-    Ok(ModeDecl { name, on_no_match })
+    let visibility = read_attribute(node, "visibility").map(str::to_string);
+    Ok(ModeDecl { name, on_no_match, visibility })
 }
 
 /// Compile an `<xsl:use-package>` declaration (XSLT 3.0 §3.5.1).  The
