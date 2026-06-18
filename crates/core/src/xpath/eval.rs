@@ -3503,8 +3503,40 @@ pub fn value_to_string_styled_with<I: DocIndexLike>(
         }
         // First-item rule for an IntRange yields its lower bound.
         Value::IntRange { lo, .. } => lo.to_string(),
-        // A map / array has no string value (FOTY0014).  Lenient: "".
-        Value::Map(_) | Value::Array(_) | Value::Function(_) => String::new(),
+        // Atomizing an array flattens its members (XPath 3.1 §2.4.5);
+        // value-of / AVT contexts then space-join them.  (The strict
+        // string value of an array is a type error, FOTY0014, but our
+        // callers want the lenient atomized form.)
+        Value::Array(_) => {
+            let mut parts = Vec::new();
+            flatten_atomic_strings(v, idx, bindings, style, &mut parts);
+            parts.join(" ")
+        }
+        // A map / function has no string value (FOTY0014).  Lenient: "".
+        Value::Map(_) | Value::Function(_) => String::new(),
+    }
+}
+
+/// Recursively atomize a value to the string values of its atomic items,
+/// flattening arrays and sequences (used to serialize an array).
+fn flatten_atomic_strings<I: DocIndexLike>(
+    v: &Value, idx: &I, bindings: &dyn XPathBindings, style: NumStyle,
+    out: &mut Vec<String>,
+) {
+    match v {
+        Value::Array(a)        => for m in a.iter() {
+            flatten_atomic_strings(m, idx, bindings, style, out);
+        },
+        Value::Sequence(items) => for m in items {
+            flatten_atomic_strings(m, idx, bindings, style, out);
+        },
+        Value::NodeSet(ns)     => for &n in ns { out.push(idx.string_value(n)); },
+        Value::ForeignNodeSet(ns) => for &p in ns {
+            out.push(bindings.foreign_string_value(p));
+        },
+        Value::IntRange { lo, hi } => for i in *lo..=*hi { out.push(i.to_string()); },
+        Value::Map(_) | Value::Function(_) => {}
+        other => out.push(value_to_string_styled_with(other, idx, bindings, style)),
     }
 }
 

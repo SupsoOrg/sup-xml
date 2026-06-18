@@ -2325,6 +2325,25 @@ fn xpath31_available_system_properties() {
     assert!(out.contains(r#"hasver="true""#), "got: {out}");
 }
 
+/// XPath 3.1 — atomizing an array flattens its members; `xsl:value-of`
+/// then space-joins them (previously an array stringified to empty).
+#[test]
+fn xpath31_array_atomization() {
+    let xslt = r#"<xsl:stylesheet version="3.0"
+        xmlns:xsl="http://www.w3.org/1999/XSL/Transform">
+        <xsl:output method="xml" omit-xml-declaration="yes"/>
+        <xsl:template match="/">
+            <out a="{[1, 2, 3]}"
+                 b="{[data(/r/x), 'Z']}"
+                 nested="{[[1, 2], [3, 4]]}"/>
+        </xsl:template>
+    </xsl:stylesheet>"#;
+    let out = transform(xslt, "<r><x>4.95</x><x>6.58</x></r>");
+    assert!(out.contains(r#"a="1 2 3""#), "got: {out}");
+    assert!(out.contains(r#"b="4.95 6.58 Z""#), "got: {out}");
+    assert!(out.contains(r#"nested="1 2 3 4""#), "got: {out}");  // members flatten
+}
+
 /// XSLT 2.0 `xsl:analyze-string` — partitions input by regex matches,
 /// `regex-group(n)` exposes captures inside `<xsl:matching-substring>`.
 #[test]
