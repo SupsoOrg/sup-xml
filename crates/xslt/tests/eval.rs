@@ -388,6 +388,32 @@ fn unparsed_text_lines_returns_sequence() {
 }
 
 #[test]
+fn accumulator_applies_to_doc_loaded_document() {
+    // XSLT 3.0 §18.2 — accumulators apply to every document, including
+    // one read via doc(), not just the principal source.
+    let loader = InMemoryLoader::new().with("d.xml",
+        "<doc><chap><fig/><fig/></chap><chap><fig/></chap></doc>");
+    let xslt = Stylesheet::compile_str(
+        r#"<xsl:stylesheet version="3.0"
+            xmlns:xsl="http://www.w3.org/1999/XSL/Transform"
+            xmlns:xs="http://www.w3.org/2001/XMLSchema">
+        <xsl:output method="xml" omit-xml-declaration="yes"/>
+        <xsl:accumulator name="num" as="xs:integer" initial-value="0">
+            <xsl:accumulator-rule match="chap" select="0"/>
+            <xsl:accumulator-rule match="fig" select="$value + 1"/>
+        </xsl:accumulator>
+        <xsl:mode on-no-match="shallow-skip"/>
+        <xsl:template match="/"><out><xsl:apply-templates select="doc('d.xml')/doc"/></out></xsl:template>
+        <xsl:template match="fig"><f><xsl:value-of select="accumulator-before('num')"/></f></xsl:template>
+        </xsl:stylesheet>"#).unwrap();
+    let doc = parse_str("<r/>", &ParseOptions::default()).unwrap();
+    let result = xslt.apply_with_loader(&doc, &loader, None).expect("apply");
+    let out = result.to_string().expect("serialize");
+    // Figures numbered within each chapter (reset at <chap>): 1,2 then 1.
+    assert!(out.contains("<f>1</f><f>2</f><f>1</f>"), "got: {out}");
+}
+
+#[test]
 fn document_apply_without_loader_errors_when_used() {
     // The stylesheet references document('foo.xml'); without a Loader,
     // pre-loading fails at apply time.

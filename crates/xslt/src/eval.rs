@@ -2011,6 +2011,11 @@ struct EvalState<'a> {
     /// keyed by accumulator expanded-name.  Filled lazily the first
     /// time `accumulator-before` / `accumulator-after` is needed.
     accumulators: HashMap<String, AccumulatorData>,
+    /// Document roots whose accumulator values have already been
+    /// precomputed (the principal source plus any document reached via
+    /// doc()/apply-templates).  XSLT 3.0 §18.2 — accumulators apply to
+    /// every document, computed lazily the first time one is processed.
+    accumulator_roots: std::collections::HashSet<NodeId>,
     /// Captured regex groups from the current `xsl:matching-substring`
     /// body — index 0 is the full match, 1..N are the groups.
     /// `regex-group(n)` reads from here.  Empty outside any
@@ -2516,6 +2521,7 @@ pub fn apply_stylesheet_full_with_params_and_initial(
         tunnel_pool: HashMap::new(),
         current_grouping_key: None,
         accumulators: HashMap::new(),
+        accumulator_roots: std::collections::HashSet::new(),
         unparsed_texts: if unparsed_texts.is_empty() { None } else { Some(&unparsed_texts) },
         static_base_uri: style.xml_base.clone().or_else(|| base.map(str::to_string)),
         loader: Some(loader),
@@ -3761,6 +3767,9 @@ fn eval_instr(
                     .filter(|&n| !crate::whitespace::should_strip(style, n, idx))
                     .collect()
             };
+            // Accumulators apply to whatever document these nodes live
+            // in (e.g. one loaded via doc()), computed on first use.
+            ensure_accumulators_for(state, &nodes)?;
             // Apply xsl:sort directives before iterating.
             let nodes = sort_nodes_for_iter(state, &nodes, sort, ctx_node, pos, size)?;
             // Snapshot only when there are tunnel params in scope —
@@ -6814,6 +6823,7 @@ fn build_rtf_nodes_no_merge(
         tunnel_pool: std::mem::take(&mut state.tunnel_pool),
         current_grouping_key: state.current_grouping_key.take(),
         accumulators: std::mem::take(&mut state.accumulators),
+        accumulator_roots: std::mem::take(&mut state.accumulator_roots),
         unparsed_texts: state.unparsed_texts,
         static_base_uri: state.static_base_uri.clone(),
         loader: state.loader,
@@ -6835,6 +6845,7 @@ fn build_rtf_nodes_no_merge(
     state.tunnel_pool     = tmp.tunnel_pool;
     state.current_grouping_key = tmp.current_grouping_key;
     state.accumulators    = tmp.accumulators;
+    state.accumulator_roots    = tmp.accumulator_roots;
     r?;
     Ok(tmp.builder.finish())
 }
@@ -7777,6 +7788,7 @@ fn build_rtf_nodes(
         tunnel_pool: std::mem::take(&mut state.tunnel_pool),
         current_grouping_key: state.current_grouping_key.take(),
         accumulators: std::mem::take(&mut state.accumulators),
+        accumulator_roots: std::mem::take(&mut state.accumulator_roots),
         unparsed_texts: state.unparsed_texts,
         static_base_uri: state.static_base_uri.clone(),
         loader: state.loader,
@@ -7798,6 +7810,7 @@ fn build_rtf_nodes(
     state.tunnel_pool = tmp.tunnel_pool;
     state.current_grouping_key = tmp.current_grouping_key;
     state.accumulators = tmp.accumulators;
+    state.accumulator_roots = tmp.accumulator_roots;
     r?;
     Ok(tmp.builder.finish())
 }
@@ -7805,16 +7818,41 @@ fn build_rtf_nodes(
 /// Compute every declared `xsl:accumulator` over the document rooted
 /// at `root`, caching the before/after value at each node.
 fn precompute_accumulators(state: &mut EvalState, root: NodeId) -> Result<()> {
+    if !state.accumulator_roots.insert(root) {
+        return Ok(()); // already precomputed for this document
+    }
     let decls = state.style.accumulators.clone();
     for decl in &decls {
         let key = qname_key(&decl.name);
         let initial = state.xpath_eval(&decl.initial_value, root, 1, 1)?;
-        let mut data = AccumulatorData {
+        // Merge into any data already accumulated for earlier documents
+        // — the before/after maps are keyed by globally-unique NodeId.
+        let mut data = state.accumulators.remove(&key).unwrap_or_else(|| AccumulatorData {
             before: HashMap::new(), after: HashMap::new(), initial: initial.clone(),
-        };
-        let mut value = initial;
+        });
+        let mut value = data.initial.clone();
         accumulate_walk(state, decl, root, &mut value, &mut data)?;
         state.accumulators.insert(key, data);
+    }
+    Ok(())
+}
+
+/// Ensure accumulator values are precomputed for the document(s)
+/// containing `nodes` — accumulators apply to every document, including
+/// those reached via doc() and processed by xsl:apply-templates
+/// (XSLT 3.0 §18.2).  A no-op when the stylesheet declares none.
+fn ensure_accumulators_for(state: &mut EvalState, nodes: &[NodeId]) -> Result<()> {
+    if state.style.accumulators.is_empty() { return Ok(()); }
+    let mut roots: Vec<NodeId> = Vec::new();
+    for &n in nodes {
+        let mut r = n;
+        while let Some(p) = state.idx.parent(r) { r = p; }
+        if !state.accumulator_roots.contains(&r) && !roots.contains(&r) {
+            roots.push(r);
+        }
+    }
+    for r in roots {
+        precompute_accumulators(state, r)?;
     }
     Ok(())
 }
@@ -8200,6 +8238,7 @@ fn stringify_into_string(
         tunnel_pool: std::mem::take(&mut state.tunnel_pool),
         current_grouping_key: state.current_grouping_key.take(),
         accumulators: std::mem::take(&mut state.accumulators),
+        accumulator_roots: std::mem::take(&mut state.accumulator_roots),
         unparsed_texts: state.unparsed_texts,
         static_base_uri: state.static_base_uri.clone(),
         loader: state.loader,
