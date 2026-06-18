@@ -3704,18 +3704,57 @@ fn compile_output(node: &Node) -> Result<OutputSpec, XsltError> {
             }
         }
         if let Some(v) = read_attribute(node, "normalization-form") {
-            if !matches!(v.trim(),
+            // A value naming a form this serializer doesn't support is a
+            // serialization error (SESU0011).  We implement only the
+            // standard forms plus `none`; any other token (including a
+            // syntactically-valid but unsupported NMTOKEN extension) is
+            // rejected rather than silently ignored.
+            let v = v.trim();
+            if !matches!(v,
                 "NFC" | "NFD" | "NFKC" | "NFKD" | "fully-normalized" | "none")
-                && !v.trim().starts_with("nmtoken")
             {
-                // Spec also permits an NMTOKEN extension value; we
-                // accept anything non-empty for those to avoid
-                // false positives.
-                if v.trim().is_empty() {
-                    return Err(XsltError::InvalidStylesheet(format!(
-                        "xsl:output normalization-form='{v}' is invalid (XTSE0020)"
-                    )));
+                return Err(XsltError::InvalidStylesheet(format!(
+                    "xsl:output normalization-form='{v}' is not a supported \
+                     normalization form (SESU0011)"
+                )));
+            }
+        }
+        // The omit-xml-declaration / standalone / undeclare-prefixes
+        // consistency rules below govern the XML serialization method
+        // (and XHTML); for the html / text methods these parameters are
+        // ignored, so the rules don't apply.  An absent method defaults
+        // to xml.
+        let serializes_xml = matches!(
+            read_attribute(node, "method").as_deref().map(str::trim),
+            None | Some("xml") | Some("xhtml"));
+        if serializes_xml {
+            // SEPM0009 — `omit-xml-declaration="yes"` is incompatible with
+            // a `standalone` value other than `omit`, or an output
+            // `version` other than `1.0`.
+            if read_attribute(node, "omit-xml-declaration")
+                .is_some_and(|v| matches!(v.trim(), "yes" | "true" | "1"))
+            {
+                if read_attribute(node, "standalone").is_some_and(|v| v.trim() != "omit") {
+                    return Err(XsltError::InvalidStylesheet(
+                        "xsl:output omit-xml-declaration='yes' is incompatible with a \
+                         standalone declaration (SEPM0009)".into()));
                 }
+                if read_attribute(node, "version").is_some_and(|v| v.trim() != "1.0") {
+                    return Err(XsltError::InvalidStylesheet(
+                        "xsl:output omit-xml-declaration='yes' requires version='1.0' \
+                         (SEPM0009)".into()));
+                }
+            }
+            // SEPM0010 — `undeclare-prefixes` applies only to XML 1.1
+            // output; pairing it with version 1.0 (the default) is an error.
+            if read_attribute(node, "undeclare-prefixes")
+                .is_some_and(|v| matches!(v.trim(), "yes" | "true" | "1"))
+                && read_attribute(node, "version").as_deref()
+                    .map(|v| v.trim() == "1.0").unwrap_or(true)
+            {
+                return Err(XsltError::InvalidStylesheet(
+                    "xsl:output undeclare-prefixes='yes' requires XML version 1.1 \
+                     (SEPM0010)".into()));
             }
         }
     }
@@ -8134,6 +8173,29 @@ mod tests {
         assert!(o.doctype_public.is_some());
         assert!(o.doctype_system.is_some());
         assert_eq!(o.version.as_deref(),               Some("4.0"));
+    }
+
+    #[test]
+    fn output_serialization_param_errors() {
+        let out = |attrs: &str| {
+            let doc = parse(&format!(r#"<xsl:stylesheet
+                xmlns:xsl="http://www.w3.org/1999/XSL/Transform" version="1.0">
+                <xsl:output {attrs}/></xsl:stylesheet>"#));
+            compile(&doc)
+        };
+        // Unsupported normalization-form (SESU0011).
+        assert!(out(r#"method="xml" normalization-form="ABC""#).is_err());
+        // omit-xml-declaration="yes" with a standalone declaration, or a
+        // non-1.0 version, on the XML method (SEPM0009).
+        assert!(out(r#"method="xml" omit-xml-declaration="yes" standalone="yes""#).is_err());
+        assert!(out(r#"method="xml" omit-xml-declaration="yes" version="1.1""#).is_err());
+        // undeclare-prefixes with XML 1.0 output (SEPM0010).
+        assert!(out(r#"method="xml" undeclare-prefixes="yes" version="1.0""#).is_err());
+        // The same parameters are ignored for the html method — no error.
+        assert!(out(r#"method="html" omit-xml-declaration="yes" standalone="yes""#).is_ok());
+        // Standard forms and valid combinations still compile.
+        assert!(out(r#"method="xml" normalization-form="NFC""#).is_ok());
+        assert!(out(r#"method="xml" undeclare-prefixes="yes" version="1.1""#).is_ok());
     }
 
     // ── xsl:namespace-alias ─────────────────────────────────────
