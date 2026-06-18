@@ -5544,6 +5544,182 @@ fn eval_hof_function<I: DocIndexLike>(
 /// XPath 3.1 §17.5 JSON function library (`fn:` namespace).  Returns
 /// `None` when `local` is not a JSON function so the caller falls
 /// through to ordinary built-in dispatch.
+/// Shared body of `fn:parse-xml` / `fn:parse-xml-fragment` (F&O §16.1):
+/// parse the string into a tree and graft it into the running index,
+/// returning the new document node.  `fragment` accepts the "external
+/// general parsed entity" form (zero or more top-level nodes) by parsing
+/// inside a synthetic container element whose children are then lifted to
+/// document level.  No external entities or DTDs are resolved.
+fn parse_xml_fn<I: DocIndexLike>(s: &str, fragment: bool, idx: &I) -> Result<Value> {
+    const WRAP: &str = "parse-xml-fragment-document-wrapper";
+    // parse-xml is defined to perform a namespace-aware parse (F&O §16.1);
+    // the library default is namespace-unaware, so enable it explicitly.
+    let opts = crate::options::ParseOptions { namespace_aware: true,
+        ..crate::options::ParseOptions::default() };
+    let parsed = if fragment {
+        crate::parser::parse_str(&format!("<{WRAP}>{s}</{WRAP}>"), &opts)
+    } else {
+        crate::parser::parse_str(s, &opts)
+    };
+    let doc = parsed.map_err(|e| {
+        let who = if fragment { "parse-xml-fragment" } else { "parse-xml" };
+        xpath_err(format!("{who}: {e}")).with_xpath_code("FODC0006")
+    })?;
+    let grafted = if fragment {
+        idx.graft_dynamic_fragment(&doc)
+    } else {
+        idx.graft_dynamic_document(&doc)
+    };
+    grafted.map(|id| Value::NodeSet(vec![id])).ok_or_else(|| xpath_err(
+        "parse-xml(): building nodes is not supported in this evaluation context"))
+}
+
+/// Flatten an XDM value to the in-index node ids it contains, in order.
+/// Atomic items and externally-loaded (foreign) nodes contribute none.
+fn collect_node_ids(v: &Value) -> Vec<NodeId> {
+    match v {
+        Value::NodeSet(ns)     => ns.clone(),
+        Value::Sequence(items) => items.iter().flat_map(collect_node_ids).collect(),
+        _                      => Vec::new(),
+    }
+}
+
+/// Serialize a node (and descendants) addressed by `idx` + `NodeId` to
+/// XML markup, for `fn:serialize()`'s xml/html/adaptive methods.  Walks
+/// the index abstraction so it works uniformly over source nodes, RTF
+/// fragments, and `parse-xml` trees.  `scope` carries the namespace
+/// declarations in force from ancestors so each element emits only the
+/// declarations it actually introduces.
+fn serialize_node_xml<I: DocIndexLike>(
+    idx: &I, id: NodeId, scope: &mut Vec<(String, String)>, out: &mut String,
+) {
+    match idx.kind(id) {
+        XPathNodeKind::Document => {
+            for c in idx.children(id).to_vec() {
+                serialize_node_xml(idx, c, scope, out);
+            }
+        }
+        XPathNodeKind::Element => {
+            let name = idx.node_name(id).to_string();
+            let prefix = name.split_once(':').map(|(p, _)| p).unwrap_or("");
+            let uri = idx.namespace_uri(id).to_string();
+            let mark = scope.len();
+            out.push('<');
+            out.push_str(&name);
+            ns_decl_if_needed(scope, prefix, &uri, out);
+            for a in idx.attr_range(id) {
+                let aname = idx.node_name(a).to_string();
+                // Namespace declarations are reconstructed from the
+                // prefixes in scope, not echoed as literal attributes
+                // (some index representations carry `xmlns:*` as attrs).
+                if aname == "xmlns" || aname.starts_with("xmlns:") {
+                    continue;
+                }
+                let auri = idx.namespace_uri(a).to_string();
+                if !auri.is_empty() {
+                    let aprefix = aname.split_once(':').map(|(p, _)| p).unwrap_or("");
+                    ns_decl_if_needed(scope, aprefix, &auri, out);
+                }
+                out.push(' ');
+                out.push_str(&aname);
+                out.push_str("=\"");
+                escape_attr_value(&idx.string_value(a), out);
+                out.push('"');
+            }
+            let children = idx.children(id).to_vec();
+            if children.is_empty() {
+                out.push_str("/>");
+            } else {
+                out.push('>');
+                for c in children {
+                    serialize_node_xml(idx, c, scope, out);
+                }
+                out.push_str("</");
+                out.push_str(&name);
+                out.push('>');
+            }
+            scope.truncate(mark);
+        }
+        XPathNodeKind::Text | XPathNodeKind::CData =>
+            escape_text_content(&idx.string_value(id), out),
+        XPathNodeKind::Comment => {
+            out.push_str("<!--");
+            out.push_str(&idx.string_value(id));
+            out.push_str("-->");
+        }
+        XPathNodeKind::PI => {
+            out.push_str("<?");
+            out.push_str(idx.pi_target(id));
+            let data = idx.string_value(id);
+            if !data.is_empty() {
+                out.push(' ');
+                out.push_str(&data);
+            }
+            out.push_str("?>");
+        }
+        // A bare attribute / namespace node isn't well-formed standalone
+        // XML; emit its string value (matches the atomic fallback).
+        XPathNodeKind::Attribute | XPathNodeKind::Namespace =>
+            escape_text_content(&idx.string_value(id), out),
+    }
+}
+
+/// Emit an `xmlns`/`xmlns:prefix` declaration into a start tag when the
+/// prefix→URI binding differs from what is already in `scope`, pushing
+/// the new binding so descendants see it.  The implicit `xml` prefix is
+/// never declared; a no-namespace element under an in-scope default
+/// namespace emits `xmlns=""` to undeclare it.
+fn ns_decl_if_needed(
+    scope: &mut Vec<(String, String)>, prefix: &str, uri: &str, out: &mut String,
+) {
+    if prefix == "xml" { return; }
+    let current = scope.iter().rev()
+        .find(|(p, _)| p == prefix).map(|(_, u)| u.as_str());
+    if current == Some(uri) { return; }
+    if uri.is_empty() {
+        if prefix.is_empty() && matches!(current, Some(c) if !c.is_empty()) {
+            out.push_str(" xmlns=\"\"");
+            scope.push((String::new(), String::new()));
+        }
+        return;
+    }
+    if prefix.is_empty() {
+        out.push_str(" xmlns=\"");
+    } else {
+        out.push_str(" xmlns:");
+        out.push_str(prefix);
+        out.push_str("=\"");
+    }
+    escape_attr_value(uri, out);
+    out.push('"');
+    scope.push((prefix.to_string(), uri.to_string()));
+}
+
+fn escape_text_content(s: &str, out: &mut String) {
+    for c in s.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            _   => out.push(c),
+        }
+    }
+}
+
+fn escape_attr_value(s: &str, out: &mut String) {
+    for c in s.chars() {
+        match c {
+            '&'  => out.push_str("&amp;"),
+            '<'  => out.push_str("&lt;"),
+            '"'  => out.push_str("&quot;"),
+            '\t' => out.push_str("&#9;"),
+            '\n' => out.push_str("&#10;"),
+            '\r' => out.push_str("&#13;"),
+            _    => out.push(c),
+        }
+    }
+}
+
 fn eval_json_function<I: DocIndexLike>(
     local: &str, args: &[Value], _ctx: &EvalCtx<'_>, idx: &I,
 ) -> Option<Result<Value>> {
@@ -5612,19 +5788,36 @@ fn eval_json_function<I: DocIndexLike>(
             xml_node_to_json(elem, idx, false, &mut out)?;
             Ok(Value::String(out))
         })(),
-        // fn:serialize($value [, $options]) (F&O §17.2) — only the JSON
-        // output method is modelled here; node-tree serialization (the
-        // xml/html/text methods) is the XSLT result-document layer's job,
-        // so those fall back to the value's string value.
+        // fn:serialize($value [, $options]) (F&O §17.2).  `method=json`
+        // emits the JSON output method; `method=text` (and any atomic /
+        // node-free value) the string value; everything else (the xml /
+        // html / adaptive default) serializes the node tree to markup.
+        // The XML declaration is omitted by default — set
+        // `omit-xml-declaration: 'no'` to emit one for a document node.
         "serialize" if (1..=2).contains(&args.len()) => (|| {
             let method = opt_str(args.get(1), "method").unwrap_or_default();
             if method == "json" {
                 let mut out = String::new();
                 value_to_json(&args[0], idx, &mut out)?;
-                Ok(Value::String(out))
-            } else {
-                Ok(Value::String(value_to_string(&args[0], idx)))
+                return Ok(Value::String(out));
             }
+            let ids = collect_node_ids(&args[0]);
+            if method == "text" || ids.is_empty() {
+                return Ok(Value::String(value_to_string(&args[0], idx)));
+            }
+            let emit_decl = opt_str(args.get(1), "omit-xml-declaration")
+                .map(|v| v == "no").unwrap_or(false);
+            let mut out = String::new();
+            if emit_decl && ids.iter().any(|&id|
+                matches!(idx.kind(id), XPathNodeKind::Document))
+            {
+                out.push_str("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n");
+            }
+            let mut scope: Vec<(String, String)> = Vec::new();
+            for id in ids {
+                serialize_node_xml(idx, id, &mut scope, &mut out);
+            }
+            Ok(Value::String(out))
         })(),
         _ => return None,
     };
@@ -7901,6 +8094,103 @@ fn eval_function<I: DocIndexLike>(name: &str, args: &[Expr], ctx: &EvalCtx<'_>, 
                 vec![n]
             }).unwrap_or_default();
             Ok(Value::NodeSet(r))
+        }
+        // fn:parse-xml / fn:parse-xml-fragment (F&O §16.1) — parse a
+        // string into a new document node grafted into the running index.
+        "parse-xml" | "parse-xml-fragment" => {
+            check_args!(1);
+            let a = arg!(0);
+            if sequence_len(&a) == 0 {
+                return Ok(Value::Sequence(Vec::new()));
+            }
+            parse_xml_fn(&value_to_string(&a, idx), name == "parse-xml-fragment", idx)
+        }
+        // fn:contains-token($input as xs:string*, $token [, $collation])
+        // (F&O §5.5.6) — true iff a whitespace-delimited token of any
+        // input string equals the trimmed $token.  Only the default
+        // (codepoint) collation is honored.
+        "contains-token" => {
+            if args.len() < 2 || args.len() > 3 {
+                return Err(xpath_err("contains-token() requires 2 or 3 arguments")
+                    .with_xpath_code("XPST0017"));
+            }
+            let token: String = arg_str!(1).split_whitespace()
+                .collect::<Vec<_>>().join(" ");
+            if token.is_empty() {
+                return Ok(Value::Boolean(false));
+            }
+            let found = sequence_to_strings(&arg!(0), idx).iter()
+                .any(|s| s.split_whitespace().any(|t| t == token));
+            Ok(Value::Boolean(found))
+        }
+        // fn:has-children([$node]) (F&O §14.1) — whether the node has any
+        // child node.  Zero-arg uses the context node; an empty sequence
+        // is false.
+        "has-children" => {
+            if args.len() > 1 {
+                return Err(xpath_err("has-children() requires 0 or 1 arguments")
+                    .with_xpath_code("XPST0017"));
+            }
+            let node = if args.is_empty() {
+                Some(ctx.context_node)
+            } else {
+                match arg!(0) {
+                    Value::NodeSet(ns)        => ns.first().copied(),
+                    Value::Sequence(items) if items.is_empty() => None,
+                    _ => return Err(xpath_err("has-children() argument must be a node")
+                        .with_xpath_code("XPTY0004")),
+                }
+            };
+            Ok(Value::Boolean(node.map(|n| !idx.children(n).is_empty()).unwrap_or(false)))
+        }
+        // fn:outermost keeps nodes with no ancestor in the input;
+        // fn:innermost keeps nodes with no descendant in the input
+        // (F&O §14.2/§14.3).  Both return document order, deduplicated.
+        "innermost" | "outermost" => {
+            check_args!(1);
+            let mut set = match arg!(0) {
+                Value::NodeSet(ns)     => ns,
+                Value::Sequence(items) => {
+                    let mut v = Vec::new();
+                    for it in &items {
+                        match it {
+                            Value::NodeSet(ns) => v.extend(ns.iter().copied()),
+                            _ => return Err(xpath_err(format!(
+                                "{name}() argument must be nodes"))
+                                .with_xpath_code("XPTY0004")),
+                        }
+                    }
+                    v
+                }
+                _ => return Err(xpath_err(format!(
+                    "{name}() argument must be nodes")).with_xpath_code("XPTY0004")),
+            };
+            dedup_sort(&mut set);
+            let in_set: HashSet<NodeId> = set.iter().copied().collect();
+            let mut out: Vec<NodeId> = if name == "outermost" {
+                set.iter().copied().filter(|&n| {
+                    let mut p = idx.parent(n);
+                    while let Some(a) = p {
+                        if in_set.contains(&a) { return false; }
+                        p = idx.parent(a);
+                    }
+                    true
+                }).collect()
+            } else {
+                // A node is dropped from innermost iff it is an ancestor
+                // of another input node.
+                let mut ancestors: HashSet<NodeId> = HashSet::new();
+                for &n in &set {
+                    let mut p = idx.parent(n);
+                    while let Some(a) = p {
+                        if !ancestors.insert(a) { break; }
+                        p = idx.parent(a);
+                    }
+                }
+                set.iter().copied().filter(|n| !ancestors.contains(n)).collect()
+            };
+            dedup_sort(&mut out);
+            Ok(Value::NodeSet(out))
         }
         // XPath 2.0 §15.5.4 doc($uri) — same as document($uri)
         // but always returns the doc as a single document node.

@@ -1088,6 +1088,9 @@ const FN_NAMES: &[&str] = &[
     "upper-case", "year-from-date", "year-from-dateTime",
     "years-from-duration", "zero-or-one",
     "current-group", "current-grouping-key",
+    // XPath 3.0 / 3.1 additions
+    "parse-xml", "parse-xml-fragment", "serialize",
+    "contains-token", "has-children", "innermost", "outermost",
     // EXSLT families dispatch by namespace, not by unqualified
     // name — those don't show up here.
 ];
@@ -1115,8 +1118,20 @@ fn builtin_arity_ok(name: &str, arity: usize) -> bool {
         | "key" | "lang"
             => arity == 2,
         // 2 or 3 args.
-        "substring" | "format-number" | "id"
+        "substring" | "format-number" | "id" | "contains-token"
             => (2..=3).contains(&arity),
+        // Exactly one arg.
+        "parse-xml" | "parse-xml-fragment"
+            => arity == 1,
+        // 0 or 1 arg.
+        "has-children"
+            => arity <= 1,
+        // 1 or 2 args.
+        "serialize"
+            => (1..=2).contains(&arity),
+        // Exactly one node-sequence arg.
+        "innermost" | "outermost"
+            => arity == 1,
         // 2+ args (variadic).
         "concat" => arity >= 2,
         // Exactly 3.

@@ -1914,6 +1914,147 @@ fn xslt3_for_each_group_adjacent_composite() {
     assert!(out.contains(r#"<run a="y" b="2" n="1"/>"#), "got: {out}");
 }
 
+/// XPath 3.1 `fn:parse-xml($string)` parses a string into a document node
+/// that the rest of the transform can navigate; `fn:serialize()` reverses
+/// it back to markup.
+#[test]
+fn xpath31_parse_xml_round_trip() {
+    let xslt = r#"<xsl:stylesheet version="3.0"
+        xmlns:xsl="http://www.w3.org/1999/XSL/Transform">
+        <xsl:output method="xml" omit-xml-declaration="yes"/>
+        <xsl:template match="/">
+            <xsl:variable name="d" select="parse-xml(string(/t))"/>
+            <out>
+                <root><xsl:value-of select="name($d/*)"/></root>
+                <b><xsl:value-of select="$d/a/b"/></b>
+                <x><xsl:value-of select="$d/a/@x"/></x>
+                <round><xsl:value-of select="serialize($d)"/></round>
+            </out>
+        </xsl:template>
+    </xsl:stylesheet>"#;
+    let out = transform(xslt, r#"<t><![CDATA[<a x="1"><b>hi</b></a>]]></t>"#);
+    assert!(out.contains("<root>a</root>"), "got: {out}");
+    assert!(out.contains("<b>hi</b>"), "got: {out}");
+    assert!(out.contains("<x>1</x>"), "got: {out}");
+    // serialize() reproduces the markup; xsl:value-of then escapes it as text.
+    assert!(out.contains("&lt;a x=\"1\"&gt;&lt;b&gt;hi&lt;/b&gt;&lt;/a&gt;"),
+        "round-trip serialize wrong: {out}");
+}
+
+/// `fn:serialize()` reconstructs namespace declarations at the element
+/// that introduces each binding, without redeclaring it on descendants.
+#[test]
+fn xpath31_serialize_preserves_namespaces() {
+    let xslt = r#"<xsl:stylesheet version="3.0"
+        xmlns:xsl="http://www.w3.org/1999/XSL/Transform">
+        <xsl:output method="xml" omit-xml-declaration="yes"/>
+        <xsl:template match="/">
+            <xsl:variable name="d" select="parse-xml(string(/t))"/>
+            <out><xsl:value-of select="serialize($d)"/></out>
+        </xsl:template>
+    </xsl:stylesheet>"#;
+    let out = transform(xslt,
+        r#"<t><![CDATA[<a:foo xmlns:a="urn:x"><a:bar>z</a:bar></a:foo>]]></t>"#);
+    // {urn:x}foo may serialize with the original prefix or as a default
+    // namespace (the parser's representation varies); either is a valid,
+    // equivalent serialization.  What matters: foo binds urn:x exactly
+    // once and the child reuses the in-scope binding (no redundant xmlns).
+    let prefixed = out.contains(r#"&lt;a:foo xmlns:a="urn:x"&gt;"#)
+        && out.contains("&lt;a:bar&gt;z&lt;/a:bar&gt;");
+    let defaulted = out.contains(r#"&lt;foo xmlns="urn:x"&gt;"#)
+        && out.contains("&lt;bar&gt;z&lt;/bar&gt;");
+    assert!(prefixed || defaulted, "namespace serialization wrong: {out}");
+}
+
+/// XPath 3.1 `fn:parse-xml-fragment($string)` accepts the external
+/// general parsed entity form — zero or more top-level nodes plus text —
+/// returning a document node whose children are that content.
+#[test]
+fn xpath31_parse_xml_fragment() {
+    let xslt = r#"<xsl:stylesheet version="3.0"
+        xmlns:xsl="http://www.w3.org/1999/XSL/Transform">
+        <xsl:output method="xml" omit-xml-declaration="yes"/>
+        <xsl:template match="/">
+            <xsl:variable name="f" select="parse-xml-fragment(string(/t))"/>
+            <out count="{count($f/node())}" elems="{count($f/*)}">
+                <xsl:value-of select="serialize($f)"/>
+            </out>
+        </xsl:template>
+    </xsl:stylesheet>"#;
+    let out = transform(xslt, r#"<t><![CDATA[<a/><b>x</b>tail]]></t>"#);
+    assert!(out.contains(r#"count="3""#), "got: {out}");  // <a/>, <b>, text "tail"
+    assert!(out.contains(r#"elems="2""#), "got: {out}");
+    assert!(out.contains("&lt;a/&gt;&lt;b&gt;x&lt;/b&gt;tail"), "got: {out}");
+}
+
+/// XPath 3.1 `fn:contains-token` — whitespace-tokenizes the input and
+/// tests membership of the trimmed token.
+#[test]
+fn xpath31_contains_token() {
+    let xslt = r#"<xsl:stylesheet version="3.0"
+        xmlns:xsl="http://www.w3.org/1999/XSL/Transform">
+        <xsl:output method="xml" omit-xml-declaration="yes"/>
+        <xsl:template match="/">
+            <out>
+                <a><xsl:value-of select="contains-token('red green blue', 'green')"/></a>
+                <b><xsl:value-of select="contains-token('red green blue', 'yellow')"/></b>
+                <c><xsl:value-of select="contains-token(/r/@class, 'active')"/></c>
+            </out>
+        </xsl:template>
+    </xsl:stylesheet>"#;
+    let out = transform(xslt, r#"<r class="btn active large"/>"#);
+    assert!(out.contains("<a>true</a>"), "got: {out}");
+    assert!(out.contains("<b>false</b>"), "got: {out}");
+    assert!(out.contains("<c>true</c>"), "got: {out}");
+}
+
+/// XPath 3.1 `fn:has-children` — whether a node has any child node;
+/// zero-arg uses the context node.
+#[test]
+fn xpath31_has_children() {
+    let xslt = r#"<xsl:stylesheet version="3.0"
+        xmlns:xsl="http://www.w3.org/1999/XSL/Transform">
+        <xsl:output method="xml" omit-xml-declaration="yes"/>
+        <xsl:template match="/">
+            <out>
+                <p><xsl:value-of select="has-children(/r)"/></p>
+                <l><xsl:value-of select="has-children(/r/leaf)"/></l>
+                <e><xsl:value-of select="has-children(/r/bare)"/></e>
+                <ctx><xsl:for-each select="/r/leaf"><xsl:value-of select="has-children()"/></xsl:for-each></ctx>
+            </out>
+        </xsl:template>
+    </xsl:stylesheet>"#;
+    let out = transform(xslt, r#"<r><leaf>text</leaf><bare/></r>"#);
+    assert!(out.contains("<p>true</p>"), "got: {out}");   // r has element children
+    assert!(out.contains("<l>true</l>"), "got: {out}");   // leaf has a text child
+    assert!(out.contains("<e>false</e>"), "got: {out}");  // bare is empty
+    assert!(out.contains("<ctx>true</ctx>"), "got: {out}"); // 0-arg on leaf
+}
+
+/// XPath 3.1 `fn:outermost` keeps nodes with no ancestor in the input set;
+/// `fn:innermost` keeps those with no descendant in it.
+#[test]
+fn xpath31_innermost_outermost() {
+    let xslt = r#"<xsl:stylesheet version="3.0"
+        xmlns:xsl="http://www.w3.org/1999/XSL/Transform">
+        <xsl:output method="xml" omit-xml-declaration="yes"/>
+        <xsl:template match="/">
+            <xsl:variable name="all" select="//section"/>
+            <out>
+                <outer><xsl:value-of select="string-join(outermost($all)/@id, ',')"/></outer>
+                <inner><xsl:value-of select="string-join(innermost($all)/@id, ',')"/></inner>
+            </out>
+        </xsl:template>
+    </xsl:stylesheet>"#;
+    let out = transform(xslt,
+        r#"<doc>
+            <section id="a"><section id="b"><section id="c"/></section></section>
+            <section id="d"/>
+        </doc>"#);
+    assert!(out.contains("<outer>a,d</outer>"), "got: {out}");
+    assert!(out.contains("<inner>c,d</inner>"), "got: {out}");
+}
+
 /// XSLT 2.0 `xsl:analyze-string` — partitions input by regex matches,
 /// `regex-group(n)` exposes captures inside `<xsl:matching-substring>`.
 #[test]

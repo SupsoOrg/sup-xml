@@ -51,6 +51,18 @@ pub trait DocIndexLike {
         None
     }
 
+    /// Graft a `fn:parse-xml-fragment` parse — a synthetic single-element
+    /// wrapper whose children are the fragment's top-level nodes — into a
+    /// fresh document node, returning its id.  Mirrors
+    /// [`graft_dynamic_document`](Self::graft_dynamic_document); stub
+    /// implementations return `None`.
+    fn graft_dynamic_fragment(
+        &self,
+        _doc: &sup_xml_tree::dom::Document,
+    ) -> Option<NodeId> {
+        None
+    }
+
     /// Children in document order (content children only — attributes are
     /// addressed separately via [`attr_range`](Self::attr_range)).
     fn children(&self, id: NodeId) -> &[NodeId];

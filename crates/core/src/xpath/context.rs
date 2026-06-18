@@ -558,6 +558,32 @@ impl<'doc> DocIndex<'doc> {
         }
         self.finish_rtf(builder)
     }
+
+    /// Graft the content of a `fn:parse-xml-fragment` parse into a fresh
+    /// document node.  The caller wraps the fragment string in a single
+    /// synthetic container element (the spec's "external general parsed
+    /// entity" model lets the fragment hold zero or more top-level
+    /// elements plus text / comments / PIs); this lifts that wrapper's
+    /// children to the top level so they become the document's content.
+    pub fn graft_dynamic_fragment(
+        &self,
+        doc: &sup_xml_tree::dom::Document,
+    ) -> NodeId {
+        let mut builder = self.start_rtf();
+        let root = builder.add_document();
+        let mut cur = Some(doc.first_sibling());
+        while let Some(n) = cur {
+            if matches!(n.kind, sup_xml_tree::dom::NodeKind::Element) {
+                for child in n.children() {
+                    graft_node(&mut builder, root, child);
+                }
+            } else {
+                graft_node(&mut builder, root, n);
+            }
+            cur = n.next_sibling.get();
+        }
+        self.finish_rtf(builder)
+    }
 }
 
 /// Recursive helper for [`DocIndex::graft_dynamic_document`].
@@ -630,6 +656,12 @@ impl<'doc> DocIndexLike for DocIndex<'doc> {
         doc: &sup_xml_tree::dom::Document,
     ) -> Option<NodeId> {
         Some(DocIndex::graft_dynamic_document(self, doc))
+    }
+    fn graft_dynamic_fragment(
+        &self,
+        doc: &sup_xml_tree::dom::Document,
+    ) -> Option<NodeId> {
+        Some(DocIndex::graft_dynamic_fragment(self, doc))
     }
     fn children(&self, id: NodeId) -> &[NodeId] {
         if let Some((rtf, local)) = self.rtf_at(id) { return rtf.children(local); }
