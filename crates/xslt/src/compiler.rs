@@ -3757,6 +3757,26 @@ fn compile_output(node: &Node) -> Result<OutputSpec, XsltError> {
                      (SEPM0010)".into()));
             }
         }
+        // A doctype-public value must contain only XML PubidChars (XTSE0020).
+        if let Some(v) = read_attribute(node, "doctype-public") {
+            if !v.chars().all(|c| matches!(c,
+                'a'..='z' | 'A'..='Z' | '0'..='9' | ' ' | '\r' | '\n'
+                | '-' | '\'' | '(' | ')' | '+' | ',' | '.' | '/' | ':'
+                | '=' | '?' | ';' | '!' | '*' | '#' | '@' | '$' | '_' | '%')) {
+                return Err(XsltError::InvalidStylesheet(format!(
+                    "xsl:output doctype-public='{v}' is not a valid public \
+                     identifier (XTSE0020)"
+                )));
+            }
+        }
+        // html-version is a numeric serialization parameter (XTSE0020).
+        if let Some(v) = read_attribute(node, "html-version") {
+            if v.trim().parse::<f64>().is_err() {
+                return Err(XsltError::InvalidStylesheet(format!(
+                    "xsl:output html-version='{v}' must be a number (XTSE0020)"
+                )));
+            }
+        }
     }
     out.method                 = read_attribute(node, "method").map(str::to_string);
     // XSLT 2.0 §20 / XTSE1570 — an unprefixed method= value must be
@@ -8193,9 +8213,15 @@ mod tests {
         assert!(out(r#"method="xml" undeclare-prefixes="yes" version="1.0""#).is_err());
         // The same parameters are ignored for the html method — no error.
         assert!(out(r#"method="html" omit-xml-declaration="yes" standalone="yes""#).is_ok());
-        // Standard forms and valid combinations still compile.
+        // Invalid public identifier (contains non-PubidChars).
+        assert!(out(r#"method="xml" doctype-public="£[~~~]""#).is_err());
+        // Non-numeric html-version.
+        assert!(out(r#"method="xhtml" html-version="five""#).is_err());
+        // Standard forms and valid values still compile.
         assert!(out(r#"method="xml" normalization-form="NFC""#).is_ok());
         assert!(out(r#"method="xml" undeclare-prefixes="yes" version="1.1""#).is_ok());
+        assert!(out(r#"method="xml" doctype-public="-//W3C//DTD HTML 4.01//EN""#).is_ok());
+        assert!(out(r#"method="xhtml" html-version="5.0""#).is_ok());
     }
 
     // ── xsl:namespace-alias ─────────────────────────────────────
