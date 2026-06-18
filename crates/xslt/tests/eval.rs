@@ -513,6 +513,41 @@ fn package_expose_raises_visibility_for_using_package() {
 }
 
 #[test]
+fn package_override_default_mode_applies_to_templates_and_apply() {
+    // XSLT 3.0 §6.4 — default-mode= on xsl:override supplies the mode for
+    // the override's match templates AND the xsl:apply-templates in their
+    // bodies, so the override replaces the used package's moded rule and
+    // recursion stays in that mode.
+    let base = r#"<xsl:package version="3.0" name="base"
+        xmlns:xsl="http://www.w3.org/1999/XSL/Transform">
+        <xsl:mode name="m" visibility="public"/>
+        <xsl:template match="a" mode="m"><base-a/></xsl:template>
+        <xsl:template match="b" mode="m"><base-b/></xsl:template>
+    </xsl:package>"#;
+    let mut packages = std::collections::HashMap::new();
+    packages.insert("base".to_string(), (base.to_string(), None));
+    let main = r#"<xsl:package version="3.0" name="main"
+        xmlns:xsl="http://www.w3.org/1999/XSL/Transform">
+        <xsl:use-package name="base">
+            <xsl:override default-mode="m">
+                <xsl:template match="a"><over-a><xsl:apply-templates/></over-a></xsl:template>
+            </xsl:override>
+        </xsl:use-package>
+        <xsl:variable name="in"><a><b/></a></xsl:variable>
+        <xsl:template name="main" visibility="public"><out><xsl:apply-templates select="$in/a" mode="m"/></out></xsl:template>
+    </xsl:package>"#;
+    let xslt = Stylesheet::compile_str_with_packages(
+        main, &sup_xml_xslt::loader::NullLoader, None, packages).unwrap();
+    let doc = parse_str("<x/>", &ParseOptions::default()).unwrap();
+    let out = xslt
+        .apply_with_params_initial_and_mode(&doc, &sup_xml_xslt::loader::NullLoader, None, &[], Some("main"), None)
+        .unwrap().to_string().unwrap();
+    // Override's match="a" wins in mode m; its apply-templates recurses in
+    // mode m and reaches the base's match="b".
+    assert!(out.contains("<out><over-a><base-b/></over-a></out>"), "got: {out}");
+}
+
+#[test]
 fn document_apply_without_loader_errors_when_used() {
     // The stylesheet references document('foo.xml'); without a Loader,
     // pre-loading fails at apply time.

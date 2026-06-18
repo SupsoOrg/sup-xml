@@ -58,6 +58,32 @@ thread_local! {
     static STATIC_PARAMS: std::cell::RefCell<
         std::collections::HashMap<String, sup_xml_core::xpath::eval::Value>>
         = std::cell::RefCell::new(std::collections::HashMap::new());
+    /// In-scope `default-mode=` (XSLT 3.0 §6.4) during compilation —
+    /// supplies the mode for `xsl:template` / `xsl:apply-templates` that
+    /// omit `mode=`.  `None` (the usual state) means the unnamed mode;
+    /// `Some(qname)` is set while compiling an `xsl:override` body that
+    /// carries `default-mode=`.
+    static COMPILE_DEFAULT_MODE: std::cell::RefCell<Option<QName>>
+        = const { std::cell::RefCell::new(None) };
+}
+
+/// The mode supplied by an in-scope `default-mode=`, or `None` (unnamed).
+fn current_default_mode() -> Option<QName> {
+    COMPILE_DEFAULT_MODE.with(|m| m.borrow().clone())
+}
+
+/// RAII scope for `default-mode=`: sets the compile-time default mode and
+/// restores the previous value on drop.
+struct DefaultModeGuard(Option<QName>);
+impl DefaultModeGuard {
+    fn enter(mode: Option<QName>) -> Self {
+        DefaultModeGuard(COMPILE_DEFAULT_MODE.with(|m| m.replace(mode)))
+    }
+}
+impl Drop for DefaultModeGuard {
+    fn drop(&mut self) {
+        COMPILE_DEFAULT_MODE.with(|m| *m.borrow_mut() = self.0.take());
+    }
 }
 
 thread_local! {
@@ -3218,6 +3244,14 @@ fn compile_template(node: &Node) -> Result<Template, XsltError> {
             )));
         }
     }
+    // XSLT 3.0 §6.4 — a match template that omits mode= takes the
+    // in-scope default mode (set only inside an xsl:override carrying
+    // default-mode=; the unnamed mode otherwise).
+    if match_pattern.is_some() && modes.is_empty() && !modes_match_all {
+        if let Some(dm) = current_default_mode() {
+            modes.push(dm);
+        }
+    }
     // The primary `mode` slot stays compatible with single-mode
     // callers: it's `Some(first-listed-mode)` for the legacy code
     // paths, or `None` when the list is empty.  `#all` templates
@@ -3511,6 +3545,17 @@ fn compile_use_package(node: &Node) -> Result<UsePackage, XsltError> {
             "override" => {
                 // Each child of xsl:override is a component declaration
                 // that replaces the corresponding used-package one.
+                // XSLT 3.0 §6.4 — default-mode= on xsl:override supplies the
+                // mode for the override's xsl:template / xsl:apply-templates
+                // that omit mode=, so an override of a used package's moded
+                // template rules lands in the right mode (and its body
+                // recurses in that mode too).
+                let default_mode = match read_attribute(child, "default-mode") {
+                    Some("#unnamed") => Some(None),
+                    Some(dm)         => Some(Some(parse_qname_on(child, dm)?)),
+                    None             => None,
+                };
+                let _guard = default_mode.map(DefaultModeGuard::enter);
                 for decl in child.children() {
                     if !decl.is_element() { continue; }
                     compile_top_level(decl, &mut overrides, pos)?;
@@ -4924,7 +4969,7 @@ fn compile_apply_templates(node: &Node) -> Result<Instr, XsltError> {
     // through `mode_current`.
     let mode_attr = read_attribute(node, "mode").map(str::trim);
     let (mode, mode_current) = match mode_attr {
-        None | Some("#default")              => (None, false),
+        None | Some("#default")              => (current_default_mode(), false),
         Some("#current") if is_xslt_2_0_compile() => (None, true),
         Some(s) => (Some(parse_qname_on(node, s)?), false),
     };
