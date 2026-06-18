@@ -5115,6 +5115,15 @@ fn compile_for_each_group(node: &Node) -> Result<Instr, XsltError> {
             collation = effective_default_collation(node);
         }
     }
+    // XSLT 3.0 §19.1 — `composite="yes"` treats the whole grouping-key
+    // sequence as one key.  It is meaningful only for the value-based
+    // grouping forms (group-by / group-adjacent); for the positional
+    // forms the spec says it is ignored, so we parse it but the eval
+    // path never consults it there.
+    let composite = read_attribute(node, "composite")
+        .map(|v| parse_bool_attr(&v, "xsl:for-each-group", "composite"))
+        .transpose()?
+        .unwrap_or(false);
     let (sort, _) = collect_sort_and_with_params(node)?;
     let mut body = Body::new();
     for child in node.children() {
@@ -5131,6 +5140,7 @@ fn compile_for_each_group(node: &Node) -> Result<Instr, XsltError> {
         sort,
         body,
         collation,
+        composite,
     })
 }
 

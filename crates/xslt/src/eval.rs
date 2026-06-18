@@ -345,6 +345,23 @@ fn grouping_key_items(v: &Value) -> Vec<Value> {
     }
 }
 
+/// Build a single comparable key for a composite grouping key (XSLT
+/// 3.0 §19.1 `composite="yes"`): two key sequences are equal iff they
+/// have the same length and pairwise-equal items.  Each item folds to
+/// its `eq`-style equality key (string value under the active
+/// collation for nodes / strings); the items are joined by a
+/// separator that does not occur in ordinary key text so distinct
+/// tuples cannot collide.
+fn composite_key_str<F: Fn(&str) -> String>(
+    items: &[Value], collation_fold: &F, state: &EvalState,
+) -> String {
+    items.iter()
+        .map(|it| value_equality_key(it).unwrap_or_else(||
+            collation_fold(&value_to_string_styled(it, state.idx, state.num_style()))))
+        .collect::<Vec<_>>()
+        .join("\u{1}")
+}
+
 fn static_ctx_for_version(version: &str) -> StaticContext {
     let major = version.trim().split('.').next()
         .and_then(|s| s.parse::<u32>().ok());
@@ -4162,7 +4179,7 @@ fn eval_instr(
             }
             run_analyze_partition(state, matching, non_matching, &segments, ctx_node)?;
         }
-        Instr::ForEachGroup { select, kind, key, sort, body, collation } => {
+        Instr::ForEachGroup { select, kind, key, sort, body, collation, composite } => {
             use crate::ast::GroupingKind;
             // XSLT 2.0 §14 — the input sequence may contain atomic
             // values as well as nodes.  Realise atomics as synthetic
@@ -4243,6 +4260,23 @@ fn eval_instr(
                     for (i, &n) in nodes.iter().enumerate() {
                         state.xslt_current = n;
                         let kv = state.xpath_eval(key, n, i + 1, nodes.len())?;
+                        if *composite {
+                            // XSLT 3.0 §19.1 — the whole grouping-key
+                            // sequence is one composite key; two items
+                            // group together iff their key sequences are
+                            // pairwise-equal in order.  The stored key is
+                            // the full sequence, so current-grouping-key()
+                            // returns every component.
+                            let items = grouping_key_items(&kv);
+                            let k_str = composite_key_str(&items, &collation_fold, state);
+                            if !buckets.contains_key(&k_str) {
+                                key_order.push(k_str.clone());
+                            }
+                            buckets.entry(k_str)
+                                .or_insert_with(|| (Value::Sequence(items), Vec::new()))
+                                .1.push(n);
+                            continue;
+                        }
                         // XSLT 2.0 §14.3 — each item in the grouping-key
                         // sequence is a distinct key; the node joins the
                         // group for each, deduplicated within this item
@@ -4270,6 +4304,21 @@ fn eval_instr(
                     for (i, &n) in nodes.iter().enumerate() {
                         state.xslt_current = n;
                         let kv = state.xpath_eval(key, n, i + 1, nodes.len())?;
+                        if *composite {
+                            // XSLT 3.0 §19.1 — adjacency is by the whole
+                            // grouping-key sequence compared as a tuple;
+                            // multi-item (and empty) key sequences are
+                            // allowed, unlike the non-composite form.
+                            let items = grouping_key_items(&kv);
+                            let k_str = composite_key_str(&items, &collation_fold, state);
+                            if Some(&k_str) == prev_key.as_ref() {
+                                out.last_mut().unwrap().1.push(n);
+                            } else {
+                                out.push((Value::Sequence(items), vec![n]));
+                                prev_key = Some(k_str);
+                            }
+                            continue;
+                        }
                         // XSLT 2.0 §14.4 / XTTE1100 — the
                         // group-adjacent expression must produce
                         // exactly one item per source item.  An

@@ -595,6 +595,12 @@ pub enum Instr {
         /// `group-adjacent` consult this — the positional grouping
         /// forms compare nodes by identity.
         collation: Option<String>,
+        /// `composite="yes"` (XSLT 3.0 §19.1).  When set, the whole
+        /// grouping-key sequence is treated as a single composite key
+        /// rather than each item being a distinct key, and
+        /// `current-grouping-key()` returns the full sequence.  Only
+        /// `group-by` / `group-adjacent` consult this.
+        composite: bool,
     },
     /// `xsl:source-document` (XSLT 3.0 §18.1; also the older
     /// `xsl:stream`) — process an external document.  We implement it

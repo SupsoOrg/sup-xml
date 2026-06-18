@@ -1810,6 +1810,110 @@ fn xslt2_for_each_group_adjacent() {
         "expected three adjacency runs, got: {out}");
 }
 
+/// XSLT 3.0 §19.1 — `xsl:for-each-group group-by` with `composite="yes"`
+/// treats the entire grouping-key sequence as a single key, so two
+/// items group together only when every component matches.  Without
+/// composite, each component (`@name`, `@country`) would be a distinct
+/// key and produce spurious extra groups.  `current-grouping-key()`
+/// returns the full sequence, indexable as `[1]` / `[2]`.
+#[test]
+fn xslt3_for_each_group_by_composite() {
+    let xslt = r#"<xsl:stylesheet version="3.0"
+        xmlns:xsl="http://www.w3.org/1999/XSL/Transform">
+        <xsl:output method="xml" indent="no"/>
+        <xsl:template match="/">
+            <out>
+                <xsl:for-each-group select="cities/city"
+                                    group-by="@name, @country"
+                                    composite="yes">
+                    <p><xsl:value-of select="current-grouping-key()[1] || ', ' ||
+                        current-grouping-key()[2] || ': ' ||
+                        avg(current-group()/@pop)"/></p>
+                </xsl:for-each-group>
+            </out>
+        </xsl:template>
+    </xsl:stylesheet>"#;
+    let out = transform(xslt,
+        r#"<cities>
+            <city name="Milano" country="Italia" year="1950" pop="5.23"/>
+            <city name="Milano" country="Italia" year="1960" pop="5.29"/>
+            <city name="Padova" country="Italia" year="1950" pop="0.69"/>
+            <city name="Padova" country="Italia" year="1960" pop="0.93"/>
+            <city name="Paris"  country="France" year="1951" pop="7.2"/>
+            <city name="Paris"  country="France" year="1961" pop="7.6"/>
+        </cities>"#);
+    // Exactly three composite groups, one per (name, country) tuple —
+    // no separate "Italia" / "France" buckets.
+    assert_eq!(out.matches("<p>").count(), 3,
+        "expected three composite groups, got: {out}");
+    assert!(out.contains("<p>Milano, Italia: 5.26</p>"), "got: {out}");
+    assert!(out.contains("<p>Padova, Italia: 0.81</p>"), "got: {out}");
+    assert!(out.contains("<p>Paris, France: 7.4</p>"), "got: {out}");
+}
+
+/// XSLT 3.0 §19.1 — without `composite`, a multi-item `group-by`
+/// sequence keys the node under each item separately (XSLT 2.0
+/// behavior).  This is the divergence the composite flag corrects: the
+/// shared country "Italia" collapses Milano and Padova into one bucket.
+#[test]
+fn xslt3_for_each_group_by_multi_item_non_composite() {
+    let xslt = r#"<xsl:stylesheet version="3.0"
+        xmlns:xsl="http://www.w3.org/1999/XSL/Transform">
+        <xsl:output method="xml" indent="no"/>
+        <xsl:template match="/">
+            <out>
+                <xsl:for-each-group select="cities/city" group-by="@name, @country">
+                    <g key="{current-grouping-key()}" n="{count(current-group())}"/>
+                </xsl:for-each-group>
+            </out>
+        </xsl:template>
+    </xsl:stylesheet>"#;
+    let out = transform(xslt,
+        r#"<cities>
+            <city name="Milano" country="Italia"/>
+            <city name="Padova" country="Italia"/>
+            <city name="Paris"  country="France"/>
+        </cities>"#);
+    // Distinct keys: Milano, Italia, Padova, Paris, France → 5 groups,
+    // with Italia spanning the two Italian cities.
+    assert_eq!(out.matches("<g ").count(), 5,
+        "expected five per-item groups, got: {out}");
+    assert!(out.contains(r#"<g key="Italia" n="2"/>"#), "got: {out}");
+}
+
+/// XSLT 3.0 §19.1 — `group-adjacent` with `composite="yes"` accepts a
+/// multi-item key sequence (rejected as XTTE1100 without composite) and
+/// breaks runs whenever any component of the tuple changes.
+#[test]
+fn xslt3_for_each_group_adjacent_composite() {
+    let xslt = r#"<xsl:stylesheet version="3.0"
+        xmlns:xsl="http://www.w3.org/1999/XSL/Transform">
+        <xsl:output method="xml" indent="no"/>
+        <xsl:template match="/items">
+            <out>
+                <xsl:for-each-group select="row" group-adjacent="@a, @b" composite="yes">
+                    <run a="{current-grouping-key()[1]}" b="{current-grouping-key()[2]}"
+                         n="{count(current-group())}"/>
+                </xsl:for-each-group>
+            </out>
+        </xsl:template>
+    </xsl:stylesheet>"#;
+    let out = transform(xslt,
+        r#"<items>
+            <row a="x" b="1"/>
+            <row a="x" b="1"/>
+            <row a="x" b="2"/>
+            <row a="y" b="2"/>
+        </items>"#);
+    // Runs: (x,1)×2, (x,2)×1, (y,2)×1 — the second component splits the
+    // first two from the third even though @a stays "x".
+    assert_eq!(out.matches("<run ").count(), 3,
+        "expected three adjacency runs, got: {out}");
+    assert!(out.contains(r#"<run a="x" b="1" n="2"/>"#), "got: {out}");
+    assert!(out.contains(r#"<run a="x" b="2" n="1"/>"#), "got: {out}");
+    assert!(out.contains(r#"<run a="y" b="2" n="1"/>"#), "got: {out}");
+}
+
 /// XSLT 2.0 `xsl:analyze-string` — partitions input by regex matches,
 /// `regex-group(n)` exposes captures inside `<xsl:matching-substring>`.
 #[test]
