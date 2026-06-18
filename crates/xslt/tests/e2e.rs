@@ -2168,6 +2168,36 @@ fn xpath31_parse_ietf_date() {
     assert!(out.contains(r#"cmp="true""#), "got: {out}");
 }
 
+/// XPath 3.1 `fn:random-number-generator($seed)` — a generator map with
+/// `number` (a double in [0,1)), `next` (the following generator), and
+/// `permute` (a shuffle).  Deterministic in the seed.
+#[test]
+fn xpath31_random_number_generator() {
+    let xslt = r#"<xsl:stylesheet version="3.0"
+        xmlns:xsl="http://www.w3.org/1999/XSL/Transform"
+        xmlns:map="http://www.w3.org/2005/xpath-functions/map">
+        <xsl:output method="xml" omit-xml-declaration="yes"/>
+        <xsl:template match="/">
+            <xsl:variable name="g" select="random-number-generator(42)"/>
+            <out inrange="{$g?number ge 0 and $g?number lt 1}"
+                 advances="{$g?number ne $g?next()?number}"
+                 deterministic="{$g?number = random-number-generator(42)?number}"
+                 seedvaries="{$g?number ne random-number-generator(7)?number}"
+                 permsize="{count($g?permute((1,2,3,4,5)))}"
+                 permsum="{sum($g?permute((1,2,3,4,5)))}"
+                 permstable="{string-join($g?permute((1,2,3,4,5)),',') = string-join($g?permute((1,2,3,4,5)),',')}"/>
+        </xsl:template>
+    </xsl:stylesheet>"#;
+    let out = transform(xslt, "<x/>");
+    assert!(out.contains(r#"inrange="true""#), "got: {out}");
+    assert!(out.contains(r#"advances="true""#), "got: {out}");      // next() differs
+    assert!(out.contains(r#"deterministic="true""#), "got: {out}"); // same seed
+    assert!(out.contains(r#"seedvaries="true""#), "got: {out}");    // different seed
+    assert!(out.contains(r#"permsize="5""#), "got: {out}");         // permutation keeps all items
+    assert!(out.contains(r#"permsum="15""#), "got: {out}");         // 1+2+3+4+5
+    assert!(out.contains(r#"permstable="true""#), "got: {out}");    // same generator → same order
+}
+
 /// XSLT 2.0 `xsl:analyze-string` — partitions input by regex matches,
 /// `regex-group(n)` exposes captures inside `<xsl:matching-substring>`.
 #[test]

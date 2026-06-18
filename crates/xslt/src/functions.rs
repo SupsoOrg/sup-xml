@@ -1082,6 +1082,7 @@ const FN_NAMES: &[&str] = &[
     "parse-xml", "parse-xml-fragment", "serialize",
     "contains-token", "has-children", "innermost", "outermost",
     "characters", "unparsed-text-lines", "format-integer", "parse-ietf-date",
+    "random-number-generator",
     // EXSLT families dispatch by namespace, not by unqualified
     // name — those don't show up here.
 ];
@@ -1119,7 +1120,7 @@ fn builtin_arity_ok(name: &str, arity: usize) -> bool {
         "unparsed-text-lines"
             => (1..=2).contains(&arity),
         // 0 or 1 arg.
-        "has-children"
+        "has-children" | "random-number-generator"
             => arity <= 1,
         // 1 or 2 args.
         "serialize"

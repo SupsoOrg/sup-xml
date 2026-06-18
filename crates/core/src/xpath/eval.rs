@@ -520,6 +520,21 @@ pub enum FunctionItem {
     /// A partial application: a base function with some arguments
     /// already bound; `None` slots are the remaining parameters.
     Partial { base: Box<FunctionItem>, bound: Vec<Option<Value>> },
+    /// An engine-provided function carrying captured state — for
+    /// stateful builtins (e.g. `fn:random-number-generator`'s `next` /
+    /// `permute` members) that can't be expressed as inline XPath.
+    Native { kind: NativeFn, arity: usize },
+}
+
+/// The behavior of a [`FunctionItem::Native`], with its captured state.
+#[derive(Debug, Clone)]
+pub enum NativeFn {
+    /// `random-number-generator`'s `next` member (arity 0): returns the
+    /// next generator map.  Carries the next generator's PRNG state.
+    RngNext(u64),
+    /// `random-number-generator`'s `permute` member (arity 1): returns a
+    /// deterministic random permutation of its argument sequence.
+    RngPermute(u64),
 }
 
 impl FunctionItem {
@@ -530,6 +545,7 @@ impl FunctionItem {
             FunctionItem::Named { arity, .. } => *arity,
             FunctionItem::Partial { bound, .. } =>
                 bound.iter().filter(|b| b.is_none()).count(),
+            FunctionItem::Native { arity, .. } => *arity,
         }
     }
 
@@ -2440,6 +2456,19 @@ fn call_function_item<I: DocIndexLike>(
                 }
             }
             call_function_item(base, full, ctx, idx)
+        }
+        FunctionItem::Native { kind, arity } => {
+            if args.len() != *arity {
+                return Err(xpath_err(format!(
+                    "function expects {arity} argument(s), got {}", args.len())));
+            }
+            match kind {
+                NativeFn::RngNext(state) => Ok(rng_generator_map(*state)),
+                NativeFn::RngPermute(state) => {
+                    let seq = args.into_iter().next().unwrap_or(Value::Sequence(Vec::new()));
+                    Ok(Value::Sequence(rng_permute_seq(*state, items_of(&seq))))
+                }
+            }
         }
     }
 }
@@ -5574,6 +5603,56 @@ fn parse_xml_fn<I: DocIndexLike>(s: &str, fragment: bool, idx: &I) -> Result<Val
         "parse-xml(): building nodes is not supported in this evaluation context"))
 }
 
+/// splitmix64 finalizer — maps a state word to a well-distributed
+/// pseudo-random word.  Drives `fn:random-number-generator`.
+fn splitmix64(mut z: u64) -> u64 {
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    z ^ (z >> 31)
+}
+
+const RNG_GOLDEN: u64 = 0x9E37_79B9_7F4A_7C15;
+
+/// Build a `fn:random-number-generator` result map for PRNG `state`:
+/// `number` (xs:double in [0,1)), `next` (the generator at the advanced
+/// state), and `permute` (a shuffle seeded by this state).
+fn rng_generator_map(state: u64) -> Value {
+    // 53-bit mantissa → a double in [0,1).
+    let number = (splitmix64(state) >> 11) as f64 / (1u64 << 53) as f64;
+    let next = Value::Function(Box::new(FunctionItem::Native {
+        kind: NativeFn::RngNext(state.wrapping_add(RNG_GOLDEN)), arity: 0 }));
+    let permute = Value::Function(Box::new(FunctionItem::Native {
+        kind: NativeFn::RngPermute(state), arity: 1 }));
+    Value::Map(Box::new(vec![
+        (Value::String("number".into()),  Value::Number(Numeric::Double(number))),
+        (Value::String("next".into()),    next),
+        (Value::String("permute".into()), permute),
+    ]))
+}
+
+/// Deterministic Fisher–Yates shuffle of `items`, seeded by `state` —
+/// the `permute` member of a generator (same generator → same result).
+fn rng_permute_seq(state: u64, mut items: Vec<Value>) -> Vec<Value> {
+    let mut s = state;
+    for i in (1..items.len()).rev() {
+        s = s.wrapping_add(RNG_GOLDEN);
+        let j = (splitmix64(s) % (i as u64 + 1)) as usize;
+        items.swap(i, j);
+    }
+    items
+}
+
+/// Derive an initial PRNG state from a `$seed` atomic via FNV-1a over
+/// its string value, so equal seeds yield equal generators.
+fn rng_seed_state<I: DocIndexLike>(seed: &Value, idx: &I) -> u64 {
+    let mut h = 0xcbf2_9ce4_8422_2325u64;
+    for b in value_to_string(seed, idx).bytes() {
+        h ^= b as u64;
+        h = h.wrapping_mul(0x100_0000_01b3);
+    }
+    h
+}
+
 /// Parse an IETF / RFC 822-1123 (or asctime) date string into a
 /// canonical `xs:dateTime` lexical form (F&O §9.9.4 `fn:parse-ietf-date`).
 /// Returns `None` when the input doesn't match the grammar.  A two-digit
@@ -8189,6 +8268,22 @@ fn eval_function<I: DocIndexLike>(name: &str, args: &[Expr], ctx: &EvalCtx<'_>, 
                 return Ok(Value::Sequence(Vec::new()));
             }
             parse_xml_fn(&value_to_string(&a, idx), name == "parse-xml-fragment", idx)
+        }
+        // fn:random-number-generator([$seed]) as map(*) (F&O §5.3.3) —
+        // a generator map with `number` (xs:double in [0,1)), `next`
+        // (the following generator), and `permute` (a shuffling
+        // function).  Deterministic in the seed.
+        "random-number-generator" => {
+            if args.len() > 1 {
+                return Err(xpath_err(
+                    "random-number-generator() takes 0 or 1 arguments")
+                    .with_xpath_code("XPST0017"));
+            }
+            let state = match args.first() {
+                None    => 0x2545_F491_4F6C_DD1D,
+                Some(_) => rng_seed_state(&arg!(0), idx),
+            };
+            Ok(rng_generator_map(state))
         }
         // fn:parse-ietf-date($value) as xs:dateTime? (F&O §9.9.4) —
         // parse an RFC 822 / 1123 or asctime date string.
