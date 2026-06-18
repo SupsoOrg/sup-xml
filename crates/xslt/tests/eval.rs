@@ -365,6 +365,29 @@ fn document_loads_external_doc_via_loader() {
 }
 
 #[test]
+fn unparsed_text_lines_returns_sequence() {
+    // XPath 3.1 §16.6.7 — unparsed-text-lines returns a true xs:string*
+    // sequence: countable, indexable, and a trailing newline does not
+    // contribute a final empty line.
+    let loader = InMemoryLoader::new().with("lines.txt", "alpha\nbeta\ngamma\n");
+    let xslt = Stylesheet::compile_str(
+        r#"<xsl:stylesheet version="3.0" xmlns:xsl="http://www.w3.org/1999/XSL/Transform">
+        <xsl:output method="xml" omit-xml-declaration="yes"/>
+        <xsl:template match="/">
+            <out n="{count(unparsed-text-lines('lines.txt'))}"
+                 second="{unparsed-text-lines('lines.txt')[2]}"
+                 joined="{string-join(unparsed-text-lines('lines.txt'), '|')}"/>
+        </xsl:template></xsl:stylesheet>"#,
+    ).unwrap();
+    let doc = parse_str("<r/>", &ParseOptions::default()).unwrap();
+    let result = xslt.apply_with_loader(&doc, &loader, None).expect("apply");
+    let out = result.to_string().expect("serialize");
+    assert!(out.contains(r#"n="3""#), "got: {out}");
+    assert!(out.contains(r#"second="beta""#), "got: {out}");
+    assert!(out.contains(r#"joined="alpha|beta|gamma""#), "got: {out}");
+}
+
+#[test]
 fn document_apply_without_loader_errors_when_used() {
     // The stylesheet references document('foo.xml'); without a Loader,
     // pre-loading fails at apply time.

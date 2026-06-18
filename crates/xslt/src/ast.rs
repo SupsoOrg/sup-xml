@@ -445,6 +445,11 @@ pub enum Instr {
         /// only the namespaces the copied element's own name needs.
         /// Default `true`.
         copy_namespaces:    bool,
+        /// XSLT 3.0 §11.9.1 `select` — the item to shallow-copy; when
+        /// absent the context item is copied (the classic behavior).
+        /// The expression must yield at most one item, which also
+        /// becomes the context item for the body.
+        select:             Option<Expr>,
     },
     CopyOf {
         select: Expr,
@@ -546,7 +551,10 @@ pub enum Instr {
         /// `"yes"` / `"no"` at runtime.  `None` means absent, equivalent
         /// to `"no"`.
         terminate: Option<Avt>,
-        body:      Body,
+        /// XSLT 3.0 §6.2 — `error-code=` is an AVT giving the QName of
+        /// the error raised when `terminate="yes"` (default `XTMM9000`).
+        error_code: Option<Avt>,
+        body:       Body,
     },
     /// `xsl:assert` (XSLT 3.0 §6.4) — when `test` is effectively false,
     /// raises a terminating dynamic error (default code `XTMM9001`)

@@ -1381,7 +1381,7 @@ fn eval_function_body<I: DocIndexLike>(
                 }
                 out.push(Value::String(s));
             }
-            Instr::Message { terminate: _, body } => {
+            Instr::Message { terminate: _, error_code: _, body } => {
                 // xsl:function bodies don't expose mutable XSLT
                 // state, so xsl:message has nowhere to emit the
                 // text.  Stringify the body via the function-body
@@ -3470,6 +3470,107 @@ fn on_cond_kind(n: &ResultNode) -> Option<bool> {
     }
 }
 
+/// Shallow-copy a single node into the result tree (XSLT 1.0 §7.5 /
+/// XSLT 3.0 §11.9.1): same node kind and name as `node`, with content
+/// from `body` — only the node itself, never its descendants (that is
+/// xsl:copy-of's job).  Shared by xsl:copy with and without `select=`.
+fn copy_shallow_node<'a>(
+    state:              &mut EvalState<'a>,
+    node:               NodeId,
+    use_attribute_sets: &[QName],
+    body:               &Body,
+    copy_namespaces:    bool,
+    pos:                usize,
+    size:               usize,
+) -> Result<()> {
+    match state.idx.kind(node) {
+        XPathNodeKind::Element => {
+            let q = element_qname(state, node);
+            state.builder.open_element(q.clone());
+            // XSLT 1.0 §7.5 — the namespace nodes of the current
+            // element are automatically copied.  With
+            // copy-namespaces="no" (XSLT 2.0 §11.9.1) only the
+            // element's own name binding is kept.
+            if copy_namespaces {
+                for ns_id in state.idx.ns_range(node) {
+                    let prefix = state.idx.local_name(ns_id);
+                    let uri    = state.idx.string_value(ns_id);
+                    if prefix == "xml" { continue; }
+                    let p_opt = if prefix.is_empty() { None } else { Some(prefix.to_string()) };
+                    state.builder.push_namespace_decl(p_opt, uri);
+                }
+            } else if !q.uri.is_empty() {
+                state.builder.push_namespace_decl(q.prefix.clone(), q.uri.clone());
+            }
+            apply_attribute_sets(state, use_attribute_sets, node, pos, size)?;
+            eval_body(state, body, node, pos, size)?;
+            state.builder.close_element();
+        }
+        XPathNodeKind::Text | XPathNodeKind::CData => {
+            state.builder.push_text(state.idx.string_value(node), false);
+        }
+        XPathNodeKind::Attribute => {
+            // Copy the attribute onto the current element.
+            let q = attribute_qname(state, node);
+            state.builder.push_attribute(q, state.idx.string_value(node));
+        }
+        XPathNodeKind::Comment => {
+            state.builder.push_comment(state.idx.string_value(node));
+        }
+        XPathNodeKind::PI => {
+            state.builder.push_pi(
+                state.idx.pi_target(node).to_string(),
+                state.idx.string_value(node),
+            );
+        }
+        XPathNodeKind::Document => {
+            // XSLT 2.0 §11.9.1 — xsl:copy of a document node
+            // creates a NEW document node whose children come
+            // from the body sequence constructor.  When the
+            // surrounding scope is collecting a sequence (an
+            // `as="document-node()*"` variable, an xsl:function
+            // body, …), expose each doc-copy as its own item;
+            // otherwise splat its children into the outer
+            // result tree (the historical 1.0 behaviour).
+            if state.sequence_sink_active() {
+                let children = build_rtf_nodes_no_merge(
+                    state, body, node, pos, size,
+                )?;
+                check_document_node_content(&children)?;
+                let doc_id = rtf_into_index(state.idx, &children);
+                state.push_to_sequence_sink(Value::NodeSet(vec![doc_id]));
+            } else {
+                // The body constructs the content of a new
+                // document node; build it in a fresh scope so a
+                // top-level attribute is caught as XTDE0420
+                // (running the body inline would attach the
+                // attribute to the enclosing open element
+                // instead), then splice the children into the
+                // outer result tree.
+                let children = build_rtf_nodes(
+                    state, body, node, pos, size,
+                )?;
+                check_document_node_content(&children)?;
+                for child in children {
+                    state.builder.push_built_node(child);
+                }
+            }
+        }
+        XPathNodeKind::Namespace => {
+            // xsl:copy of a namespace node adds its binding to
+            // the element under construction (XSLT 2.0 §11.9.2);
+            // `xml` is implicitly in scope.
+            let prefix = state.idx.local_name(node);
+            if prefix != "xml" {
+                let uri = state.idx.string_value(node);
+                let p = if prefix.is_empty() { None } else { Some(prefix.to_string()) };
+                state.builder.push_namespace_decl(p, uri);
+            }
+        }
+    }
+    Ok(())
+}
+
 fn eval_instr(
     state:    &mut EvalState,
     instr:    &Instr,
@@ -4826,94 +4927,39 @@ fn eval_instr(
             let text = pieces.join(&sep);
             state.builder.push_text(text, *dose);
         }
-        Instr::Copy { use_attribute_sets, body, copy_namespaces } => {
-            // Copy the *current node*: same node type and name,
-            // but the children come from re-evaluating the body —
-            // and ONLY the node itself, no descendants
-            // (xsl:copy-of does deep copy).
-            match state.idx.kind(ctx_node) {
-                XPathNodeKind::Element => {
-                    let q = element_qname(state, ctx_node);
-                    state.builder.open_element(q.clone());
-                    // XSLT 1.0 §7.5 — the namespace nodes of the
-                    // current element are automatically copied.  With
-                    // copy-namespaces="no" (XSLT 2.0 §11.9.1) only the
-                    // element's own name binding is kept.
-                    if *copy_namespaces {
-                        for ns_id in state.idx.ns_range(ctx_node) {
-                            let prefix = state.idx.local_name(ns_id);
-                            let uri    = state.idx.string_value(ns_id);
-                            if prefix == "xml" { continue; }
-                            let p_opt = if prefix.is_empty() { None } else { Some(prefix.to_string()) };
-                            state.builder.push_namespace_decl(p_opt, uri);
-                        }
-                    } else if !q.uri.is_empty() {
-                        state.builder.push_namespace_decl(q.prefix.clone(), q.uri.clone());
-                    }
-                    apply_attribute_sets(state, use_attribute_sets, ctx_node, pos, size)?;
-                    eval_body(state, body, ctx_node, pos, size)?;
-                    state.builder.close_element();
-                }
-                XPathNodeKind::Text | XPathNodeKind::CData => {
-                    state.builder.push_text(state.idx.string_value(ctx_node), false);
-                }
-                XPathNodeKind::Attribute => {
-                    // Copy the attribute onto the current element.
-                    let q = attribute_qname(state, ctx_node);
-                    state.builder.push_attribute(q, state.idx.string_value(ctx_node));
-                }
-                XPathNodeKind::Comment => {
-                    state.builder.push_comment(state.idx.string_value(ctx_node));
-                }
-                XPathNodeKind::PI => {
-                    state.builder.push_pi(
-                        state.idx.pi_target(ctx_node).to_string(),
-                        state.idx.string_value(ctx_node),
-                    );
-                }
-                XPathNodeKind::Document => {
-                    // XSLT 2.0 §11.9.1 — xsl:copy of a document node
-                    // creates a NEW document node whose children come
-                    // from the body sequence constructor.  When the
-                    // surrounding scope is collecting a sequence (an
-                    // `as="document-node()*"` variable, an xsl:function
-                    // body, …), expose each doc-copy as its own item;
-                    // otherwise splat its children into the outer
-                    // result tree (the historical 1.0 behaviour).
-                    if state.sequence_sink_active() {
-                        let children = build_rtf_nodes_no_merge(
-                            state, body, ctx_node, pos, size,
-                        )?;
-                        check_document_node_content(&children)?;
-                        let doc_id = rtf_into_index(state.idx, &children);
-                        state.push_to_sequence_sink(Value::NodeSet(vec![doc_id]));
-                    } else {
-                        // The body constructs the content of a new
-                        // document node; build it in a fresh scope so a
-                        // top-level attribute is caught as XTDE0420
-                        // (running the body inline would attach the
-                        // attribute to the enclosing open element
-                        // instead), then splice the children into the
-                        // outer result tree.
-                        let children = build_rtf_nodes(
-                            state, body, ctx_node, pos, size,
-                        )?;
-                        check_document_node_content(&children)?;
-                        for child in children {
-                            state.builder.push_built_node(child);
-                        }
-                    }
-                }
-                XPathNodeKind::Namespace => {
-                    // xsl:copy of a namespace node adds its binding to
-                    // the element under construction (XSLT 2.0 §11.9.2);
-                    // `xml` is implicitly in scope.
-                    let prefix = state.idx.local_name(ctx_node);
-                    if prefix != "xml" {
-                        let uri = state.idx.string_value(ctx_node);
-                        let p = if prefix.is_empty() { None } else { Some(prefix.to_string()) };
-                        state.builder.push_namespace_decl(p, uri);
-                    }
+        Instr::Copy { use_attribute_sets, body, copy_namespaces, select } => {
+            // Without select=, copy the context node (classic xsl:copy).
+            // With select= (XSLT 3.0), the expression names the item to
+            // copy, which also becomes the body's context item.
+            let Some(sel) = select else {
+                return copy_shallow_node(state, ctx_node,
+                    use_attribute_sets, body, *copy_namespaces, pos, size);
+            };
+            let v = state.xpath_eval(sel, ctx_node, pos, size)?;
+            let nodes = match &v {
+                Value::NodeSet(ns)     => ns.clone(),
+                Value::Sequence(items) => items.iter().filter_map(|it|
+                    match it { Value::NodeSet(ns) => Some(ns.clone()), _ => None })
+                    .flatten().collect(),
+                _ => Vec::new(),
+            };
+            // XSLT 3.0 §11.9.1 / XTTE3180 — at most one item may be copied.
+            if nodes.len() > 1 {
+                return Err(XsltError::InvalidStylesheet(
+                    "xsl:copy select= must yield at most one item (XTTE3180)".into()));
+            }
+            if let Some(&n) = nodes.first() {
+                copy_shallow_node(state, n,
+                    use_attribute_sets, body, *copy_namespaces, 1, 1)?;
+            } else {
+                // No nodes: an empty sequence copies nothing; a single
+                // atomic value copies as its (string) value — the body
+                // is not evaluated for atomic items.
+                let empty = matches!(&v, Value::Sequence(s) if s.is_empty())
+                    || matches!(&v, Value::NodeSet(n) if n.is_empty());
+                if !empty {
+                    state.builder.push_text(
+                        value_to_string_styled(&v, state.idx, state.num_style()), false);
                 }
             }
         }
@@ -5427,7 +5473,7 @@ fn eval_instr(
             }
             state.variables.bind(qname_key(&v.name), val);
         }
-        Instr::Message { terminate, body } => {
+        Instr::Message { terminate, error_code, body } => {
             // XSLT 2.0 §17.1 / XTDE0030 — when the effective value of
             // an AVT-bearing attribute is not one of the permitted
             // values, the processor must raise a dynamic error.  For
@@ -5451,7 +5497,16 @@ fn eval_instr(
             // callback; we keep it simple.
             eprintln!("xsl:message: {s}");
             if terminate_yes {
-                return Err(XsltError::Terminated(s));
+                // XSLT 3.0 §6.2 — terminate="yes" fails with a dynamic
+                // error whose code is `error-code` (default XTMM9000).
+                return match error_code {
+                    Some(a) => {
+                        let code = render_avt(state, a, ctx_node, pos, size)?;
+                        Err(XsltError::Xpath(sup_xml_core::xpath::eval::xpath_err(s)
+                            .with_xpath_code(&code)))
+                    }
+                    None => Err(XsltError::Terminated(s)),
+                };
             }
         }
         Instr::Assert { test, select, body, error_code } => {

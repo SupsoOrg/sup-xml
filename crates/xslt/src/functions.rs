@@ -441,9 +441,10 @@ pub(crate) fn dispatch<I: DocIndexLike>(
                     "unparsed-text-lines({uri:?}): resource not pre-loaded"
                 ))));
             };
-            // XPath 2.0 §16.6.7 — split on `\r\n`, `\r`, or `\n`;
-            // each segment becomes a string item in the returned
-            // sequence.  An empty file gives the empty sequence.
+            // XPath 3.1 §16.6.7 — split on `\r\n`, `\r`, or `\n`; each
+            // segment is a string item.  A trailing line terminator does
+            // not yield a final zero-length string; an empty file gives
+            // the empty sequence.
             let mut lines: Vec<Value> = Vec::new();
             let mut last = 0usize;
             let bytes = text.as_bytes();
@@ -461,19 +462,7 @@ pub(crate) fn dispatch<I: DocIndexLike>(
             if last < text.len() {
                 lines.push(Value::String(text[last..].to_string()));
             }
-            // XPath 2.0 represents sequences as Value::NodeSet for
-            // node sequences only; for atomic sequences we just
-            // return the last item (the engine doesn't model atomic
-            // sequences yet).  Returning a joined string preserves
-            // backward compatibility for the common
-            // `string-join(unparsed-text-lines(…), …)` idiom while
-            // surfacing all line content.  TODO once atomic
-            // sequences land.
-            let joined = lines.into_iter()
-                .map(|v| if let Value::String(s) = v { s } else { String::new() })
-                .collect::<Vec<_>>()
-                .join("\n");
-            Ok(Value::String(joined))
+            Ok(Value::Sequence(lines))
         }
         _ => return None,
     };
@@ -1091,6 +1080,7 @@ const FN_NAMES: &[&str] = &[
     // XPath 3.0 / 3.1 additions
     "parse-xml", "parse-xml-fragment", "serialize",
     "contains-token", "has-children", "innermost", "outermost",
+    "characters", "unparsed-text-lines",
     // EXSLT families dispatch by namespace, not by unqualified
     // name — those don't show up here.
 ];
@@ -1121,8 +1111,11 @@ fn builtin_arity_ok(name: &str, arity: usize) -> bool {
         "substring" | "format-number" | "id" | "contains-token"
             => (2..=3).contains(&arity),
         // Exactly one arg.
-        "parse-xml" | "parse-xml-fragment"
+        "parse-xml" | "parse-xml-fragment" | "characters"
             => arity == 1,
+        // 1 or 2 args.
+        "unparsed-text-lines"
+            => (1..=2).contains(&arity),
         // 0 or 1 arg.
         "has-children"
             => arity <= 1,

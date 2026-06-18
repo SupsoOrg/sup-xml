@@ -4328,9 +4328,9 @@ fn compile_raw_instr_into(
         "number"          => compile_number(node)?,
         "variable"        => Instr::Variable(compile_variable(node)?),
         "message"         => {
-            // Validate select/terminate/message attribute set.
+            // Validate select/terminate/error-code/message attribute set.
             validate_xslt_only_attributes(node, "xsl:message",
-                &["select", "terminate"])?;
+                &["select", "terminate", "error-code"])?;
             let term_attr = read_attribute(node, "terminate");
             let term_avt = term_attr.map(|s| avt(node, s)).transpose()?;
             // XSLT 2.0 §17.1 — when `terminate=` has no AVT braces
@@ -4352,8 +4352,10 @@ fn compile_raw_instr_into(
                 }
             }
             Instr::Message {
-                terminate: term_avt,
-                body:      compile_body(node)?,
+                terminate:  term_avt,
+                error_code: read_attribute(node, "error-code")
+                    .map(|s| avt(node, s)).transpose()?,
+                body:       compile_body(node)?,
             }
         },
         "fallback"        => {
@@ -5646,7 +5648,7 @@ fn compile_copy(node: &Node) -> Result<Instr, XsltError> {
     // XSLT 2.0 §11.1 adds `copy-namespaces` / `inherit-namespaces`
     // / `type` / `validation` to the 1.0 `use-attribute-sets` attr.
     validate_xslt_only_attributes(node, "xsl:copy",
-        &["use-attribute-sets", "copy-namespaces",
+        &["select", "use-attribute-sets", "copy-namespaces",
           "inherit-namespaces", "type", "validation"])?;
     // XSLT 2.0 §11.9.1 — `copy-namespaces` (default `yes`) controls
     // whether the namespace nodes of the copied element are carried to
@@ -5655,12 +5657,17 @@ fn compile_copy(node: &Node) -> Result<Instr, XsltError> {
         Some(v) => parse_bool_attr(&v, "xsl:copy", "copy-namespaces")?,
         None => true,
     };
+    // XSLT 3.0 §11.9.1 — `select` names the item to copy (default `.`).
+    let select = read_attribute(node, "select")
+        .map(|s| parse_xpath_at(node, s).map_err(XsltError::from))
+        .transpose()?;
     Ok(Instr::Copy {
         use_attribute_sets: parse_qname_list(
             node, read_attribute(node, "use-attribute-sets").unwrap_or(""),
         )?,
         body: compile_body(node)?,
         copy_namespaces,
+        select,
     })
 }
 

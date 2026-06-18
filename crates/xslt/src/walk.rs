@@ -627,7 +627,10 @@ fn scan_instr<F: FnMut(&Expr)>(instr: &Instr, scan: &mut F) {
                 for child in body { scan_instr(child, scan); }
             }
         }
-        Copy { body, .. } => for child in body { scan_instr(child, scan); }
+        Copy { select, body, .. } => {
+            if let Some(e) = select { scan(e); }
+            for child in body { scan_instr(child, scan); }
+        }
         CopyOf { select, .. } => scan(select),
         Element { name, namespace, body, .. } => {
             scan_avt(name, scan);
@@ -660,8 +663,9 @@ fn scan_instr<F: FnMut(&Expr)>(instr: &Instr, scan: &mut F) {
             if let Some(a) = lang         { scan_avt(a, scan); }
             if let Some(a) = letter_value { scan_avt(a, scan); }
         }
-        Message { terminate, body } => {
+        Message { terminate, error_code, body } => {
             if let Some(a) = terminate { scan_avt(a, scan); }
+            if let Some(a) = error_code { scan_avt(a, scan); }
             for child in body { scan_instr(child, scan); }
         }
         Assert { test, select, body, error_code } => {
@@ -897,8 +901,9 @@ fn walk_instr(i: &Instr, out: &mut Vec<String>) {
             if let Some(a) = start_at     { walk_avt(a, out); }
         }
         Instr::Variable(v) => collect_variable(v, out),
-        Instr::Message { terminate, body } => {
+        Instr::Message { terminate, error_code, body } => {
             if let Some(a) = terminate { walk_avt(a, out); }
+            if let Some(a) = error_code { walk_avt(a, out); }
             walk_instrs(body, out);
         }
         Instr::Assert { test, select, body, error_code } => {

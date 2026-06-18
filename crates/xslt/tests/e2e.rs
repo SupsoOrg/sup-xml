@@ -2055,6 +2055,65 @@ fn xpath31_innermost_outermost() {
     assert!(out.contains("<inner>c,d</inner>"), "got: {out}");
 }
 
+/// XSLT 3.0 §11.9.1 — `xsl:copy select=` shallow-copies the selected
+/// item (not the context node), and that item becomes the body's context
+/// item.  Attribute copies attach to the element under construction.
+#[test]
+fn xslt3_copy_select() {
+    let xslt = r#"<xsl:stylesheet version="3.0"
+        xmlns:xsl="http://www.w3.org/1999/XSL/Transform">
+        <xsl:output method="xml" omit-xml-declaration="yes"/>
+        <xsl:template match="/">
+            <out>
+                <xsl:copy select="data/item[1]"><xsl:text>X</xsl:text></xsl:copy>
+                <ctx><xsl:copy select="data/item[2]"><xsl:value-of select="."/></xsl:copy></ctx>
+                <wrap><xsl:copy select="data/@id"/></wrap>
+            </out>
+        </xsl:template>
+    </xsl:stylesheet>"#;
+    let out = transform(xslt, r#"<data id="7"><item>a</item><item>b</item></data>"#);
+    // Shallow copy of <item> with new body content.
+    assert!(out.contains("<item>X</item>"), "got: {out}");
+    // The body's context item is the selected node (item[2] → "b").
+    assert!(out.contains("<ctx><item>b</item></ctx>"), "got: {out}");
+    // Copying an attribute attaches it to the constructed <wrap>.
+    assert!(out.contains(r#"<wrap id="7"/>"#), "got: {out}");
+}
+
+/// XPath 3.1 `fn:characters($s)` returns one single-character string per
+/// Unicode scalar value.
+#[test]
+fn xpath31_characters() {
+    let xslt = r#"<xsl:stylesheet version="3.0"
+        xmlns:xsl="http://www.w3.org/1999/XSL/Transform">
+        <xsl:output method="xml" omit-xml-declaration="yes"/>
+        <xsl:template match="/">
+            <out n="{count(characters('héllo'))}" rev="{string-join(reverse(characters('abc')), '')}"/>
+        </xsl:template>
+    </xsl:stylesheet>"#;
+    let out = transform(xslt, "<x/>");
+    assert!(out.contains(r#"n="5""#), "got: {out}");      // h é l l o
+    assert!(out.contains(r#"rev="cba""#), "got: {out}");  // per-char sequence
+}
+
+/// XSLT 3.0 §6.2 — `xsl:message terminate="yes" error-code=` fails with a
+/// dynamic error carrying that code.
+#[test]
+fn xslt3_message_error_code() {
+    let xslt = r#"<xsl:stylesheet version="3.0"
+        xmlns:xsl="http://www.w3.org/1999/XSL/Transform"
+        xmlns:my="urn:my">
+        <xsl:template match="/">
+            <xsl:message terminate="yes" error-code="my:boom">stop now</xsl:message>
+        </xsl:template>
+    </xsl:stylesheet>"#;
+    let sheet = Stylesheet::compile_str(xslt).expect("compile");
+    let doc = parse_str("<x/>", &ParseOptions::default()).expect("parse");
+    let err = sheet.apply(&doc).err().expect("terminate must error").to_string();
+    assert!(err.contains("boom") || err.contains("stop now"),
+        "expected error-code surfaced: {err}");
+}
+
 /// XSLT 2.0 `xsl:analyze-string` — partitions input by regex matches,
 /// `regex-group(n)` exposes captures inside `<xsl:matching-substring>`.
 #[test]

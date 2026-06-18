@@ -8793,6 +8793,14 @@ fn eval_function<I: DocIndexLike>(name: &str, args: &[Expr], ctx: &EvalCtx<'_>, 
                 None      => Ok(Value::String(pieces.join(" "))),
             }
         }
+        "characters" => {
+            // fn:characters($value as xs:string?) as xs:string* (F&O
+            // §5.2.2) — one single-character string per Unicode scalar
+            // value; an empty/absent input gives the empty sequence.
+            check_args!(1);
+            let s = arg_str!(0);
+            Ok(Value::Sequence(s.chars().map(|c| Value::String(c.to_string())).collect()))
+        }
         "codepoints-to-string" => {
             // Each item of the input sequence is a codepoint (number).
             check_args!(1);
