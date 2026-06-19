@@ -3119,9 +3119,25 @@ fn check_override_homonyms(
     let err = |kind: &str, name: String| Err(XsltError::InvalidStylesheet(format!(
         "xsl:override {kind} '{name}' does not override a component of the \
          used package (XTSE3058)")));
+    // XSLT 3.0 §3.5.5.1 / XTSE3070 — an overriding template must declare
+    // the same required context item as the component it overrides: both
+    // the `as=` type and whether a context item is required at all
+    // (`use="absent"` vs a present/optional context item).
+    let absent = |t: &Template| t.context_item_use.as_deref() == Some("absent");
+    let t_ci: std::collections::HashMap<String, (Option<String>, bool)> = used_templates.iter()
+        .filter_map(|t| t.name.as_ref().map(|n| (qname_key(n), (t.context_item_as.clone(), absent(t)))))
+        .collect();
     for t in &overrides.templates {
         if let Some(n) = &t.name {
-            if !t_names.contains(&qname_key(n)) { return err("template", qname_key(n)); }
+            let key = qname_key(n);
+            if !t_names.contains(&key) { return err("template", key); }
+            if let Some((orig_as, orig_absent)) = t_ci.get(&key) {
+                if t.context_item_as != *orig_as || absent(t) != *orig_absent {
+                    return Err(XsltError::InvalidStylesheet(format!(
+                        "xsl:override template '{key}' declares a context item \
+                         incompatible with the overridden component (XTSE3070)")));
+                }
+            }
         }
     }
     for f in &overrides.functions {
@@ -3173,6 +3189,7 @@ fn compile_template(node: &Node) -> Result<Template, XsltError> {
     // child element of xsl:template (preceding any xsl:param) and may
     // appear at most once.
     let mut context_item_as: Option<String> = None;
+    let mut context_item_use: Option<String> = None;
     if is_xslt_3_0_compile() {
         let mut seen_other = false;
         let mut seen_ci = false;
@@ -3185,9 +3202,41 @@ fn compile_template(node: &Node) -> Result<Template, XsltError> {
                          and may appear only once (XTSE0010)".into()));
                 }
                 seen_ci = true;
+                validate_xslt_only_attributes(child, "xsl:context-item", &["use", "as"])?;
+                if let Some(u) = read_attribute(child, "use") {
+                    if !matches!(u.trim(), "required" | "optional" | "absent") {
+                        return Err(XsltError::InvalidStylesheet(format!(
+                            "xsl:context-item use='{u}' must be 'required', 'optional', \
+                             or 'absent' (XTSE0020)"
+                        )));
+                    }
+                }
+                if let Some(a) = read_attribute(child, "as") {
+                    // The context item is always a single item, so its
+                    // declared type may not carry an occurrence indicator.
+                    if a.trim_end().ends_with(['?', '*', '+']) {
+                        return Err(XsltError::InvalidStylesheet(format!(
+                            "xsl:context-item as='{a}' must not have an occurrence \
+                             indicator (XTSE0020)"
+                        )));
+                    }
+                }
                 // use="absent" means the template runs with no context
                 // item, so a declared type isn't enforced against one.
-                if read_attribute(child, "use").as_deref().map(str::trim) != Some("absent") {
+                // `use` defaults to "required" when the element is present.
+                context_item_use = Some(read_attribute(child, "use")
+                    .map(|s| s.trim().to_string())
+                    .unwrap_or_else(|| "required".to_string()));
+                let use_absent = context_item_use.as_deref() == Some("absent");
+                if use_absent {
+                    // XSLT 3.0 §6.3 / XTSE3088 — `as` is meaningless (and a
+                    // static error) when no context item is supplied.
+                    if read_attribute(child, "as").is_some() {
+                        return Err(XsltError::InvalidStylesheet(
+                            "xsl:context-item use='absent' cannot also specify \
+                             as= (XTSE3088)".into()));
+                    }
+                } else {
                     context_item_as = read_attribute(child, "as").map(|s| s.trim().to_string());
                 }
             } else {
@@ -3326,6 +3375,15 @@ fn compile_template(node: &Node) -> Result<Template, XsltError> {
     let mut seen_non_param = false;
     for child in node.children() {
         if !child.is_element() && !is_significant_text(child) { continue; }
+        // xsl:context-item (XSLT 3.0 §6.3) precedes xsl:param in the
+        // content model and is handled above; it is a declaration, not
+        // a body instruction, so skip it without closing the param run.
+        if is_xslt_3_0_compile()
+            && child.is_element() && is_xslt_element(child)
+            && child.local_name() == "context-item"
+        {
+            continue;
+        }
         if !seen_non_param
             && child.is_element() && is_xslt_element(child)
             && child.local_name() == "param"
@@ -3355,6 +3413,7 @@ fn compile_template(node: &Node) -> Result<Template, XsltError> {
         visibility: read_attribute(node, "visibility").map(str::to_string),
         package_id: 0,
         context_item_as,
+        context_item_use,
     })
 }
 
@@ -7440,6 +7499,7 @@ fn compile_simplified(root: &Node) -> Result<StylesheetAst, XsltError> {
         visibility: None,
         package_id: 0,
         context_item_as: None,
+        context_item_use: None,
     };
     ast.templates.push(template);
     ast.documents_to_load = crate::walk::collect_static_document_uris(&ast);

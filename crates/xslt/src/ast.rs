@@ -145,6 +145,10 @@ pub struct Template {
     /// invoked with.  Checked against the actual context at entry
     /// (XTTE0590).  `None` = no declaration.
     pub context_item_as: Option<String>,
+    /// The `use=` value of the `xsl:context-item` declaration (`required`,
+    /// `optional`, or `absent`); `None` when no declaration is present.
+    /// Used for override compatibility checking (XTSE3070).
+    pub context_item_use: Option<String>,
 }
 
 /// `xsl:param` — typed enough to carry name + default value.  Top-
