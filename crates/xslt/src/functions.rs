@@ -44,7 +44,11 @@ fn err(msg: impl Into<String>) -> XmlError {
 /// by `(key-name, doc-root, value)` so `key()` returns only nodes
 /// in the same document as the calling context, per XSLT 1.0 §12.2.
 pub struct KeyIndex {
-    entries: HashMap<(String, NodeId, String), Vec<NodeId>>,
+    /// `RefCell` so `key()` can lazily index a document (e.g. an RTF
+    /// passed as the 3-arg scope) that didn't exist when the index was
+    /// first built.  The declared key NAMES are fixed at build time, so
+    /// only the per-document entries grow.
+    entries: std::cell::RefCell<HashMap<(String, NodeId, String), Vec<NodeId>>>,
     /// Clark-form expanded names of every declared `<xsl:key>`.
     /// Used by `key()` to raise XTDE1260 on lookups whose name
     /// doesn't match any declaration — even when the key name has
@@ -55,14 +59,18 @@ pub struct KeyIndex {
     /// codepoint collation isn't recorded; only entries needing
     /// non-codepoint folding live here.
     collations: HashMap<String, String>,
+    /// Document roots already indexed — the source tree(s) present at
+    /// build time, plus any document lazily indexed by `materialize_for`.
+    indexed_roots: std::cell::RefCell<std::collections::HashSet<NodeId>>,
 }
 
 impl KeyIndex {
     pub fn new() -> Self {
         KeyIndex {
-            entries:    HashMap::new(),
+            entries:    std::cell::RefCell::new(HashMap::new()),
             declared:   std::collections::HashSet::new(),
             collations: HashMap::new(),
+            indexed_roots: std::cell::RefCell::new(std::collections::HashSet::new()),
         }
     }
 
@@ -108,12 +116,13 @@ impl KeyIndex {
     /// values are computed by the instruction evaluator rather than a
     /// pure `use=` XPath expression.
     pub fn add_value<I: DocIndexLike>(
-        &mut self, name_key: &str, node_id: NodeId, value: &Value, idx: &I,
+        &self, name_key: &str, node_id: NodeId, value: &Value, idx: &I,
     ) {
         let doc_root = doc_root_of(idx, node_id);
+        let mut entries = self.entries.borrow_mut();
         for s in stringify_use_value(value, idx) {
             let folded = self.fold_for(name_key, &s);
-            self.entries.entry((name_key.to_string(), doc_root, folded))
+            entries.entry((name_key.to_string(), doc_root, folded))
                 .or_default()
                 .push(node_id);
         }
@@ -149,9 +158,10 @@ impl KeyIndex {
         // helper has the right context.  Build a throwaway index so
         // we can reuse `fold_for` while populating `entries`.
         let folder = KeyIndex {
-            entries:    HashMap::new(),
+            entries:    std::cell::RefCell::new(HashMap::new()),
             declared:   declared.clone(),
             collations: collations.clone(),
+            indexed_roots: std::cell::RefCell::new(std::collections::HashSet::new()),
         };
         let mut deferred: Vec<(usize, NodeId)> = Vec::new();
         for (ki, key) in style.keys.iter().enumerate() {
@@ -177,13 +187,73 @@ impl KeyIndex {
                 }
             }
         }
-        Ok((KeyIndex { entries, declared, collations }, deferred))
+        // Every document root present in `idx` at build time is fully
+        // indexed; record them so `materialize_for` only does work for
+        // documents that appear later (e.g. an RTF built by a variable).
+        let indexed_roots: std::collections::HashSet<NodeId> =
+            (0..idx.nodes.len()).filter(|&n| idx.parent(n).is_none()).collect();
+        Ok((KeyIndex {
+            entries: std::cell::RefCell::new(entries),
+            declared,
+            collations,
+            indexed_roots: std::cell::RefCell::new(indexed_roots),
+        }, deferred))
     }
 
     pub fn lookup(&self, name_key: &str, doc_root: NodeId, value: &str) -> Vec<NodeId> {
         let folded = self.fold_for(name_key, value);
-        self.entries.get(&(name_key.to_string(), doc_root, folded))
+        self.entries.borrow().get(&(name_key.to_string(), doc_root, folded))
             .cloned().unwrap_or_default()
+    }
+
+    /// Lazily index document `doc_root` against every `use=`-attribute
+    /// `xsl:key` (XSLT 2.0 §16.5 — keys are defined over every document,
+    /// not just the source).  No-op if `doc_root` was already indexed.
+    /// Body-form keys (sequence constructors) need the instruction
+    /// evaluator and are not materialized here.
+    pub fn materialize_for<I, F>(
+        &self, doc_root: NodeId, idx: &I, keys: &[crate::ast::Key], mut eval_one: F,
+    )
+    where
+        I: DocIndexLike,
+        F: FnMut(&sup_xml_core::xpath::Expr, NodeId) -> Result<Value>,
+    {
+        if !self.indexed_roots.borrow_mut().insert(doc_root) {
+            return; // already indexed (or being indexed — re-entrancy guard)
+        }
+        // Collect the document's nodes, then index without holding any
+        // borrow so a `use=` expression that itself calls key() can't
+        // trip a RefCell re-borrow.
+        let mut subtree: Vec<NodeId> = Vec::new();
+        collect_subtree(idx, doc_root, &mut subtree);
+        let mut new_entries: Vec<((String, NodeId, String), NodeId)> = Vec::new();
+        for key in keys {
+            if !key.body.is_empty() { continue; }
+            let nk = pkg_key_name(key.package_id, &qname_key(&key.name));
+            for &node in &subtree {
+                if !pattern_matches(&key.matcher, node, idx, &mut eval_one).unwrap_or(false) {
+                    continue;
+                }
+                let value = match eval_one(&key.use_, node) { Ok(v) => v, Err(_) => continue };
+                for s in stringify_use_value(&value, idx) {
+                    let folded = self.fold_for(&nk, &s);
+                    new_entries.push(((nk.clone(), doc_root, folded), node));
+                }
+            }
+        }
+        let mut entries = self.entries.borrow_mut();
+        for (k, node) in new_entries {
+            entries.entry(k).or_default().push(node);
+        }
+    }
+}
+
+/// Depth-first collect `root` and all its descendant element/text nodes
+/// (everything reachable through `children`) into `out`.
+fn collect_subtree<I: DocIndexLike>(idx: &I, root: NodeId, out: &mut Vec<NodeId>) {
+    out.push(root);
+    for child in idx.children(root) {
+        collect_subtree(idx, *child, out);
     }
 }
 
@@ -271,10 +341,10 @@ fn canonical_numeric_key(n: f64) -> String {
     format!("{n}")
 }
 
-fn pattern_matches<F>(
+fn pattern_matches<I: DocIndexLike, F>(
     pattern: &sup_xml_core::xpath::Expr,
     node: NodeId,
-    idx: &DocIndex<'_>,
+    idx: &I,
     eval_one: &mut F,
 ) -> Result<bool>
 where
@@ -2037,7 +2107,7 @@ mod tests {
         // for nodes 5 and 7 is whatever node 0 reports.
         let doc_root = 0usize;
         keys.declared.insert("idx".into());
-        keys.entries.insert(("idx".into(), doc_root, "k".into()), vec![5, 7]);
+        keys.entries.borrow_mut().insert(("idx".into(), doc_root, "k".into()), vec![5, 7]);
         let v = dispatch("key",
             vec![Value::String("idx".into()), Value::String("k".into())],
             &ctx.index, 0, Some(&keys), &[], None, &HashMap::new(), &crate::eval::NamespaceContext::default(), &HashMap::new()).unwrap().unwrap();
@@ -2054,8 +2124,8 @@ mod tests {
         let mut keys = KeyIndex::new();
         let doc_root = 0usize;
         keys.declared.insert("idx".into());
-        keys.entries.insert(("idx".into(), doc_root, "k1".into()), vec![3]);
-        keys.entries.insert(("idx".into(), doc_root, "k2".into()), vec![5]);
+        keys.entries.borrow_mut().insert(("idx".into(), doc_root, "k1".into()), vec![3]);
+        keys.entries.borrow_mut().insert(("idx".into(), doc_root, "k2".into()), vec![5]);
         // The string-value of each node in the input nodeset becomes a key.
         let lookup_nodes = match ctx.eval("/r/*").unwrap() {
             Value::NodeSet(ns) => ns,

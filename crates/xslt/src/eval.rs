@@ -687,6 +687,34 @@ impl<'a, I: DocIndexLike> XPathBindings for XsltBindings<'a, I> {
             } else if name == "document" && args.len() == 1 {
                 self.resolve_document_node_bases(args)
             } else { args };
+            // key() is defined over *every* document, not just the source
+            // (XSLT 2.0 §16.5).  A document built after the index — an RTF
+            // bound to a variable and passed as the 3-arg scope, or simply
+            // a non-source context document — is indexed lazily here, using
+            // these bindings to evaluate each key's `use=` expression.
+            if name == "key" {
+                if let Some(keys) = self.keys {
+                    let scope_node = match args.get(2) {
+                        Some(Value::NodeSet(ns)) => ns.first().copied(),
+                        Some(Value::Sequence(items)) => items.iter().find_map(|it|
+                            if let Value::NodeSet(ns) = it { ns.first().copied() } else { None }),
+                        Some(_) => None,
+                        None => Some(xpath_context_node),
+                    };
+                    if let Some(n) = scope_node {
+                        let mut root = n;
+                        while let Some(p) = self.idx.parent(root) { root = p; }
+                        let sc = static_ctx_for_version(self.xslt_version);
+                        keys.materialize_for(root, self.idx, &self.style.keys, |expr, node| {
+                            let mut b = *self;
+                            b.xslt_context_node = node;
+                            let ctx = EvalCtx { context_node: node, pos: 1, size: 1,
+                                                bindings: &b, static_ctx: &sc };
+                            eval_expr(expr, &ctx, self.idx)
+                        });
+                    }
+                }
+            }
             let dyn_load = |uri: &str|
                 <Self as sup_xml_core::xpath::eval::XPathBindings>::load_dynamic_document(self, uri);
             let dyn_load: Option<&dyn Fn(&str) -> Option<std::result::Result<NodeId, sup_xml_core::error::XmlError>>>
