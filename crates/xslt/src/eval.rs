@@ -2790,11 +2790,14 @@ pub fn apply_stylesheet_full_with_params_and_initial(
     // declarations, unless an href-less xsl:result-document overrode it
     // with its own inline serialization parameters.
     let merged = merge_principal_output(style);
-    let output = take_principal_output_override()
-        .map(|ov| overlay_output(&merged, &ov))
-        .unwrap_or(merged);
+    // An href-less xsl:result-document may override the principal output;
+    // its character maps resolve in the package that wrote it (§3.5).
+    let (output, output_pkg) = match take_principal_output_override() {
+        Some((ov, pkg)) => (overlay_output(&merged, &ov), pkg),
+        None => (merged, 0),
+    };
     let character_map = flatten_character_maps(
-        &output.use_character_maps, &style.character_maps);
+        &output.use_character_maps, pkg_character_maps(style, output_pkg));
     // Each captured secondary document (xsl:result-document) carries its
     // own effective output (principal/format base + inline overrides).
     let secondary = take_secondary_docs().into_iter()
@@ -3226,7 +3229,7 @@ thread_local! {
     /// Effective output set by an `href`-less `xsl:result-document` whose
     /// inline serialization parameters override the principal output.
     /// At most one (the principal URI must be written exactly once).
-    static PRINCIPAL_OUTPUT_OVERRIDE: std::cell::RefCell<Option<crate::ast::OutputSpec>> =
+    static PRINCIPAL_OUTPUT_OVERRIDE: std::cell::RefCell<Option<(crate::ast::OutputSpec, u32)>> =
         const { std::cell::RefCell::new(None) };
     /// Nesting depth of TEMPORARY output destinations — a variable /
     /// param / function body, an attribute / comment value, or a
@@ -3248,7 +3251,7 @@ pub(crate) struct NestedApplyGuard {
     schema_suppressed:  bool,
     atomic_depth:       u32,
     secondary:          Vec<(String, Vec<ResultNode>, crate::ast::OutputSpec)>,
-    principal_override: Option<crate::ast::OutputSpec>,
+    principal_override: Option<(crate::ast::OutputSpec, u32)>,
     temp_depth:         u32,
 }
 
@@ -3386,7 +3389,7 @@ fn reset_secondary_docs() {
 fn take_secondary_docs() -> Vec<(String, Vec<ResultNode>, crate::ast::OutputSpec)> {
     SECONDARY_DOCS.with(|d| std::mem::take(&mut *d.borrow_mut()))
 }
-fn take_principal_output_override() -> Option<crate::ast::OutputSpec> {
+fn take_principal_output_override() -> Option<(crate::ast::OutputSpec, u32)> {
     PRINCIPAL_OUTPUT_OVERRIDE.with(|d| d.borrow_mut().take())
 }
 
@@ -3436,11 +3439,15 @@ fn overlay_output(base: &crate::ast::OutputSpec, ov: &crate::ast::OutputSpec)
 /// with the element's own inline serialization parameters.
 fn result_document_output(
     style: &StylesheetAst,
+    package_id: u32,
     format_name: Option<&QName>,
     inline: &crate::ast::OutputSpec,
 ) -> crate::ast::OutputSpec {
+    // A named output is package-local (XSLT 3.0 §3.5): resolve format= in
+    // the executing package's outputs, falling back to the principal's.
     let base = match format_name {
-        Some(name) => style.outputs.iter()
+        Some(name) => pkg_outputs(style, package_id).iter()
+            .chain(style.outputs.iter())
             .find(|o| o.name.as_ref()
                 .is_some_and(|n| n.uri == name.uri && n.local == name.local))
             .cloned()
@@ -4138,7 +4145,9 @@ fn eval_instr(
             // Effective serialization for this document: the principal
             // (or format=-named) output overlaid with the element's own
             // inline serialization parameters.
-            let doc_output = result_document_output(state.style, format_name.as_ref(), output);
+            let doc_pkg = state.current_package_id;
+            let doc_output = result_document_output(
+                state.style, doc_pkg, format_name.as_ref(), output);
             // XTDE1480: an xsl:result-document is illegal while the current
             // output state is *temporary* — inside a variable/function
             // body, or an attribute/comment/PI value.  Being nested inside
@@ -4158,7 +4167,7 @@ fn eval_instr(
             if uri.is_empty() {
                 // The element's serialization parameters override the
                 // principal output for the final result.
-                PRINCIPAL_OUTPUT_OVERRIDE.with(|d| *d.borrow_mut() = Some(doc_output));
+                PRINCIPAL_OUTPUT_OVERRIDE.with(|d| *d.borrow_mut() = Some((doc_output, doc_pkg)));
                 if let Some(principal) = state.principal_buf.take() {
                     let secondary = std::mem::replace(&mut state.builder, principal);
                     if !state.builder.is_empty() {
@@ -8658,6 +8667,31 @@ fn pkg_decimal_formats(
         &style.decimal_formats
     } else {
         style.package_decimal_formats.get(&package_id).unwrap_or(&style.decimal_formats)
+    }
+}
+
+/// The `xsl:character-map` set for a package (XSLT 3.0 §3.5 — package-
+/// local).  Package 0 (principal) uses the global set; a used package
+/// uses only its own (it doesn't inherit the principal's maps).
+fn pkg_character_maps(
+    style: &crate::ast::StylesheetAst, package_id: u32,
+) -> &[crate::ast::CharacterMap] {
+    if package_id == 0 {
+        &style.character_maps
+    } else {
+        style.package_character_maps.get(&package_id).map(Vec::as_slice).unwrap_or(&[])
+    }
+}
+
+/// The named `xsl:output` set for a package (XSLT 3.0 §3.5 — package-
+/// local).  Package 0 uses the global outputs; a used package its own.
+fn pkg_outputs(
+    style: &crate::ast::StylesheetAst, package_id: u32,
+) -> &[crate::ast::OutputSpec] {
+    if package_id == 0 {
+        &style.outputs
+    } else {
+        style.package_outputs.get(&package_id).map(Vec::as_slice).unwrap_or(&[])
     }
 }
 

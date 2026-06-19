@@ -2789,6 +2789,8 @@ fn compile_with_imports_inner(
                 let before_exposes = acc.exposes.len();
                 let before_modes = acc.modes.len();
                 let before_keys = acc.keys.len();
+                let before_character_maps = acc.character_maps.len();
+                let before_outputs = acc.outputs.len();
                 // Assign this used package a distinct id.  Components it
                 // contributes directly (still id 0 after the recursive
                 // compile — its own transitively-used packages stamp
@@ -2820,6 +2822,18 @@ fn compile_with_imports_inner(
                 if acc.namespace_aliases.len() > before_aliases {
                     let own: Vec<_> = acc.namespace_aliases.split_off(before_aliases);
                     acc.package_aliases.entry(pkg_id).or_default().extend(own);
+                }
+                // Character-maps and named outputs are package-local
+                // (XSLT 3.0 §3.5): move this package's own out of the
+                // global tables so they don't collide with another
+                // package's same-named declarations (XTSE1580 etc.).
+                if acc.character_maps.len() > before_character_maps {
+                    let own: Vec<_> = acc.character_maps.split_off(before_character_maps);
+                    acc.package_character_maps.entry(pkg_id).or_default().extend(own);
+                }
+                if acc.outputs.len() > before_outputs {
+                    let own: Vec<_> = acc.outputs.split_off(before_outputs);
+                    acc.package_outputs.entry(pkg_id).or_default().extend(own);
                 }
                 // Decimal-formats are package-local (XSLT 3.0 §3.5).  The
                 // main merge above precedence-resolves the used package's

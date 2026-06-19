@@ -1172,6 +1172,13 @@ pub struct StylesheetAst {
     /// template aliases with its own declarations, not the user's.
     pub package_aliases:    std::collections::HashMap<u32,
                                 Vec<(String, String, Option<String>)>>,
+    /// Per-package `xsl:character-map` and named `xsl:output` tables,
+    /// keyed by `package_id` (XSLT 3.0 §3.5: both are package-local).
+    /// The principal package's stay in [`StylesheetAst::character_maps`]
+    /// / [`StylesheetAst::outputs`] (id 0); a used package's live here so
+    /// two packages may declare a `cm` / `name="test"` without colliding.
+    pub package_character_maps: std::collections::HashMap<u32, Vec<CharacterMap>>,
+    pub package_outputs:        std::collections::HashMap<u32, Vec<OutputSpec>>,
     /// Per-package decimal-format tables, keyed by `package_id` (XSLT
     /// 3.0 §3.5: decimal-formats are local to a package).  The principal
     /// package's stay in [`StylesheetAst::decimal_formats`] (id 0);
