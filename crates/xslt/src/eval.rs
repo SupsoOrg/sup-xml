@@ -185,6 +185,9 @@ struct XsltBindings<'a, I: DocIndexLike> {
     variables:         &'a VariableScope,
     namespaces:        &'a NamespaceContext,
     keys:              Option<&'a KeyIndex>,
+    /// Package whose `xsl:key` declarations `key()` resolves against
+    /// (XSLT 3.0 §3.5 — keys are package-local).  `0` for the principal.
+    key_package_id:    u32,
     xslt_context_node: NodeId,
     idx:               &'a I,
     /// Stylesheet being evaluated.  `xsl:call-template` reached from
@@ -697,6 +700,7 @@ impl<'a, I: DocIndexLike> XPathBindings for XsltBindings<'a, I> {
                 self.user_functions.unwrap_or(&[]),
                 self.xslt_version,
                 self.accumulators,
+                self.key_package_id,
             );
         }
         // XSLT 2.0 user-defined functions (`<xsl:function>`) live in
@@ -741,6 +745,7 @@ impl<'a, I: DocIndexLike> XPathBindings for XsltBindings<'a, I> {
                 } else {
                     let fn_bindings = XsltBindings {
                         decimal_formats: pkg_decimal_formats(self.style, uf.package_id),
+                        key_package_id:  uf.package_id,
                         ..*self
                     };
                     call_user_function_pure_xpath(
@@ -2115,6 +2120,7 @@ impl<'a> EvalState<'a> {
             variables:         &self.variables,
             namespaces:        self.namespaces,
             keys:              self.keys,
+            key_package_id:    self.current_package_id,
             xslt_context_node: self.xslt_current,
             idx:               self.idx,
             style:             self.style,
@@ -2627,7 +2633,9 @@ pub fn apply_stylesheet_full_with_params_and_initial(
         // key value through the instruction evaluator and bucket it.
         for (ki, node_id) in deferred {
             let value = eval_key_body_value(&mut state, &style.keys[ki].body, node_id)?;
-            built.add_value(&qname_key(&style.keys[ki].name), node_id, &value, &idx);
+            let nk = crate::functions::pkg_key_name(
+                style.keys[ki].package_id, &qname_key(&style.keys[ki].name));
+            built.add_value(&nk, node_id, &value, &idx);
         }
         key_index = Some(built);
         state.keys = key_index.as_ref();
@@ -8858,6 +8866,7 @@ fn sort_items_for_iter(
     let keys        = state.keys;
     let documents   = state.documents;
     let decimal_formats = pkg_decimal_formats(state.style, state.current_package_id);
+    let key_package_id = state.current_package_id;
     let unparsed_entities = &state.unparsed_entities;
     let user_exts   = state.user_exts;
     let current_group = if state.current_group.is_empty() { None } else { Some(state.current_group.as_slice()) };
@@ -8878,7 +8887,7 @@ fn sort_items_for_iter(
     let source_types = state.source_types;
     crate::sort::sort_items(items, sorts, idx, |expr, item, p, s| {
         let bindings = XsltBindings {
-            variables, namespaces, keys,
+            variables, namespaces, keys, key_package_id,
             xslt_context_node: ctx_node,
             idx, style, documents, decimal_formats, unparsed_entities,
             user_exts, current_group, current_grouping_key, accumulators,
@@ -8914,6 +8923,7 @@ fn sort_group_indices(
     let keys = state.keys;
     let documents = state.documents;
     let decimal_formats = pkg_decimal_formats(state.style, state.current_package_id);
+    let key_package_id = state.current_package_id;
     let unparsed_entities = &state.unparsed_entities;
     let user_exts = state.user_exts;
     let user_functions = (!style.functions.is_empty()).then_some(style.functions.as_slice());
@@ -8938,7 +8948,7 @@ fn sort_group_indices(
     let sorted = crate::sort::sort_nodes(&first_nodes, sorts, idx, |expr, n, p, s| {
         let (gk, gns) = &groups[p - 1];
         let bindings = XsltBindings {
-            variables, namespaces, keys,
+            variables, namespaces, keys, key_package_id,
             xslt_context_node: n,
             idx, style, documents, decimal_formats, unparsed_entities,
             user_exts,
@@ -9065,6 +9075,7 @@ fn with_sort_key_eval<R>(
     let keys        = state.keys;
     let documents   = state.documents;
     let decimal_formats = pkg_decimal_formats(state.style, state.current_package_id);
+    let key_package_id = state.current_package_id;
     let unparsed_entities = &state.unparsed_entities;
     let user_exts   = state.user_exts;
     let current_group = if state.current_group.is_empty() { None } else { Some(state.current_group.as_slice()) };
@@ -9085,7 +9096,7 @@ fn with_sort_key_eval<R>(
     let source_types = state.source_types;
     let mut eval = |expr: &sup_xml_core::xpath::Expr, n, p, s| {
         let bindings = XsltBindings {
-            variables, namespaces, keys,
+            variables, namespaces, keys, key_package_id,
             xslt_context_node: n,
             idx, style, documents, decimal_formats, unparsed_entities,
             user_exts, current_group, current_grouping_key, accumulators,

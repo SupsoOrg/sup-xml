@@ -2788,6 +2788,7 @@ fn compile_with_imports_inner(
                 let before_aliases = acc.namespace_aliases.len();
                 let before_exposes = acc.exposes.len();
                 let before_modes = acc.modes.len();
+                let before_keys = acc.keys.len();
                 // Assign this used package a distinct id.  Components it
                 // contributes directly (still id 0 after the recursive
                 // compile — its own transitively-used packages stamp
@@ -2805,6 +2806,12 @@ fn compile_with_imports_inner(
                 }
                 for v in &mut acc.global_variables[before_vars..] {
                     if v.package_id == 0 { v.package_id = pkg_id; }
+                }
+                // Keys are package-local (XSLT 3.0 §3.5): stamp this
+                // package's keys so `key()` resolves them per executing
+                // package even when another package declares the same name.
+                for k in &mut acc.keys[before_keys..] {
+                    if k.package_id == 0 { k.package_id = pkg_id; }
                 }
                 // Namespace-alias declarations are package-local: move
                 // this package's own aliases out of the global table into
@@ -3572,6 +3579,7 @@ fn compile_key(node: &Node) -> Result<Key, XsltError> {
             use_: parse_xpath_at(node, u).map_err(XsltError::from)?,
             body: Body::new(),
             collation,
+            package_id: 0,
         }),
         (None, true) => Ok(Key {
             name,
@@ -3579,6 +3587,7 @@ fn compile_key(node: &Node) -> Result<Key, XsltError> {
             use_: Expr::Sequence(Vec::new()),
             body: compile_body(node)?,
             collation,
+            package_id: 0,
         }),
     }
 }

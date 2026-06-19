@@ -1018,6 +1018,12 @@ pub struct Key {
     /// non-codepoint URI changes how key('name', 'value') matches
     /// against the indexed `use=` results.
     pub collation: Option<String>,
+    /// The package this key was declared in (XSLT 3.0 §3.5 — keys are
+    /// package-local).  `0` = principal package; used packages get a
+    /// nonzero id so `key('k', …)` resolves the executing package's
+    /// declaration even when another package declares a key of the same
+    /// name.  Stamped during the `xsl:use-package` merge.
+    pub package_id: u32,
 }
 
 /// `xsl:attribute-set` — a named bundle of attribute templates a

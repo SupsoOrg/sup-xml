@@ -134,14 +134,14 @@ impl KeyIndex {
     {
         let mut entries: HashMap<(String, NodeId, String), Vec<NodeId>> = HashMap::new();
         let declared: std::collections::HashSet<String> =
-            style.keys.iter().map(|k| qname_key(&k.name)).collect();
+            style.keys.iter().map(|k| pkg_key_name(k.package_id, &qname_key(&k.name))).collect();
         let mut collations: HashMap<String, String> = HashMap::new();
         for key in &style.keys {
             if let Some(uri) = &key.collation {
                 if !uri.is_empty() && uri !=
                     "http://www.w3.org/2005/xpath-functions/collation/codepoint"
                 {
-                    collations.insert(qname_key(&key.name), uri.clone());
+                    collations.insert(pkg_key_name(key.package_id, &qname_key(&key.name)), uri.clone());
                 }
             }
         }
@@ -155,7 +155,7 @@ impl KeyIndex {
         };
         let mut deferred: Vec<(usize, NodeId)> = Vec::new();
         for (ki, key) in style.keys.iter().enumerate() {
-            let nk = qname_key(&key.name);
+            let nk = pkg_key_name(key.package_id, &qname_key(&key.name));
             for node_id in 0..idx.nodes.len() {
                 if !pattern_matches(&key.matcher, node_id, idx, &mut eval_one)? {
                     continue;
@@ -301,6 +301,16 @@ fn qname_key(q: &QName) -> String {
     else { format!("{{{}}}{}", q.uri, q.local) }
 }
 
+/// Package-qualified key name (XSLT 3.0 §3.5 — keys are package-local).
+/// The principal package (id 0) uses the bare name, so non-package
+/// stylesheets index and look up keys exactly as before; a used package
+/// prefixes its id so a key named `k` declared in two packages stays
+/// distinct and `key('k', …)` resolves the executing package's copy.
+pub(crate) fn pkg_key_name(package_id: u32, name_key: &str) -> String {
+    if package_id == 0 { name_key.to_string() }
+    else { format!("{package_id}\u{1}{name_key}") }
+}
+
 // ── function dispatch ────────────────────────────────────────────
 
 /// Try to dispatch `name(args)` to an XSLT-built-in function.
@@ -333,6 +343,7 @@ pub(crate) fn dispatch<I: DocIndexLike>(
     user_functions:     &[crate::ast::UserFunction],
     xslt_version:       &str,
     accumulators:       Option<&HashMap<String, crate::eval::AccumulatorData>>,
+    key_package_id:     u32,
 ) -> Option<Result<Value>> {
     let r = match name {
         "current" => current_fn(&args, xslt_context_node),
@@ -349,7 +360,7 @@ pub(crate) fn dispatch<I: DocIndexLike>(
         "available-system-properties" => available_system_properties_fn(&args),
         "element-available" => element_available_fn(&args, idx, instruction_names, xslt_version),
         "function-available" => function_available_fn(&args, idx, namespaces, user_functions),
-        "key" => key_fn(&args, idx, keys, namespaces, xpath_context_node, xslt_version),
+        "key" => key_fn(&args, idx, keys, namespaces, xpath_context_node, xslt_version, key_package_id),
         "format-number"     => format_number_fn(&args, idx, decimal_formats, namespaces),
         "format-integer"    => format_integer_fn(&args, idx),
         "document"          => document_fn(&args, idx, documents, dyn_doc_loader),
@@ -1506,6 +1517,7 @@ fn key_fn<I: DocIndexLike>(
     namespaces: &crate::eval::NamespaceContext,
     context_node: NodeId,
     xslt_version: &str,
+    key_package_id: u32,
 ) -> Result<Value> {
     if args.len() < 2 || args.len() > 3 {
         return Err(err("key() requires 2 or 3 arguments"));
@@ -1530,7 +1542,9 @@ fn key_fn<I: DocIndexLike>(
              a document node (XTDE1270)"));
     }
     let raw_name = value_to_string(&args[0], idx);
-    let expanded = expand_qname(&raw_name, namespaces);
+    // Keys are package-local: resolve against the executing package's
+    // declarations (XSLT 3.0 §3.5).
+    let expanded = pkg_key_name(key_package_id, &expand_qname(&raw_name, namespaces));
     // The key name must match an xsl:key declaration in scope.  XSLT
     // 1.0 §12.2 left an unmatched name unspecified, and libxslt — the
     // engine this library mirrors — returns the empty node-set; XSLT
@@ -1633,7 +1647,7 @@ mod tests {
         ue: &HashMap<String, sup_xml_tree::UnparsedEntity>,
     ) -> Option<Result<Value>> {
         super::dispatch(name, args, idx, ctx, ctx, keys, instr, docs, None, df, ns, ue,
-            None, None, None, None, &[], "1.0", None)
+            None, None, None, None, &[], "1.0", None, 0)
     }
 
     #[test]
@@ -1999,7 +2013,7 @@ mod tests {
             vec![Value::String("idx".into()), Value::String("k".into())],
             &ctx.index, 0, 0, None, &[], None, None, &HashMap::new(),
             &crate::eval::NamespaceContext::default(), &HashMap::new(),
-            None, None, None, None, &[], "2.0", None).unwrap();
+            None, None, None, None, &[], "2.0", None, 0).unwrap();
         let msg = r.unwrap_err().to_string();
         assert!(msg.contains("XTDE1260"), "got: {msg}");
     }
