@@ -72,9 +72,13 @@ impl ResultTree {
             "html"  => serialize_html(children, &self.output, indent, escape_uri),
             "text"  => serialize_text(children),
             // The xhtml output method uses XML syntax with the
-            // html-family parameter defaults applied above.
+            // html-family parameter defaults applied above, plus the
+            // XHTML empty-element rules (non-void elements keep an
+            // explicit end tag; void elements minimise to `<br />`).
+            "xhtml" => serialize_xml(children, &self.output, &self.character_map,
+                                     indent, escape_uri, true),
             _       => serialize_xml(children, &self.output, &self.character_map,
-                                     indent, escape_uri),
+                                     indent, escape_uri, false),
         };
         // `byte-order-mark="yes"` (XSLT 2.0 §20) prefixes the output
         // with U+FEFF, ahead of any XML declaration.
@@ -100,6 +104,7 @@ pub fn serialize_xml(
     cmap:       &[(char, String)],
     indent:     bool,
     escape_uri: bool,
+    xhtml:      bool,
 ) -> String {
     let mut out = String::new();
     if should_emit_xml_decl(output) {
@@ -130,7 +135,7 @@ pub fn serialize_xml(
     // formatting for that element and its whole subtree so text is
     // preserved verbatim.
     for child in children {
-        serialize_xml_node(child, &mut out, output, "", cmap, indent, escape_uri, 0);
+        serialize_xml_node(child, &mut out, output, "", cmap, indent, escape_uri, xhtml, 0);
     }
     if indent && !out.ends_with('\n') {
         out.push('\n');
@@ -172,6 +177,7 @@ fn serialize_xml_node(
     cmap:        &[(char, String)],
     format:      bool,
     escape_uri:  bool,
+    xhtml:       bool,
     level:       usize,
 ) {
     let xml_11   = opts.version.as_deref() == Some("1.1");
@@ -218,7 +224,22 @@ fn serialize_xml_node(
                     render_attr_value(name, aname, value, escape_uri, xml_11, enc_cap, cmap));
             }
             if children.is_empty() {
-                out.push_str("/>");
+                // XHTML (XSLT 3.0 Serialization §): an empty element whose
+                // content model is not EMPTY must keep an explicit end tag
+                // (`<p></p>`); only HTML void elements minimise, written
+                // `<br />` per libxml2's xhtmlNodeDumpOutput.  Plain XML
+                // self-closes every empty element.
+                if xhtml {
+                    if is_xhtml_void(name) {
+                        out.push_str(" />");
+                    } else {
+                        out.push_str("></");
+                        out.push_str(&q);
+                        out.push('>');
+                    }
+                } else {
+                    out.push_str("/>");
+                }
                 return;
             }
             out.push('>');
@@ -244,7 +265,7 @@ fn serialize_xml_node(
                         continue;
                     }
                 }
-                serialize_xml_node(c, out, opts, child_default_ns, cmap, child_format, escape_uri, level + 1);
+                serialize_xml_node(c, out, opts, child_default_ns, cmap, child_format, escape_uri, xhtml, level + 1);
             }
             if child_format {
                 out.push('\n');
@@ -560,6 +581,17 @@ const VOID_ELEMENTS: &[&str] = &[
     "area", "base", "br", "col", "embed", "hr", "img", "input",
     "link", "meta", "param", "source", "track", "wbr",
 ];
+
+/// Is `name` an HTML void element, as recognised by the xhtml output
+/// method?  XHTML elements carry the XHTML namespace (or, leniently,
+/// no namespace); the local name is matched case-insensitively.
+fn is_xhtml_void(name: &crate::ast::QName) -> bool {
+    if !name.uri.is_empty() && name.uri != "http://www.w3.org/1999/xhtml" {
+        return false;
+    }
+    let local_lc = name.local.to_ascii_lowercase();
+    VOID_ELEMENTS.iter().any(|v| *v == local_lc)
+}
 
 /// Elements whose text content must NOT be escaped (XSLT 1.0 §16
 /// HTML output method).
@@ -1287,8 +1319,10 @@ mod tests {
             include_content_type: Some(false),
             ..Default::default()
         };
+        // The xhtml method keeps an explicit end tag on empty non-void
+        // elements (`<a></a>`), unlike the plain xml method (`<a/>`).
         let s = out_tree(vec![elt("root", vec![elt("a", vec![])])], spec).to_string().unwrap();
-        assert_eq!(s, "<root>\n  <a/>\n</root>\n");
+        assert_eq!(s, "<root>\n  <a></a>\n</root>\n");
     }
 
     #[test]
