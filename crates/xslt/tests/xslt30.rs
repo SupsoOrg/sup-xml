@@ -296,6 +296,10 @@ fn parse_test_set(path: &Path) -> Vec<TestCase> {
 
     let mut in_case = false;
     let mut in_env  = false;
+    // An inline `<environment>` nested in a `<test-case>` (as opposed to a
+    // top-level shared environment or an `<environment ref=…/>`): its
+    // `<package>`/`<source>` children belong to the current case.
+    let mut in_case_env = false;
     let mut in_test = false;
     let mut in_source = false;
     let mut in_content = false;
@@ -359,14 +363,19 @@ fn parse_test_set(path: &Path) -> Vec<TestCase> {
                     }
                     "environment" => {
                         if in_case {
-                            // <environment ref="..."/>
+                            // Either `<environment ref="…"/>` (a reference to
+                            // a shared environment) or an inline environment
+                            // whose children attach to this case.
+                            let mut had_ref = false;
                             for a in tag.attrs() {
                                 if let Ok(a) = a {
                                     if a.name() == "ref" {
                                         cur_case.env_ref = Some(a.value().to_string());
+                                        had_ref = true;
                                     }
                                 }
                             }
+                            if !had_ref { in_case_env = true; }
                         } else {
                             // top-level <environment name="...">
                             in_env = true;
@@ -478,10 +487,16 @@ fn parse_test_set(path: &Path) -> Vec<TestCase> {
                         if let Some(f) = file {
                             if role == "principal" {
                                 cur_case.stylesheet = Some(f.clone());
-                            }
-                            if let Some(n) = name {
-                                if in_env { cur_env.packages.push((n, f)); }
-                                else if in_test { cur_case.packages.push((n, f)); }
+                            } else {
+                                // A secondary/library package available for
+                                // xsl:use-package resolution.  The catalog
+                                // `uri=` is just a label and is often absent;
+                                // build_package_library also indexes each
+                                // file's internal package name, so a nameless
+                                // entry still resolves.
+                                let key = name.unwrap_or_default();
+                                if in_env { cur_env.packages.push((key, f)); }
+                                else if in_test || in_case_env { cur_case.packages.push((key, f)); }
                             }
                         }
                     }
@@ -784,6 +799,7 @@ fn parse_test_set(path: &Path) -> Vec<TestCase> {
                         }
                         in_env = false;
                     }
+                    "environment" if in_case_env => { in_case_env = false; }
                     "source" if in_source => {
                         in_source = false;
                         cur_source_role.clear();
@@ -1413,7 +1429,9 @@ fn build_package_library(
             if let Some(internal) = package_internal_name(&text) {
                 packages.insert(internal, (text.clone(), base.clone()));
             }
-            packages.insert(name.clone(), (text, base));
+            if !name.is_empty() {
+                packages.insert(name.clone(), (text, base));
+            }
         }
     }
     packages
