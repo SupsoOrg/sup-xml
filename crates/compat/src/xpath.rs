@@ -1811,7 +1811,10 @@ pub unsafe extern "C" fn xmlXPathFreeObject(obj: *mut xmlXPathObject) {
     // followed the same allocation discipline).
     let o = unsafe { Box::from_raw(obj) };
     match o.kind {
-        XPATH_NODESET => {
+        // Both node-set objects and XSLT result-tree fragments carry a
+        // `nodesetval` (xmlXPathNewValueTree / document() produce the
+        // latter); libxml2's xmlXPathFreeObject frees it for both.
+        XPATH_NODESET | XPATH_XSLT_TREE => {
             if !o.nodesetval.is_null() {
                 unsafe { xmlXPathFreeNodeSet(o.nodesetval); }
             }

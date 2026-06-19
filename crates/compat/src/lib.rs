@@ -151,3 +151,35 @@ pub mod xinclude;
 pub mod xpath;
 pub mod xsd;
 pub mod xslt;
+
+/// Roots for Miri's at-exit leak checker.
+///
+/// This crate keeps a few intentional per-thread caches that live until
+/// the thread exits — the shared string-interning [`dict`], a per-thread
+/// scratch document for detached nodes ([`mutate`]), and the per-document
+/// node arenas. They are torn down by their thread-local destructors, but
+/// Miri runs its leak check before the main thread's thread-local teardown,
+/// so it reports them as leaks. Recording each one in a process-global list
+/// makes the checker see them as reachable (intentional) rather than lost,
+/// without weakening leak detection for anything else. Compiled only under
+/// Miri — zero cost and no behavioral change in normal builds.
+#[cfg(miri)]
+pub(crate) mod miri_roots {
+    use std::sync::Mutex;
+
+    struct SendPtr(#[allow(dead_code)] *const ());
+    // SAFETY: the pointers are only stored to keep their allocations
+    // reachable for Miri's leak checker; they are never dereferenced.
+    unsafe impl Send for SendPtr {}
+
+    static ROOTS: Mutex<Vec<SendPtr>> = Mutex::new(Vec::new());
+
+    /// Pin an intentional, process/thread-lifetime allocation so Miri's
+    /// leak checker treats it as reachable. `p` must carry the allocation's
+    /// provenance (cast the real pointer with `as *const ()`).
+    pub(crate) fn keep(p: *const ()) {
+        if let Ok(mut v) = ROOTS.lock() {
+            v.push(SendPtr(p));
+        }
+    }
+}

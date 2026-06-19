@@ -776,6 +776,11 @@ fn ensure_scratch_doc() -> *mut XmlDoc {
         }
         let d = unsafe { xmlNewDoc(ptr::null()) };
         c.set(d);
+        // Intentional per-thread leak (freed at thread exit); root it for
+        // Miri's leak checker. Also covers the doc's arena and the detached
+        // nodes allocated into it, which are reachable through the doc.
+        #[cfg(miri)]
+        crate::miri_roots::keep(d as *const ());
         d
     })
 }

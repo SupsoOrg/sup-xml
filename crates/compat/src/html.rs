@@ -988,6 +988,9 @@ mod tests {
             crate::mutate::xmlUnlinkNode(dtd as *mut sup_xml_tree::dom::Node<'static>);
             assert!(crate::dtd::xmlGetIntSubset(doc).is_null(),
                     "intSubset must be NULL after unlinking the DTD node");
+            // The unlinked DTD is no longer owned by the doc — free it
+            // explicitly (xmlFreeDoc won't, now that it's detached).
+            crate::dtd::xmlFreeDtd(dtd);
             xmlFreeDoc(doc);
         }
     }

@@ -648,6 +648,11 @@ pub unsafe extern "C" fn xmlOutputBufferClose(out: *mut xmlOutputBuffer) -> c_in
         unsafe { xmlBufferFree(o.buffer); }
     }
     if !o.conv.is_null() { unsafe { xmlBufferFree(o.conv); } }
+    // The output buffer owns its encoder (libxml2 frees buf->encoder on
+    // close via xmlCharEncCloseFunc); release the handler and its name.
+    if !o.encoder.is_null() {
+        unsafe { xmlCharEncCloseFunc(o.encoder as *mut xmlCharEncodingHandler); }
+    }
     written
 }
 

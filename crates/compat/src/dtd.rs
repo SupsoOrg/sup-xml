@@ -500,8 +500,16 @@ pub unsafe extern "C" fn xmlFreeDtd(dtd: *mut xmlDtd) {
     crate::dtddecl::forget(dtd);
     unsafe {
         let boxed = Box::from_raw(dtd);
+        // name / external_id / system_id are owned CString::into_raw
+        // pointers from alloc_dtd_with_ids; reclaim each.
         if !boxed.name.is_null() {
             drop(std::ffi::CString::from_raw(boxed.name));
+        }
+        if !boxed.external_id.is_null() {
+            drop(std::ffi::CString::from_raw(boxed.external_id));
+        }
+        if !boxed.system_id.is_null() {
+            drop(std::ffi::CString::from_raw(boxed.system_id));
         }
         // libxml2's xmlFreeDtd releases the DTD's hash tables; we only ever
         // populate `pentities` (an empty hash materialize plants so lxml's

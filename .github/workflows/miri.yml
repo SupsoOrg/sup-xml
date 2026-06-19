@@ -33,6 +33,12 @@ env:
   # and needs both — `chrono::Utc::now()` for certificate expiry and a
   # `.supso/` directory search — neither permitted under Miri's default
   # isolation.  It does not weaken UB detection; it only allows those calls.
+  #
+  # NOTE: the leak checker stays ON — it catches real leaks in our unsafe
+  # code.  Individual tests that exercise the libxml2 C ABI must free what
+  # they allocate (`xmlXPathFreeObject` / `xmlFreeNode` / `xmlFree`), and
+  # the few intentional process-lifetime caches are suppressed case by case
+  # at their allocation site, never globally.
   MIRIFLAGS: "-Zmiri-disable-isolation -Zmiri-permissive-provenance"
 
 jobs:

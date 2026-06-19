@@ -1882,7 +1882,12 @@ mod tests {
         assert_eq!(unsafe { CStr::from_ptr(title) }.to_str().unwrap(), "Dune");
         let missing = unsafe { xmlTextReaderGetAttribute(r, c"nope".as_ptr()) };
         assert!(missing.is_null());
-        unsafe { xmlFreeTextReader(r); }
+        unsafe {
+            // xmlTextReaderGetAttribute[No] return caller-owned strings.
+            crate::parse::xml_free_impl(id as *mut c_void);
+            crate::parse::xml_free_impl(title as *mut c_void);
+            xmlFreeTextReader(r);
+        }
     }
 
     #[test]
@@ -1944,7 +1949,12 @@ mod tests {
         assert!(!s2.contains("<wrap>"));
         assert!(s2.contains("<a/>"));
         assert!(s2.contains("<b>hi</b>"));
-        unsafe { xmlFreeTextReader(r); }
+        unsafe {
+            // ReadOuterXml/ReadInnerXml return caller-owned strings.
+            crate::parse::xml_free_impl(outer as *mut c_void);
+            crate::parse::xml_free_impl(inner as *mut c_void);
+            xmlFreeTextReader(r);
+        }
     }
 
     #[test]
@@ -1956,7 +1966,11 @@ mod tests {
         assert_eq!(unsafe { CStr::from_ptr(uri) }.to_str().unwrap(), "urn:ex");
         let missing = unsafe { xmlTextReaderLookupNamespace(r, c"nope".as_ptr()) };
         assert!(missing.is_null());
-        unsafe { xmlFreeTextReader(r); }
+        unsafe {
+            // xmlTextReaderLookupNamespace returns a caller-owned string.
+            crate::parse::xml_free_impl(uri as *mut c_void);
+            xmlFreeTextReader(r);
+        }
     }
 
     #[test]

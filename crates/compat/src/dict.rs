@@ -127,6 +127,11 @@ pub(crate) fn thread_dict() -> *mut Dict {
         // when ThreadDictSlot drops at thread exit.
         let fresh = Dict::new_refcounted();
         s.ptr.set(fresh);
+        // The shared interning dict lives for the thread's lifetime; root it
+        // for Miri's leak checker (covers the interned names + hash table
+        // reachable through the dict). Intentional per-thread cache.
+        #[cfg(miri)]
+        crate::miri_roots::keep(fresh as *const ());
         fresh
     })
 }
@@ -179,6 +184,10 @@ thread_local! {
 pub(crate) fn new_doc_arena() -> Arc<Bump> {
     let arena = Arc::new(Bump::new());
     THREAD_ARENAS.with(|k| k.arenas.borrow_mut().push(Arc::clone(&arena)));
+    // The keep-alive holds every arena until the thread exits; root the
+    // arena for Miri's leak checker so the held-open clone isn't reported.
+    #[cfg(miri)]
+    crate::miri_roots::keep(Arc::as_ptr(&arena) as *const ());
     arena
 }
 
