@@ -444,7 +444,14 @@ impl ResultBuilder {
     /// automatically — XSLT 1.0 §7.2 says contiguous character data
     /// in the result tree is treated as a single text node.
     pub fn push_text(&mut self, content: String, dose: bool) {
-        if content.is_empty() { return; }
+        if content.is_empty() {
+            // An empty text node produces no output, but it is still a
+            // node in the sequence: it breaks the adjacency of the atomic
+            // values on either side, so they are NOT space-separated
+            // (XSLT 2.0 §5.7.2).
+            self.last_was_atomic = false;
+            return;
+        }
         // `no_text_merge` only suppresses merging at the OUTER level
         // (no element open) — inside an element body, XSLT 2.0
         // §5.7.2's text-node merging still applies (an LRE inside

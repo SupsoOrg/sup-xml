@@ -8356,20 +8356,20 @@ fn copy_value_into(state: &mut EvalState, v: &Value, copy_ns: bool) -> Result<()
         Value::NodeSet(ns) => {
             // XSLT 2.0 §5.7.2 sequence normalization: atomic items in
             // the input sequence (here represented as synthetic-text
-            // nodes whose IDs come from the EXSLT synthetic store)
-            // are joined with a single space separator.  Real nodes
-            // flow through as deep copies without inter-item
-            // separators.  We track whether the previous emit was an
-            // atomic-text item so an inter-atom space is only emitted
-            // between consecutive atomics.
-            let mut prev_was_atomic = false;
+            // nodes whose IDs come from the EXSLT synthetic store) are
+            // joined with a single space separator.  Routing them through
+            // `push_atomic_text` keeps the builder's `last_was_atomic`
+            // flag accurate, so the separator is also inserted between
+            // atomics emitted by *separate* instructions (e.g. successive
+            // `xsl:sequence select="."` iterations of an `xsl:for-each`
+            // over `1 to 5`).  Real nodes flow through as deep copies and
+            // break the atomic-adjacency run.
             for &id in ns {
-                let is_atomic = sup_xml_core::xpath::is_synthetic_id(id);
-                if is_atomic && prev_was_atomic {
-                    state.builder.push_text(" ".into(), false);
+                if sup_xml_core::xpath::is_synthetic_id(id) {
+                    state.builder.push_atomic_text(state.idx.string_value(id));
+                } else {
+                    deep_copy_node(state, id, None, copy_ns)?;
                 }
-                deep_copy_node(state, id, None, copy_ns)?;
-                prev_was_atomic = is_atomic;
             }
         }
         // Our XSLT engine doesn't produce ForeignNodeSets (no
