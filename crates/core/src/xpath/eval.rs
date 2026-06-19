@@ -854,6 +854,17 @@ pub trait XPathBindings {
     /// unchanged.
     fn static_base_uri(&self) -> Option<String> { None }
 
+    /// Rewrite a literal-result-element's expanded name through
+    /// `xsl:namespace-alias` (XSLT 1.0 §7.1.1).  Given the element's
+    /// `(uri, local, prefix)`, return the aliased form or `None` when no
+    /// alias applies.  Default: no aliasing (non-XSLT callers); XSLT
+    /// bindings override it with the executing package's alias table.
+    fn alias_result_name(
+        &self, _uri: &str, _local: &str, _prefix: Option<&str>,
+    ) -> Option<(String, String, Option<String>)> {
+        None
+    }
+
     /// XPath 2.0 §3.1.5 base-URI accessor for synthetic nodes the
     /// runtime constructs.  Default `None` means "no override" —
     /// `fn:base-uri` then continues walking up the ancestor chain

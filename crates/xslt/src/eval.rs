@@ -450,6 +450,25 @@ impl<'a, I: DocIndexLike> XPathBindings for XsltBindings<'a, I> {
         })
     }
 
+    fn alias_result_name(
+        &self, uri: &str, local: &str, prefix: Option<&str>,
+    ) -> Option<(String, String, Option<String>)> {
+        let original = QName {
+            prefix: prefix.map(str::to_string),
+            local:  local.to_string(),
+            uri:    uri.to_string(),
+        };
+        // key_package_id carries the executing package id (function or
+        // template); namespace aliases are package-local (XSLT 3.0 §3.5).
+        let aliased = apply_namespace_alias_for(
+            self.style, self.key_package_id, self.namespaces, &original);
+        if aliased.uri == original.uri && aliased.prefix == original.prefix {
+            None
+        } else {
+            Some((aliased.uri, aliased.local, aliased.prefix))
+        }
+    }
+
     fn node_base_uri(&self, id: NodeId) -> Option<String> {
         self.rtf_base_uris.borrow().get(&id).cloned()
     }
@@ -1658,6 +1677,11 @@ impl<'p> XPathBindings for PassthroughBindings<'p> {
     fn foreign_string_value(
         &self, p: sup_xml_core::xpath::eval::ForeignNodePtr,
     ) -> String { self.inner.foreign_string_value(p) }
+    fn alias_result_name(
+        &self, uri: &str, local: &str, prefix: Option<&str>,
+    ) -> Option<(String, String, Option<String>)> {
+        self.inner.alias_result_name(uri, local, prefix)
+    }
 }
 
 /// Binds one variable name → value on top of an owned parent binding
@@ -1688,6 +1712,11 @@ impl<'p> XPathBindings for NamedBinding<'p> {
     fn foreign_string_value(
         &self, p: sup_xml_core::xpath::eval::ForeignNodePtr,
     ) -> String { self.parent_owned.foreign_string_value(p) }
+    fn alias_result_name(
+        &self, uri: &str, local: &str, prefix: Option<&str>,
+    ) -> Option<(String, String, Option<String>)> {
+        self.parent_owned.alias_result_name(uri, local, prefix)
+    }
 }
 
 // ── variable scope stack ──────────────────────────────────────────
@@ -6948,6 +6977,19 @@ fn build_function_subtree<I: DocIndexLike>(
     for instr in body {
         match instr {
             Instr::LiteralElement { name, attributes, namespaces, body: lre_body, .. } => {
+                // XSLT 1.0 §7.1.1 — a literal result element's namespace is
+                // rewritten by xsl:namespace-alias (package-local in 3.0).
+                // The function body builds elements here, so apply it too.
+                let aliased_name;
+                let name = match bindings.alias_result_name(
+                    &name.uri, &name.local, name.prefix.as_deref())
+                {
+                    Some((uri, local, prefix)) => {
+                        aliased_name = QName { prefix, local, uri };
+                        &aliased_name
+                    }
+                    None => name,
+                };
                 builder.open_element(name.clone());
                 if !name.uri.is_empty() {
                     builder.push_namespace_decl(name.prefix.clone(), name.uri.clone());
@@ -8590,16 +8632,17 @@ fn attribute_qname(state: &EvalState, node: NodeId) -> QName {
 /// The namespace-alias table for the currently-executing package
 /// (XSLT 3.0 §3.5 — aliases are package-local).  The principal package
 /// (id 0) uses the global table; used packages use their own.
-fn current_alias_table<'s>(state: &'s EvalState) -> &'s [(String, String, Option<String>)] {
-    if state.current_package_id == 0 {
-        &state.style.namespace_aliases
+/// The namespace-alias table for a given package (XSLT 3.0 §3.5 —
+/// aliases are package-local).  Package 0 (principal) uses the global
+/// table; a used package uses only its own (no aliasing if it declared
+/// none — it does NOT inherit the principal's).
+fn alias_table_for(
+    style: &crate::ast::StylesheetAst, package_id: u32,
+) -> &[(String, String, Option<String>)] {
+    if package_id == 0 {
+        &style.namespace_aliases
     } else {
-        // A used package with no alias declarations applies no aliasing
-        // (not the principal's) — its components are package-local.
-        state.style.package_aliases
-            .get(&state.current_package_id)
-            .map(Vec::as_slice)
-            .unwrap_or(&[])
+        style.package_aliases.get(&package_id).map(Vec::as_slice).unwrap_or(&[])
     }
 }
 
@@ -8619,11 +8662,24 @@ fn pkg_decimal_formats(
 }
 
 fn apply_namespace_alias(state: &EvalState, name: &QName) -> QName {
+    apply_namespace_alias_for(state.style, state.current_package_id, state.namespaces, name)
+}
+
+/// Apply namespace aliasing using a specific package's alias table — the
+/// state-free form used by the `xsl:function`-body builder, which runs
+/// from `XsltBindings` (carrying the executing package id) rather than
+/// `EvalState`.
+fn apply_namespace_alias_for(
+    style: &crate::ast::StylesheetAst,
+    package_id: u32,
+    namespaces: &NamespaceContext,
+    name: &QName,
+) -> QName {
     // XSLT 1.0 §7.1.1 — the source-side of an alias may be the null
     // namespace (stylesheet-prefix="#default" with no default xmlns
     // in scope at the alias declaration).  Don't short-circuit on
     // an empty URI; let the alias table decide.
-    for (style_uri, result_uri, result_prefix) in current_alias_table(state) {
+    for (style_uri, result_uri, result_prefix) in alias_table_for(style, package_id) {
         if name.uri == *style_uri {
             // The alias's `result-prefix` (captured at compile time)
             // is the authoritative qualifier for the emitted name.
@@ -8632,7 +8688,7 @@ fn apply_namespace_alias(state: &EvalState, name: &QName) -> QName {
             // stylesheet-root binding only if the alias didn't supply
             // one.
             let new_prefix = result_prefix.clone().or_else(|| {
-                state.namespaces.map.iter()
+                namespaces.map.iter()
                     .find(|(_, u)| u.as_str() == result_uri)
                     .and_then(|(p, _)| {
                         // The stylesheet's default namespace lives under
