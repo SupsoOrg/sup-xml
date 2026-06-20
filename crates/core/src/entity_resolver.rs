@@ -920,6 +920,7 @@ mod tests {
         /// the request fails — that's the TOCTOU-still-open
         /// signal.
         #[test]
+        #[cfg_attr(miri, ignore = "real TCP socket I/O is not supported under Miri")]
         fn pins_verified_ip_into_agent_resolver() {
             use std::io::{Read, Write};
             use std::net::{SocketAddr, TcpListener};
@@ -966,6 +967,7 @@ mod tests {
         }
 
         #[test]
+        #[cfg_attr(miri, ignore = "real TCP socket I/O is not supported under Miri")]
         fn allows_plaintext_http_when_opted_in() {
             // Build the resolver, request http://; this should
             // pass the scheme + host checks (would attempt a
