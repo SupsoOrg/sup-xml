@@ -4177,6 +4177,7 @@ fn compile_output(node: &Node, allow_avt: bool) -> Result<OutputSpec, XsltError>
     out.media_type             = static_attr("media-type").map(|s| s.to_string());
     out.doctype_public         = static_attr("doctype-public").map(|s| s.to_string());
     out.doctype_system         = static_attr("doctype-system").map(|s| s.to_string());
+    out.html_version           = static_attr("html-version").and_then(|s| s.trim().parse().ok());
     out.version                = read_attribute(node, "version").map(str::to_string);
     if let Some(s) = read_attribute(node, "cdata-section-elements")
         .filter(|v| !(allow_avt && value_is_avt(v)))
@@ -4925,7 +4926,7 @@ fn compile_raw_instr_into(
             // (§27.1).  A static value is baked into the OutputSpec by
             // compile_output above; an AVT is applied at run time.
             for a in ["doctype-public", "doctype-system", "media-type",
-                      "cdata-section-elements"] {
+                      "cdata-section-elements", "html-version"] {
                 if let Some(v) = read_attribute(node, a) {
                     if value_is_avt(&v) {
                         serialization_avts.push((a.to_string(), avt(node, v)?));

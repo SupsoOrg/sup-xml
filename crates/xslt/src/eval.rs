@@ -3435,6 +3435,7 @@ fn overlay_output_into(base: &mut crate::ast::OutputSpec, ov: &crate::ast::Outpu
     if ov.media_type.is_some() { base.media_type = ov.media_type.clone(); }
     if ov.doctype_public.is_some() { base.doctype_public = ov.doctype_public.clone(); }
     if ov.doctype_system.is_some() { base.doctype_system = ov.doctype_system.clone(); }
+    if ov.html_version.is_some() { base.html_version = ov.html_version; }
     if ov.version.is_some() { base.version = ov.version.clone(); }
     // cdata-section-elements accumulate across xsl:output and
     // xsl:result-document (XSLT 2.0 §20) — union, don't replace.
@@ -4198,6 +4199,7 @@ fn eval_instr(
                     "doctype-public"        => doc_output.doctype_public = Some(v.to_string()),
                     "doctype-system"        => doc_output.doctype_system = Some(v.to_string()),
                     "media-type"            => doc_output.media_type = Some(v.to_string()),
+                    "html-version"          => doc_output.html_version = v.trim().parse().ok(),
                     "cdata-section-elements" => {
                         // A whitespace-separated QName list; resolve each
                         // prefix against the element's in-scope namespaces.

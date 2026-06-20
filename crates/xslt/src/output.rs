@@ -133,6 +133,12 @@ pub fn serialize_xml(
                 let _ = writeln!(out, r#"<!DOCTYPE {root} SYSTEM "{dt_sys}">"#);
             }
         }
+    } else if xhtml && output.html_version.is_some_and(|v| v >= 5.0)
+        && first_element_name(children).is_some()
+    {
+        // XSLT 3.0 §26.2 — html-version=5 on the xhtml method emits the
+        // HTML5 doctype (no system/public identifier).
+        out.push_str("<!DOCTYPE html>\n");
     }
     // `indent="yes"` (XSLT 1.0 §16.1): pretty-print element-only
     // content. Mixed content (any text-node child) suppresses

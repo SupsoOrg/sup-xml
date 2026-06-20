@@ -965,6 +965,9 @@ pub struct OutputSpec {
     pub media_type:             Option<String>,
     pub doctype_public:         Option<String>,
     pub doctype_system:         Option<String>,
+    /// `html-version` serialization parameter (XSLT 3.0 §26.2).  A value
+    /// of 5 selects the HTML5 `<!DOCTYPE html>` for the html/xhtml method.
+    pub html_version:           Option<f64>,
     pub version:                Option<String>,
     /// XSLT 2.0 §20: `escape-uri-attributes="yes|no"`.  Applies to
     /// the html and xhtml output methods only; default `yes`.  When
