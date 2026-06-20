@@ -4114,7 +4114,9 @@ fn compile_output(node: &Node, allow_avt: bool) -> Result<OutputSpec, XsltError>
             }
         }
         // A doctype-public value must contain only XML PubidChars (XTSE0020).
-        if let Some(v) = read_attribute(node, "doctype-public") {
+        if let Some(v) = read_attribute(node, "doctype-public")
+            .filter(|v| !(allow_avt && value_is_avt(v)))
+        {
             if !v.chars().all(|c| matches!(c,
                 'a'..='z' | 'A'..='Z' | '0'..='9' | ' ' | '\r' | '\n'
                 | '-' | '\'' | '(' | ')' | '+' | ',' | '.' | '/' | ':'
@@ -4126,7 +4128,9 @@ fn compile_output(node: &Node, allow_avt: bool) -> Result<OutputSpec, XsltError>
             }
         }
         // html-version is a numeric serialization parameter (XTSE0020).
-        if let Some(v) = read_attribute(node, "html-version") {
+        if let Some(v) = read_attribute(node, "html-version")
+            .filter(|v| !(allow_avt && value_is_avt(v)))
+        {
             if v.trim().parse::<f64>().is_err() {
                 return Err(XsltError::InvalidStylesheet(format!(
                     "xsl:output html-version='{v}' must be a number (XTSE0020)"
@@ -4170,9 +4174,9 @@ fn compile_output(node: &Node, allow_avt: bool) -> Result<OutputSpec, XsltError>
     out.escape_uri_attributes  = static_attr("escape-uri-attributes").map(parse_yesno);
     out.include_content_type   = static_attr("include-content-type").map(parse_yesno);
     out.byte_order_mark        = static_attr("byte-order-mark").map(parse_yesno);
-    out.media_type             = read_attribute(node, "media-type").map(str::to_string);
-    out.doctype_public         = read_attribute(node, "doctype-public").map(str::to_string);
-    out.doctype_system         = read_attribute(node, "doctype-system").map(str::to_string);
+    out.media_type             = static_attr("media-type").map(|s| s.to_string());
+    out.doctype_public         = static_attr("doctype-public").map(|s| s.to_string());
+    out.doctype_system         = static_attr("doctype-system").map(|s| s.to_string());
     out.version                = read_attribute(node, "version").map(str::to_string);
     if let Some(s) = read_attribute(node, "cdata-section-elements") {
         out.cdata_section_elements = parse_qname_list(node, s)?;
@@ -4915,7 +4919,19 @@ fn compile_raw_instr_into(
                     }
                 }
             }
-            if let Some(v) = read_attribute(node, "html-version") {
+            // String-valued serialization attributes may also be AVTs
+            // (§27.1).  A static value is baked into the OutputSpec by
+            // compile_output above; an AVT is applied at run time.
+            for a in ["doctype-public", "doctype-system", "media-type"] {
+                if let Some(v) = read_attribute(node, a) {
+                    if value_is_avt(&v) {
+                        serialization_avts.push((a.to_string(), avt(node, v)?));
+                    }
+                }
+            }
+            if let Some(v) = read_attribute(node, "html-version")
+                .filter(|v| !value_is_avt(v))
+            {
                 if v.trim().parse::<f64>().is_err() {
                     return Err(XsltError::InvalidStylesheet(format!(
                         "xsl:result-document html-version='{v}' must be numeric (XTSE0020)")));

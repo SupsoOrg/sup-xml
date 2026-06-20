@@ -4195,6 +4195,9 @@ fn eval_instr(
                     "byte-order-mark"       => doc_output.byte_order_mark = Some(yes),
                     "include-content-type"  => doc_output.include_content_type = Some(yes),
                     "escape-uri-attributes" => doc_output.escape_uri_attributes = Some(yes),
+                    "doctype-public"        => doc_output.doctype_public = Some(v.to_string()),
+                    "doctype-system"        => doc_output.doctype_system = Some(v.to_string()),
+                    "media-type"            => doc_output.media_type = Some(v.to_string()),
                     _ => {} // undeclare-prefixes isn't modeled in OutputSpec
                 }
             }
