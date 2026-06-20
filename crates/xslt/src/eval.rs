@@ -3436,9 +3436,9 @@ fn overlay_output_into(base: &mut crate::ast::OutputSpec, ov: &crate::ast::Outpu
     if ov.doctype_public.is_some() { base.doctype_public = ov.doctype_public.clone(); }
     if ov.doctype_system.is_some() { base.doctype_system = ov.doctype_system.clone(); }
     if ov.version.is_some() { base.version = ov.version.clone(); }
-    if !ov.cdata_section_elements.is_empty() {
-        base.cdata_section_elements = ov.cdata_section_elements.clone();
-    }
+    // cdata-section-elements accumulate across xsl:output and
+    // xsl:result-document (XSLT 2.0 §20) — union, don't replace.
+    base.cdata_section_elements.extend(ov.cdata_section_elements.iter().cloned());
     base.use_character_maps.extend(ov.use_character_maps.iter().cloned());
 }
 
