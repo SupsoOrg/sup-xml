@@ -4123,6 +4123,18 @@ fn eval_instr(
                 Some(fmt_avt) => {
                     let fmt = render_avt(state, fmt_avt, ctx_node, pos, size)?;
                     let fmt = fmt.trim();
+                    // XPath 3.0 URIQualifiedName `Q{uri}local` names the
+                    // namespace directly — no prefix to resolve.
+                    if let Some(rest) = fmt.strip_prefix("Q{") {
+                        match rest.split_once('}') {
+                            Some((uri, local)) => Some(QName {
+                                prefix: None, local: local.to_string(), uri: uri.to_string(),
+                            }),
+                            None => return Err(XsltError::InvalidStylesheet(format!(
+                                "xsl:result-document format='{fmt}' is not a valid \
+                                 EQName (XTDE1460)"))),
+                        }
+                    } else {
                     let (prefix, local) = match fmt.split_once(':') {
                         Some((p, l)) => (Some(p.to_string()), l.to_string()),
                         None         => (None, fmt.to_string()),
@@ -4139,6 +4151,7 @@ fn eval_instr(
                         None => String::new(),
                     };
                     Some(QName { prefix, local, uri })
+                    }
                 }
                 None => None,
             };
