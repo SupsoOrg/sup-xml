@@ -6045,7 +6045,7 @@ fn eval_json_function<I: DocIndexLike>(
 /// F&O §17.2 / §17.5): maps become objects, arrays become arrays, the
 /// numeric/boolean atomics become JSON literals, and everything else its
 /// quoted string value.
-fn value_to_json<I: DocIndexLike>(v: &Value, idx: &I, out: &mut String) -> Result<()> {
+pub fn value_to_json<I: DocIndexLike>(v: &Value, idx: &I, out: &mut String) -> Result<()> {
     match v {
         Value::Map(m) => {
             out.push('{');

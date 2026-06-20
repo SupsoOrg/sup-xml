@@ -3527,6 +3527,31 @@ fn iterate_select_nodes(state: &mut EvalState, v: Value) -> Result<Vec<NodeId>> 
 /// resolution.  Never appears in output (the wrapper is unwrapped).
 const ON_COND_NS: &str = "https://sup-xml.internal/on-conditional";
 
+/// Evaluate an `xsl:result-document` body.  For the json output method
+/// the body's value (a map / array / atomic) is captured through a
+/// sequence sink and serialized as JSON (F&O §17.5), emitted as raw text;
+/// otherwise the body builds the result tree normally.
+fn run_result_document_body(
+    state: &mut EvalState, body: &Body, ctx_node: NodeId, pos: usize, size: usize, json: bool,
+) -> Result<()> {
+    if !json {
+        return eval_body(state, body, ctx_node, pos, size);
+    }
+    state.sequence_sinks.push(Vec::new());
+    let r = eval_body(state, body, ctx_node, pos, size);
+    let items = state.sequence_sinks.pop().unwrap_or_default();
+    r?;
+    let value = match items.len() {
+        1 => items.into_iter().next().unwrap(),
+        _ => Value::Sequence(items),
+    };
+    let mut out = String::new();
+    sup_xml_core::xpath::eval::value_to_json(&value, state.idx, &mut out)
+        .map_err(XsltError::from)?;
+    state.builder.push_text(out, true);
+    Ok(())
+}
+
 fn eval_body(
     state: &mut EvalState,
     body:  &Body,
@@ -4224,6 +4249,14 @@ fn eval_instr(
                     _ => {} // undeclare-prefixes isn't modeled in OutputSpec
                 }
             }
+            // The json output method serializes the body's value as JSON
+            // rather than building a result tree; the serialized JSON is
+            // emitted as a disable-output-escaping text node with no XML
+            // declaration in front of it.
+            let is_json = doc_output.method.as_deref() == Some("json");
+            if is_json {
+                doc_output.omit_xml_declaration = Some(true);
+            }
             // XTDE1480: an xsl:result-document is illegal while the current
             // output state is *temporary* — inside a variable/function
             // body, or an attribute/comment/PI value.  Being nested inside
@@ -4260,7 +4293,7 @@ fn eval_instr(
                             "xsl:result-document targets the principal output URI, \
                              which already has content (XTRE1495)".into()));
                     }
-                    let r = eval_body(state, body, ctx_node, pos, size);
+                    let r = run_result_document_body(state, body, ctx_node, pos, size, is_json);
                     state.principal_buf =
                         Some(std::mem::replace(&mut state.builder, secondary));
                     return r;
@@ -4270,7 +4303,7 @@ fn eval_instr(
                         "xsl:result-document targets the principal output URI, \
                          which already has content (XTRE1495)".into()));
                 }
-                eval_body(state, body, ctx_node, pos, size)?;
+                run_result_document_body(state, body, ctx_node, pos, size, is_json)?;
                 return Ok(());
             }
             // XTRE1495: two result documents must not share a URI.
@@ -4297,7 +4330,7 @@ fn eval_instr(
                 // The result-document body is a final result tree, so a
                 // result-document nested in it isn't in temporary output.
                 let _final = FinalOutputGuard::enter();
-                eval_body(state, body, ctx_node, pos, size)
+                run_result_document_body(state, body, ctx_node, pos, size, is_json)
             };
             let restored = outer_secondary
                 .unwrap_or_else(|| state.principal_buf.take().expect("principal stashed"));
