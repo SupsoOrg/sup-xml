@@ -42,6 +42,7 @@ pub mod pattern;
 pub mod result_tree;
 pub mod schematron;
 pub mod sort;
+pub mod stream;
 pub mod walk;
 pub mod whitespace;
 
@@ -127,6 +128,27 @@ impl Stylesheet {
         Self::finalize(ast)
     }
 
+    /// Parse + compile + resolve imports, supplying values for static
+    /// parameters (XSLT 3.0 §3.5).  Each `(name, select)` pair gives the
+    /// XPath value expression for a `<xsl:param static="yes">`, overriding
+    /// the declaration's default and satisfying `required="yes"`.  Static
+    /// parameters drive `use-when` and shadow attributes, so they must be
+    /// supplied at compile time rather than via `apply_with_params`.
+    pub fn compile_str_with_loader_and_static_params(
+        stylesheet_text: &str,
+        loader:          &dyn Loader,
+        base:            Option<&str>,
+        static_params:   &[(String, String)],
+    ) -> Result<Self, XsltError> {
+        let ast = compiler::compile_with_imports_and_static_params(
+            stylesheet_text, loader, base,
+            ast::StylesheetAst::default(),
+            &mut 0,
+            static_params,
+        )?;
+        Self::finalize(ast)
+    }
+
     /// Compile with a package library available for `xsl:use-package`
     /// (XSLT 3.0 §3.5.1) — `packages` maps a package name to its
     /// (source text, base URI).  Imports/includes still resolve via
@@ -170,6 +192,10 @@ impl Stylesheet {
         compiler::validate_iterate_constraints(&ast)?;
         compiler::validate_input_type_annotations(&ast)?;
         compiler::validate_package_exposes(&ast)?;
+        // XSLT 3.0 §19: every streamable context (a streamable mode's
+        // template rules, xsl:source-document streamable="yes",
+        // streamable accumulators) must be guaranteed-streamable.
+        stream::validate_streamability(&ast)?;
         Ok(Stylesheet { ast })
     }
 

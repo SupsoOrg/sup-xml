@@ -12,6 +12,15 @@
 //!   2. Update or replace these reminders with real conformance tests
 //!      against the W3C suite (see `xslt30.rs` for the runner).
 //!
+//! Streaming is being implemented incrementally (XSLT 3.0 §19).  The
+//! *static streamability analysis* has landed — a `streamable="yes"`
+//! mode, `xsl:source-document`, or `xsl:accumulator` whose body is not
+//! guaranteed-streamable is now rejected at compile time with XTSE3430
+//! (see `crate::stream`).  Streamed *execution* (bounded-memory
+//! evaluation over a parse-event stream) is still pending; until it
+//! lands, a streamable source-document that passes analysis is run
+//! non-streamed at apply time.
+//!
 //! The W3C XSLT 3.0 test suite has extensive coverage for both
 //! feature families:
 //!   * Streaming:
@@ -36,20 +45,15 @@ use sup_xml_xslt::Stylesheet;
 
 // ── streaming ───────────────────────────────────────────────────────
 
-/// `<xsl:source-document streamable="yes">` is the canonical way to
-/// open a streamed source in XSLT 3.0.  Our engine doesn't recognise
-/// the instruction at all — at best the unknown XSLT element gets
-/// compiled into the `Unsupported` AST node and errors at run time.
-///
-/// What a real streaming impl would do: read `loans.xml` lazily, run
-/// the body's apply-templates once per subtree, never materialize the
-/// whole tree.  For a 50 GB document, that's the difference between
-/// "works in 100 MB of RAM" and "crashes".
+/// Static streamability analysis is wired: a `streamable="yes"`
+/// source-document whose body is not guaranteed-streamable is rejected
+/// at compile time (XSLT 3.0 §19, XTSE3430).  Here the body selects via
+/// the absolute path `/items/item` — the leading `/` is climbing and a
+/// downward step from it roams, so the selection leaves the streaming
+/// window.  The idiomatic streamable form drops the slash (see
+/// `streaming_source_document_relative_path_passes_analysis`).
 #[test]
-fn streaming_source_document_is_unsupported() {
-    // Use just <xsl:template match="/"> as the body so XSLT 1.0
-    // compile accepts the surrounding stylesheet structure.  The
-    // <xsl:source-document> instruction is the 3.0-only bit.
+fn streaming_source_document_absolute_path_rejected() {
     let xsl = r#"<xsl:stylesheet version="3.0"
                                 xmlns:xsl="http://www.w3.org/1999/XSL/Transform">
         <xsl:template name="main">
@@ -59,27 +63,31 @@ fn streaming_source_document_is_unsupported() {
         </xsl:template>
     </xsl:stylesheet>"#;
 
-    let stylesheet = Stylesheet::compile_str(xsl)
-        .expect("compile must succeed — unsupported instructions reach run time");
-    let src = parse_str("<dummy/>", &ParseOptions::default()).unwrap();
-    let result = stylesheet.apply(&src);
-    // Either the compile path swallowed source-document and produced
-    // an empty result, or running it errors.  Both are acceptable
-    // "we don't support streaming" outcomes — what's NOT acceptable
-    // is silently transforming the document as if streaming were
-    // honoured.  The point of this test is to fail loudly the day
-    // someone wires up real streaming so that test gets replaced
-    // with W3C-suite coverage.
-    match result {
-        Ok(rt) => {
-            let s = rt.to_string().unwrap_or_default();
-            assert!(s.trim().is_empty() || !s.contains("item"),
-                "streaming source-document apparently honoured — replace this test \
-                 with real streaming conformance coverage from the W3C suite \
-                 (tests/insn/source-document/ etc.)");
-        }
-        Err(_) => { /* expected — instruction unsupported */ }
-    }
+    let err = Stylesheet::compile_str(xsl)
+        .expect_err("non-streamable source-document body must be rejected");
+    assert!(err.to_string().contains("XTSE3430"),
+        "expected an XTSE3430 streamability rejection, got: {err}");
+}
+
+/// The streamable form of the same transform — a relative downward
+/// selection — passes static analysis and compiles.  Streamed
+/// *execution* is still pending, so applying it (which would load
+/// `huge.xml`) is not exercised here; this test pins the analyzer's
+/// accept side.  When streamed execution lands, replace this with real
+/// W3C-suite coverage (tests/insn/source-document/ etc.).
+#[test]
+fn streaming_source_document_relative_path_passes_analysis() {
+    let xsl = r#"<xsl:stylesheet version="3.0"
+                                xmlns:xsl="http://www.w3.org/1999/XSL/Transform">
+        <xsl:template name="main">
+            <xsl:source-document href="huge.xml" streamable="yes">
+                <xsl:apply-templates select="items/item"/>
+            </xsl:source-document>
+        </xsl:template>
+    </xsl:stylesheet>"#;
+
+    Stylesheet::compile_str(xsl)
+        .expect("a guaranteed-streamable source-document body must compile");
 }
 
 /// `fn:stream-available($uri)` per XSLT 3.0 — returns true iff the

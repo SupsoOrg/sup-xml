@@ -4829,7 +4829,7 @@ fn eval_instr(
             // body straight through.
             eval_body(state, body, ctx_node, pos, size)?;
         }
-        Instr::SourceDocument { href, body } => {
+        Instr::SourceDocument { href, body, .. } => {
             // Non-streamed: load the referenced document fully and run
             // the body against its document node.
             let uri = render_avt(state, href, ctx_node, pos, size)?;

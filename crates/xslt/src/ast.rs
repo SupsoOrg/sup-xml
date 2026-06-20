@@ -623,10 +623,13 @@ pub enum Instr {
     /// `xsl:stream`) — process an external document.  We implement it
     /// non-streamed: the referenced document is loaded into a tree and
     /// the body is evaluated with the document node as context.  The
-    /// `streamable` attribute is accepted and ignored.
+    /// `streamable` attribute drives the streamability analysis
+    /// (XSLT 3.0 §19): when `true`, the body must be guaranteed-
+    /// streamable or the stylesheet is rejected at compile time.
     SourceDocument {
-        href: Avt,
-        body: Body,
+        href:       Avt,
+        streamable: bool,
+        body:       Body,
     },
     /// `xsl:on-empty` (XSLT 3.0 §16.4.1) — its content is emitted only
     /// if the rest of the containing sequence constructor produces no
@@ -889,6 +892,11 @@ pub struct AccumulatorDecl {
     pub name:          QName,
     pub initial_value: Expr,
     pub rules:         Vec<AccumulatorRule>,
+    /// `streamable="yes"` (XSLT 3.0 §18.2.1): the accumulator's rules
+    /// are subject to streamability analysis and may be applied while
+    /// streaming a source document.  A non-streamable rule in a
+    /// streamable accumulator is a compile-time error.
+    pub streamable:    bool,
     /// Import precedence (XSLT 3.0 §18.2): when several accumulators
     /// share a name, the one with highest precedence is used.  Stamped
     /// during import/package merging; the default is the top level.
@@ -1245,6 +1253,11 @@ pub struct ModeDecl {
     /// (private).  A used package's final/private mode may not have
     /// template rules added or overridden by the using package.
     pub visibility: Option<String>,
+    /// `streamable="yes"` (XSLT 3.0 §6.6 / §19.3): every template rule
+    /// in this mode is subject to streamability analysis and must be
+    /// guaranteed-streamable.  Non-streamable rules are rejected at
+    /// compile time (XTSE3430).
+    pub streamable: bool,
     /// Import precedence — highest wins when merging same-name modes.
     pub import_precedence: i32,
 }

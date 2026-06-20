@@ -58,6 +58,14 @@ thread_local! {
     static STATIC_PARAMS: std::cell::RefCell<
         std::collections::HashMap<String, sup_xml_core::xpath::eval::Value>>
         = std::cell::RefCell::new(std::collections::HashMap::new());
+    /// Caller-supplied static-parameter values (XSLT 3.0 §3.5) — keyed
+    /// by name.  These override a declaration's `select=` default and
+    /// satisfy `required="yes"`.  Persist across the whole import tree
+    /// (unlike STATIC_PARAMS, which is cleared per module); seeded by
+    /// the `*_with_static_params` compile entry points.
+    static STATIC_PARAM_OVERRIDES: std::cell::RefCell<
+        std::collections::HashMap<String, sup_xml_core::xpath::eval::Value>>
+        = std::cell::RefCell::new(std::collections::HashMap::new());
     /// In-scope `default-mode=` (XSLT 3.0 §6.4) during compilation —
     /// supplies the mode for `xsl:template` / `xsl:apply-templates` that
     /// omit `mode=`.  `None` (the usual state) means the unnamed mode;
@@ -233,6 +241,17 @@ fn get_static_param(name: &str) -> Option<sup_xml_core::xpath::eval::Value> {
 }
 fn clear_static_params() {
     STATIC_PARAMS.with(|m| m.borrow_mut().clear());
+}
+fn get_static_param_override(name: &str) -> Option<sup_xml_core::xpath::eval::Value> {
+    STATIC_PARAM_OVERRIDES.with(|m| m.borrow().get(name).cloned())
+}
+fn set_static_param_overrides(
+    overrides: std::collections::HashMap<String, sup_xml_core::xpath::eval::Value>,
+) {
+    STATIC_PARAM_OVERRIDES.with(|m| *m.borrow_mut() = overrides);
+}
+fn clear_static_param_overrides() {
+    STATIC_PARAM_OVERRIDES.with(|m| m.borrow_mut().clear());
 }
 
 /// True when the surrounding `compile()` is running on a stylesheet
@@ -1197,12 +1216,28 @@ pub fn compile(doc: &Document) -> Result<StylesheetAst, XsltError> {
             .map(|v| matches!(v, "yes" | "true" | "1")).unwrap_or(false);
         if !is_static { continue; }
         let name = required_qname_attr(child, "name", "xsl:variable")?;
-        let value = match read_attribute(child, "select") {
-            Some(sel) => {
-                let e = parse_xpath_at(child, sel).map_err(XsltError::from)?;
-                eval_static_expr_ast(&e, Some(child))?
-            }
-            None => sup_xml_core::xpath::eval::Value::String(String::new()),
+        // A caller-supplied value (XSLT 3.0 §3.5) overrides the
+        // declaration's default and satisfies `required="yes"`.
+        let override_val = get_static_param_override(&qname_key(&name))
+            .or_else(|| get_static_param_override(&name.local));
+        let value = match override_val {
+            Some(v) => v,
+            None => match read_attribute(child, "select") {
+                Some(sel) => {
+                    let e = parse_xpath_at(child, sel).map_err(XsltError::from)?;
+                    eval_static_expr_ast(&e, Some(child))?
+                }
+                // XSLT 3.0 §3.5 — a required static parameter with no
+                // supplied value is a static error.
+                None if ln == "param" && read_attribute(child, "required")
+                    .map(|v| matches!(v, "yes" | "true" | "1")).unwrap_or(false) =>
+                {
+                    return Err(XsltError::InvalidStylesheet(format!(
+                        "no value supplied for required static parameter '{}' (XTSE0570)",
+                        name.local)));
+                }
+                None => sup_xml_core::xpath::eval::Value::String(String::new()),
+            },
         };
         set_static_param(qname_key(&name), value);
     }
@@ -2503,6 +2538,29 @@ thread_local! {
 ///
 /// The base URI threads through so relative hrefs in nested
 /// imports resolve correctly.
+/// Like [`compile_with_imports`] but with caller-supplied static
+/// parameters (XSLT 3.0 §3.5).  Each `(name, select)` pair gives the
+/// XPath value expression for a `<xsl:param static="yes">`; it overrides
+/// the declaration's default and satisfies `required="yes"`.
+pub fn compile_with_imports_and_static_params(
+    text:                &str,
+    loader:              &dyn Loader,
+    base:                Option<&str>,
+    acc:                 StylesheetAst,
+    precedence_counter:  &mut i32,
+    static_params:       &[(String, String)],
+) -> Result<StylesheetAst, XsltError> {
+    let mut overrides = std::collections::HashMap::new();
+    for (name, select) in static_params {
+        let e = parse_xpath(select).map_err(XsltError::from)?;
+        overrides.insert(name.clone(), eval_static_expr_ast(&e, None)?);
+    }
+    set_static_param_overrides(overrides);
+    let r = compile_with_imports(text, loader, base, acc, precedence_counter);
+    clear_static_param_overrides();
+    r
+}
+
 pub fn compile_with_imports(
     text:                &str,
     loader:              &dyn Loader,
@@ -3620,6 +3678,15 @@ fn compile_key(node: &Node) -> Result<Key, XsltError> {
     }
 }
 
+/// Read a `streamable=` attribute as a boolean.  XSLT 3.0 spells the
+/// affirmative as `yes`/`true`/`1`; absence or any other value is
+/// `false` (the construct is processed in the ordinary tree-based way).
+fn read_streamable(node: &Node) -> bool {
+    read_attribute(node, "streamable")
+        .map(|s| matches!(s.trim(), "yes" | "true" | "1"))
+        .unwrap_or(false)
+}
+
 /// Compile an `<xsl:mode>` declaration (XSLT 3.0 §6.6).  Only the
 /// `on-no-match` action affects evaluation today; the streamability /
 /// typing / multiple-match properties are accepted and validated but
@@ -3647,8 +3714,9 @@ fn compile_mode(node: &Node) -> Result<ModeDecl, XsltError> {
     };
     let on_no_match_explicit = read_attribute(node, "on-no-match").is_some();
     let visibility = read_attribute(node, "visibility").map(str::to_string);
+    let streamable = read_streamable(node);
     Ok(ModeDecl { name, on_no_match, on_no_match_explicit, visibility,
-        import_precedence: TOP_LEVEL_IMPORT_PRECEDENCE })
+        streamable, import_precedence: TOP_LEVEL_IMPORT_PRECEDENCE })
 }
 
 /// Compile an `<xsl:use-package>` declaration (XSLT 3.0 §3.5.1).  The
@@ -3943,7 +4011,8 @@ fn compile_accumulator(node: &Node) -> Result<AccumulatorDecl, XsltError> {
         }
         rules.push(compile_accumulator_rule(child)?);
     }
-    Ok(AccumulatorDecl { name, initial_value, rules,
+    let streamable = read_streamable(node);
+    Ok(AccumulatorDecl { name, initial_value, rules, streamable,
         import_precedence: TOP_LEVEL_IMPORT_PRECEDENCE })
 }
 
@@ -5670,8 +5739,9 @@ fn compile_source_document(node: &Node) -> Result<Instr, XsltError> {
     validate_xslt_only_attributes(node, "xsl:source-document",
         &["href", "streamable", "validation", "type", "use-accumulators"])?;
     let href = avt(node, require_attr(node, "href", "xsl:source-document")?)?;
+    let streamable = read_streamable(node);
     let body = compile_body(node)?;
-    Ok(Instr::SourceDocument { href, body })
+    Ok(Instr::SourceDocument { href, streamable, body })
 }
 
 /// XSLT 3.0 §10.4 `xsl:evaluate` — `xpath=` (required) supplies the

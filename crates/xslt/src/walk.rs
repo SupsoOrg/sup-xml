@@ -591,7 +591,7 @@ fn scan_instr<F: FnMut(&Expr)>(instr: &Instr, scan: &mut F) {
                 for child in &w.body { scan_instr(child, scan); }
             }
         }
-        SourceDocument { href, body } => {
+        SourceDocument { href, body, .. } => {
             scan_avt(href, scan);
             for child in body { scan_instr(child, scan); }
         }
@@ -834,7 +834,7 @@ fn walk_instr(i: &Instr, out: &mut Vec<String>) {
             if let Some(e) = context_item { walk_expr(e, out); }
             for w in with_params { collect_with_param(w, out); }
         }
-        Instr::SourceDocument { href, body } => {
+        Instr::SourceDocument { href, body, .. } => {
             walk_avt(href, out);
             walk_instrs(body, out);
         }

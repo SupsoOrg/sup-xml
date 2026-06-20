@@ -71,6 +71,11 @@ struct TestCase {
     /// `(name, select_expression_or_literal)`; the runner threads
     /// them through `Stylesheet::apply_with_params`.
     params:         Vec<(String, String)>,
+    /// `<param … static="yes">` blocks inside `<test>` — values for the
+    /// stylesheet's static parameters (XSLT 3.0 §3.5).  Each entry is
+    /// `(name, select_expression)`; supplied at compile time because
+    /// static parameters drive `use-when` and shadow attributes.
+    static_params:  Vec<(String, String)>,
     /// `<initial-template name="…"/>` inside `<test>` — when set,
     /// the runner enters the named template instead of doing
     /// apply-templates on the document node.
@@ -332,7 +337,7 @@ fn parse_test_set(path: &Path) -> Vec<TestCase> {
         name: String::new(), stylesheet: None,
         source_inline: None, source_file: None,
         env_ref: None, expects: Expectation::Unsupported,
-            params: Vec::new(), initial_template: None, initial_mode: None, packages: Vec::new(), on_multiple_match_error: false, result_doc_asserts: Vec::new(),
+            params: Vec::new(), static_params: Vec::new(), initial_template: None, initial_mode: None, packages: Vec::new(), on_multiple_match_error: false, result_doc_asserts: Vec::new(),
         requires_post_1_0: false, requires_unsupported_feature: false,
     };
     let mut cur_env_name = String::new();
@@ -352,7 +357,7 @@ fn parse_test_set(path: &Path) -> Vec<TestCase> {
                             name: String::new(), stylesheet: None,
                             source_inline: None, source_file: None,
                             env_ref: None, expects: Expectation::Unsupported,
-            params: Vec::new(), initial_template: None, initial_mode: None, packages: Vec::new(), on_multiple_match_error: false, result_doc_asserts: Vec::new(),
+            params: Vec::new(), static_params: Vec::new(), initial_template: None, initial_mode: None, packages: Vec::new(), on_multiple_match_error: false, result_doc_asserts: Vec::new(),
                             requires_post_1_0: false, requires_unsupported_feature: false,
                         };
                         for a in tag.attrs() {
@@ -662,24 +667,35 @@ fn parse_test_set(path: &Path) -> Vec<TestCase> {
                     "param" if in_test => {
                         let mut name   = String::new();
                         let mut select = String::new();
+                        let mut is_static = false;
                         for a in tag.attrs() {
                             if let Ok(a) = a {
                                 match a.name() {
                                     "name"   => name   = a.value().to_string(),
                                     "select" => select = a.value().to_string(),
+                                    "static" => is_static =
+                                        matches!(a.value().as_ref(), "yes" | "true" | "1"),
                                     _ => {}
                                 }
                             }
                         }
                         if !name.is_empty() && !select.is_empty() {
-                            // Test catalogs almost always wrap the
-                            // value in single or double quotes
-                            // (`select="'foo'"`).  The XSLT engine
-                            // currently treats top-level param values
-                            // as literal strings (not XPath), so peel
-                            // the surrounding quotes off before
-                            // forwarding so the receiving stylesheet
-                            // sees the intended string.
+                            // Static parameters are evaluated at compile
+                            // time as XPath (driving use-when / shadow
+                            // attributes), so forward the raw select
+                            // expression to the compiler.  A static
+                            // parameter is also an ordinary global value,
+                            // so still pass it at apply time too.
+                            if is_static {
+                                cur_case.static_params.push((name.clone(), select.clone()));
+                            }
+                            // Test catalogs almost always wrap the value in
+                            // single or double quotes (`select="'foo'"`).
+                            // The XSLT engine currently treats top-level
+                            // param values as literal strings (not XPath),
+                            // so peel the surrounding quotes off before
+                            // forwarding so the receiving stylesheet sees
+                            // the intended string.
                             let stripped = strip_xpath_string_literal(&select);
                             cur_case.params.push((name, stripped));
                         }
@@ -787,7 +803,7 @@ fn parse_test_set(path: &Path) -> Vec<TestCase> {
                             name: String::new(), stylesheet: None,
                             source_inline: None, source_file: None,
                             env_ref: None, expects: Expectation::Unsupported,
-            params: Vec::new(), initial_template: None, initial_mode: None, packages: Vec::new(), on_multiple_match_error: false, result_doc_asserts: Vec::new(),
+            params: Vec::new(), static_params: Vec::new(), initial_template: None, initial_mode: None, packages: Vec::new(), on_multiple_match_error: false, result_doc_asserts: Vec::new(),
                             requires_post_1_0: false, requires_unsupported_feature: false,
                         }));
                         in_case = false;
@@ -1517,10 +1533,13 @@ fn run_case_detailed(case: &TestCase, ts_dir: &Path) -> Option<Result<(), FailRe
     let base = ts_dir.join(stylesheet_path).to_string_lossy().to_string();
     // Build the xsl:use-package library: package name → (source, base).
     let packages = build_package_library(case, ts_dir);
-    let compiled = if packages.is_empty() {
-        Stylesheet::compile_str_with_loader(&xsl_text, &loader, Some(&base))
-    } else {
+    let compiled = if !packages.is_empty() {
         Stylesheet::compile_str_with_packages(&xsl_text, &loader, Some(&base), packages)
+    } else if !case.static_params.is_empty() {
+        Stylesheet::compile_str_with_loader_and_static_params(
+            &xsl_text, &loader, Some(&base), &case.static_params)
+    } else {
+        Stylesheet::compile_str_with_loader(&xsl_text, &loader, Some(&base))
     };
     let stylesheet = match compiled {
         Ok(s)  => s,
