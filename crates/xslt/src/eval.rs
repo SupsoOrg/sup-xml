@@ -3305,6 +3305,23 @@ fn in_temporary_output() -> bool {
     TEMP_OUTPUT_DEPTH.with(|c| c.get() > 0)
 }
 
+/// An `xsl:result-document` body is a *final* result tree, not temporary
+/// output, even when the instruction itself runs inside a temporary tree
+/// (XSLT 3.0 §27.1).  Zero the temp depth while the body evaluates so a
+/// nested `xsl:result-document` sees a final destination; restore the
+/// caller's depth on drop.
+struct FinalOutputGuard(u32);
+impl FinalOutputGuard {
+    fn enter() -> Self {
+        FinalOutputGuard(TEMP_OUTPUT_DEPTH.with(|c| c.replace(0)))
+    }
+}
+impl Drop for FinalOutputGuard {
+    fn drop(&mut self) {
+        TEMP_OUTPUT_DEPTH.with(|c| c.set(self.0));
+    }
+}
+
 /// Attach a failing instruction's source position to an [`XmlError`]
 /// that doesn't already carry one.  Called locally at each dispatch
 /// site with that instruction's `Body` position — the innermost site
@@ -4186,7 +4203,14 @@ fn eval_instr(
             // body, or an attribute/comment/PI value.  Being nested inside
             // another xsl:result-document is NOT temporary output: the
             // inner instruction creates a further final result tree.
-            if in_temporary_output() {
+            // XSLT 3.0 §27.1 dropped the temporary-output restriction: an
+            // xsl:result-document evaluated while a temporary tree is being
+            // built simply creates a further final result tree.  1.0/2.0
+            // stylesheets keep XTDE1480.
+            let in_temp = in_temporary_output();
+            if in_temp
+                && !crate::functions::xslt_version_3_or_more(&state.style.version)
+            {
                 return Err(XsltError::InvalidStylesheet(
                     "xsl:result-document is not allowed while writing to a \
                      temporary output destination (XTDE1480)".into()));
@@ -4229,18 +4253,26 @@ fn eval_instr(
                     "two xsl:result-document instructions write to the same \
                      URI '{uri}' (XTRE1495)")));
             }
-            // Capture the body into a fresh builder.  The previous active
-            // builder is the principal when this is the outermost
-            // result-document; expose it via `principal_buf` so a nested
-            // href-less result-document can still reach the principal URI.
+            // Capture the body into a fresh builder.  When the surrounding
+            // output is temporary (we're building an attribute / variable /
+            // etc.) the saved builder is NOT the principal — restore it
+            // locally and leave principal_buf untouched.  Otherwise it IS
+            // the principal when this is the outermost result-document;
+            // expose it via `principal_buf` so a nested href-less
+            // result-document can still reach the principal URI.
             let parent_active = std::mem::replace(&mut state.builder, ResultBuilder::new());
-            let outer_secondary = if state.principal_buf.is_none() {
+            let outer_secondary = if !in_temp && state.principal_buf.is_none() {
                 state.principal_buf = Some(parent_active);
                 None
             } else {
                 Some(parent_active)
             };
-            let r = eval_body(state, body, ctx_node, pos, size);
+            let r = {
+                // The result-document body is a final result tree, so a
+                // result-document nested in it isn't in temporary output.
+                let _final = FinalOutputGuard::enter();
+                eval_body(state, body, ctx_node, pos, size)
+            };
             let restored = outer_secondary
                 .unwrap_or_else(|| state.principal_buf.take().expect("principal stashed"));
             let written = std::mem::replace(&mut state.builder, restored);
