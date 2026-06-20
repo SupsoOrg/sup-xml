@@ -668,7 +668,9 @@ fn serialize_html_node(node: &ResultNode, out: &mut String, format: bool, escape
                 }
                 serialize_html_node(c, out, child_format, escape_uri, level + 1);
             }
-            if child_format {
+            // An empty element serializes as `<title></title>` — no
+            // internal indentation (HTML 5 §8 / XSLT serialization).
+            if child_format && !children.is_empty() {
                 out.push('\n');
                 push_indent(out, level);
             }
