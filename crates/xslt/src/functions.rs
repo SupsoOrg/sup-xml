@@ -38,16 +38,20 @@ fn err(msg: impl Into<String>) -> XmlError {
 
 // ── key index ─────────────────────────────────────────────────────
 
-/// Eagerly-built lookup table for `<xsl:key>`.  Built once per
-/// transformation across every document the engine knows about
-/// (the source plus everything `document()` pre-loaded).  Bucketed
-/// by `(key-name, doc-root, value)` so `key()` returns only nodes
-/// in the same document as the calling context, per XSLT 1.0 §12.2.
+/// Lookup table for `<xsl:key>`.  `use=`-attribute keys are built
+/// lazily — each is indexed the first time `key()` names it for a
+/// given document — so a transformation pays only for the keys it
+/// actually uses, over the documents it uses them on.  Body-form
+/// keys are built eagerly (see [`KeyIndex::build`]).  Entries are
+/// bucketed by `(key-name, doc-root, value)` so `key()` returns only
+/// nodes in the same document as the calling context, per XSLT 1.0 §12.2.
 pub struct KeyIndex {
-    /// `RefCell` so `key()` can lazily index a document (e.g. an RTF
-    /// passed as the 3-arg scope) that didn't exist when the index was
-    /// first built.  The declared key NAMES are fixed at build time, so
-    /// only the per-document entries grow.
+    /// `RefCell` so `key()` can index a document on demand: `use=`-
+    /// attribute keys are materialized lazily on first lookup (per
+    /// key-name, per document), and a document that didn't exist when
+    /// the index was first built (e.g. an RTF passed as the 3-arg
+    /// scope) is indexed the same way.  The declared key NAMES are
+    /// fixed at build time, so only the per-document entries grow.
     entries: std::cell::RefCell<HashMap<(String, NodeId, String), Vec<NodeId>>>,
     /// Clark-form expanded names of every declared `<xsl:key>`.
     /// Used by `key()` to raise XTDE1260 on lookups whose name
@@ -59,9 +63,19 @@ pub struct KeyIndex {
     /// codepoint collation isn't recorded; only entries needing
     /// non-codepoint folding live here.
     collations: HashMap<String, String>,
-    /// Document roots already indexed — the source tree(s) present at
-    /// build time, plus any document lazily indexed by `materialize_for`.
-    indexed_roots: std::cell::RefCell<std::collections::HashSet<NodeId>>,
+    /// `(key-name, doc-root)` pairs already indexed.  `use=` keys are
+    /// built lazily by `materialize_for` the first time a `key()` call
+    /// names that key in that document, so a stylesheet that declares
+    /// many keys but uses few — or uses them only over a sub-document —
+    /// pays only for what it touches.  Body-form keys (computed by the
+    /// instruction evaluator, which `key()` cannot reach) are still
+    /// built eagerly over the source and recorded here at build time.
+    indexed: std::cell::RefCell<std::collections::HashSet<(String, NodeId)>>,
+    /// `(key-name, doc-root)` pairs currently being materialized.  A
+    /// `key()` lookup that lands on a pair in this set is recursing
+    /// into a key whose own `match`/`use` expression is mid-evaluation
+    /// — a circular key definition (XTDE0640).
+    building: std::cell::RefCell<std::collections::HashSet<(String, NodeId)>>,
 }
 
 impl KeyIndex {
@@ -70,8 +84,18 @@ impl KeyIndex {
             entries:    std::cell::RefCell::new(HashMap::new()),
             declared:   std::collections::HashSet::new(),
             collations: HashMap::new(),
-            indexed_roots: std::cell::RefCell::new(std::collections::HashSet::new()),
+            indexed:    std::cell::RefCell::new(std::collections::HashSet::new()),
+            building:   std::cell::RefCell::new(std::collections::HashSet::new()),
         }
+    }
+
+    /// True while `(name_key, doc_root)` is mid-materialization — used
+    /// by `key()` to detect a circular key reference (XTDE0640).  The
+    /// set is empty outside materialization, so the common lookup path
+    /// short-circuits before allocating.
+    fn is_building(&self, name_key: &str, doc_root: NodeId) -> bool {
+        let building = self.building.borrow();
+        !building.is_empty() && building.contains(&(name_key.to_string(), doc_root))
     }
 
     /// Apply the collation registered for `name_key` (if any) to
@@ -128,11 +152,15 @@ impl KeyIndex {
         }
     }
 
-    /// Build the index for every `use=`-attribute key.  Keys declared
-    /// with a sequence-constructor body (XSLT 2.0 §16.3) are returned
-    /// as `(key-index, node-id)` deferrals: their values need the full
-    /// instruction evaluator, which the caller drives via
-    /// [`KeyIndex::add_value`].
+    /// Build the index metadata (declared names + collations) and
+    /// locate the source nodes matched by body-form keys.  `use=`-
+    /// attribute keys are NOT indexed here — they are built lazily by
+    /// [`KeyIndex::materialize_for`] on first lookup.
+    ///
+    /// Keys declared with a sequence-constructor body (XSLT 2.0 §16.3)
+    /// are returned as `(key-index, node-id)` deferrals: their values
+    /// need the full instruction evaluator, which `key()` cannot reach,
+    /// so the caller computes them eagerly here via [`KeyIndex::add_value`].
     pub fn build<F>(
         style:   &StylesheetAst,
         idx:     &DocIndex<'_>,
@@ -141,7 +169,6 @@ impl KeyIndex {
     where
         F: FnMut(&sup_xml_core::xpath::Expr, NodeId) -> Result<Value>,
     {
-        let mut entries: HashMap<(String, NodeId, String), Vec<NodeId>> = HashMap::new();
         let declared: std::collections::HashSet<String> =
             style.keys.iter().map(|k| pkg_key_name(k.package_id, &qname_key(&k.name))).collect();
         let mut collations: HashMap<String, String> = HashMap::new();
@@ -154,49 +181,25 @@ impl KeyIndex {
                 }
             }
         }
-        // Capture the collation map BEFORE indexing so the fold
-        // helper has the right context.  Build a throwaway index so
-        // we can reuse `fold_for` while populating `entries`.
-        let folder = KeyIndex {
-            entries:    std::cell::RefCell::new(HashMap::new()),
-            declared:   declared.clone(),
-            collations: collations.clone(),
-            indexed_roots: std::cell::RefCell::new(std::collections::HashSet::new()),
-        };
         let mut deferred: Vec<(usize, NodeId)> = Vec::new();
         for (ki, key) in style.keys.iter().enumerate() {
-            let nk = pkg_key_name(key.package_id, &qname_key(&key.name));
+            if key.body.is_empty() {
+                continue; // `use=` key — materialized lazily on first lookup.
+            }
             for node_id in 0..idx.nodes.len() {
-                if !pattern_matches(&key.matcher, node_id, idx, &mut eval_one)? {
-                    continue;
-                }
-                if !key.body.is_empty() {
+                if pattern_matches(&key.matcher, node_id, idx, &mut eval_one)? {
                     // Sequence-constructor key: value computed later by
                     // the caller via the instruction evaluator.
                     deferred.push((ki, node_id));
-                    continue;
-                }
-                let value    = eval_one(&key.use_, node_id)?;
-                let doc_root = doc_root_of(idx, node_id);
-                let strings  = stringify_use_value(&value, idx);
-                for s in strings {
-                    let folded = folder.fold_for(&nk, &s);
-                    entries.entry((nk.clone(), doc_root, folded))
-                        .or_default()
-                        .push(node_id);
                 }
             }
         }
-        // Every document root present in `idx` at build time is fully
-        // indexed; record them so `materialize_for` only does work for
-        // documents that appear later (e.g. an RTF built by a variable).
-        let indexed_roots: std::collections::HashSet<NodeId> =
-            (0..idx.nodes.len()).filter(|&n| idx.parent(n).is_none()).collect();
         Ok((KeyIndex {
-            entries: std::cell::RefCell::new(entries),
+            entries: std::cell::RefCell::new(HashMap::new()),
             declared,
             collations,
-            indexed_roots: std::cell::RefCell::new(indexed_roots),
+            indexed: std::cell::RefCell::new(std::collections::HashSet::new()),
+            building: std::cell::RefCell::new(std::collections::HashSet::new()),
         }, deferred))
     }
 
@@ -207,51 +210,78 @@ impl KeyIndex {
     }
 
     /// Lazily index document `doc_root` against every `use=`-attribute
-    /// `xsl:key` (XSLT 2.0 §16.5 — keys are defined over every document,
-    /// not just the source).  No-op if `doc_root` was already indexed.
+    /// `xsl:key` named `name_key` (XSLT 2.0 §16.5 — keys are defined
+    /// over every document, not just the source).  Several `<xsl:key>`
+    /// declarations may share a name; their matches union into one
+    /// bucket.  No-op if `(name_key, doc_root)` was already indexed.
     /// Body-form keys (sequence constructors) need the instruction
     /// evaluator and are not materialized here.
     pub fn materialize_for<I, F>(
-        &self, doc_root: NodeId, idx: &I, keys: &[crate::ast::Key], mut eval_one: F,
-    )
+        &self, name_key: &str, doc_root: NodeId, idx: &I,
+        keys: &[crate::ast::Key], mut eval_one: F,
+    ) -> Result<()>
     where
         I: DocIndexLike,
         F: FnMut(&sup_xml_core::xpath::Expr, NodeId) -> Result<Value>,
     {
-        if !self.indexed_roots.borrow_mut().insert(doc_root) {
-            return; // already indexed (or being indexed — re-entrancy guard)
+        if !self.indexed.borrow_mut().insert((name_key.to_string(), doc_root)) {
+            return Ok(()); // already indexed (or being indexed — re-entrancy guard)
         }
+        self.building.borrow_mut().insert((name_key.to_string(), doc_root));
         // Collect the document's nodes, then index without holding any
         // borrow so a `use=` expression that itself calls key() can't
         // trip a RefCell re-borrow.
         let mut subtree: Vec<NodeId> = Vec::new();
         collect_subtree(idx, doc_root, &mut subtree);
         let mut new_entries: Vec<((String, NodeId, String), NodeId)> = Vec::new();
+        // An error in a `match`/`use` evaluation (including the circular
+        // reference XTDE0640 raised by `key()` when it re-enters a key
+        // still mid-build) is a dynamic error and propagates, matching
+        // the eager body-form pass.  Leave the `building` marker in place
+        // on the error path — the whole transform is failing.
         for key in keys {
             if !key.body.is_empty() { continue; }
             let nk = pkg_key_name(key.package_id, &qname_key(&key.name));
+            if nk != name_key { continue; }
             for &node in &subtree {
-                if !pattern_matches(&key.matcher, node, idx, &mut eval_one).unwrap_or(false) {
+                if !pattern_matches(&key.matcher, node, idx, &mut eval_one)? {
                     continue;
                 }
-                let value = match eval_one(&key.use_, node) { Ok(v) => v, Err(_) => continue };
+                let value = eval_one(&key.use_, node)?;
                 for s in stringify_use_value(&value, idx) {
                     let folded = self.fold_for(&nk, &s);
                     new_entries.push(((nk.clone(), doc_root, folded), node));
                 }
             }
         }
+        self.building.borrow_mut().remove(&(name_key.to_string(), doc_root));
         let mut entries = self.entries.borrow_mut();
         for (k, node) in new_entries {
             entries.entry(k).or_default().push(node);
         }
+        Ok(())
     }
 }
 
-/// Depth-first collect `root` and all its descendant element/text nodes
-/// (everything reachable through `children`) into `out`.
+/// Resolve a `key()` first argument (a QName string value) to the
+/// package-qualified expanded name that buckets its index entries.
+/// Shared by `key()` lookup and the lazy-materialization trigger so
+/// both agree on the bucket name.
+pub(crate) fn key_lookup_name<I: DocIndexLike>(
+    name_arg: &Value, idx: &I,
+    namespaces: &crate::eval::NamespaceContext, key_package_id: u32,
+) -> String {
+    pkg_key_name(key_package_id, &expand_qname(&value_to_string(name_arg, idx), namespaces))
+}
+
+/// Depth-first collect `root` and every node in its subtree into `out`.
+/// Attribute and namespace nodes are addressed separately from
+/// `children` but a key `match` pattern can select them (e.g.
+/// `match="@id"`), so they're collected alongside each element.
 fn collect_subtree<I: DocIndexLike>(idx: &I, root: NodeId, out: &mut Vec<NodeId>) {
     out.push(root);
+    out.extend(idx.attr_range(root));
+    out.extend(idx.ns_range(root));
     for child in idx.children(root) {
         collect_subtree(idx, *child, out);
     }
@@ -1614,7 +1644,7 @@ fn key_fn<I: DocIndexLike>(
     let raw_name = value_to_string(&args[0], idx);
     // Keys are package-local: resolve against the executing package's
     // declarations (XSLT 3.0 §3.5).
-    let expanded = pkg_key_name(key_package_id, &expand_qname(&raw_name, namespaces));
+    let expanded = key_lookup_name(&args[0], idx, namespaces, key_package_id);
     // The key name must match an xsl:key declaration in scope.  XSLT
     // 1.0 §12.2 left an unmatched name unspecified, and libxslt — the
     // engine this library mirrors — returns the empty node-set; XSLT
@@ -1672,6 +1702,15 @@ fn key_fn<I: DocIndexLike>(
             "key(): the root of the tree containing the context node is \
              not a document node (XTDE1270)"
         ));
+    }
+    // XTDE0640 — a key whose `match`/`use` expression refers (directly
+    // or transitively) to the same key is circular.  The lazy builder
+    // marks a key as building while it evaluates those expressions, so
+    // a lookup that lands on a still-building key is the circularity.
+    if keys.is_building(&expanded, doc_root) {
+        return Err(err(&format!(
+            "key(): circular reference in the definition of key '{raw_name}' (XTDE0640)"
+        )));
     }
     let mut out: Vec<NodeId> = Vec::new();
     for v in lookup_values {

@@ -706,13 +706,16 @@ impl<'a, I: DocIndexLike> XPathBindings for XsltBindings<'a, I> {
             } else if name == "document" && args.len() == 1 {
                 self.resolve_document_node_bases(args)
             } else { args };
-            // key() is defined over *every* document, not just the source
-            // (XSLT 2.0 §16.5).  A document built after the index — an RTF
-            // bound to a variable and passed as the 3-arg scope, or simply
-            // a non-source context document — is indexed lazily here, using
-            // these bindings to evaluate each key's `use=` expression.
+            // `use=` keys are built lazily (XSLT 2.0 §16.5 — keys are
+            // defined over *every* document, not just the source): the
+            // first `key(name, …)` call for a given key name and document
+            // indexes that key over that document here, evaluating its
+            // `use=` expression with these bindings.  Covers both the
+            // source tree and documents created after build time (an RTF
+            // bound to a variable and passed as the 3-arg scope, or a
+            // non-source context document).
             if name == "key" {
-                if let Some(keys) = self.keys {
+                if let (Some(keys), Some(name_arg)) = (self.keys, args.first()) {
                     let scope_node = match args.get(2) {
                         Some(Value::NodeSet(ns)) => ns.first().copied(),
                         Some(Value::Sequence(items)) => items.iter().find_map(|it|
@@ -723,14 +726,19 @@ impl<'a, I: DocIndexLike> XPathBindings for XsltBindings<'a, I> {
                     if let Some(n) = scope_node {
                         let mut root = n;
                         while let Some(p) = self.idx.parent(root) { root = p; }
+                        let name_key = functions::key_lookup_name(
+                            name_arg, self.idx, self.namespaces, self.key_package_id);
                         let sc = static_ctx_for_version(self.xslt_version);
-                        keys.materialize_for(root, self.idx, &self.style.keys, |expr, node| {
+                        let built = keys.materialize_for(&name_key, root, self.idx, &self.style.keys, |expr, node| {
                             let mut b = *self;
                             b.xslt_context_node = node;
                             let ctx = EvalCtx { context_node: node, pos: 1, size: 1,
                                                 bindings: &b, static_ctx: &sc };
                             eval_expr(expr, &ctx, self.idx)
                         });
+                        if let Err(e) = built {
+                            return Some(Err(e));
+                        }
                     }
                 }
             }
@@ -2666,12 +2674,14 @@ pub fn apply_stylesheet_full_with_params_and_initial(
         }
     }
 
-    // Build the xsl:key index now that global variables are bound, so
+    // Set up the xsl:key index now that global variables are bound, so
     // `xsl:key` match/use expressions referencing them resolve (XSLT
-    // 2.0 §16.3).  Then re-run the global fixpoint once with the keys
-    // available — a global variable may itself call `key()`, the
-    // mutual-reference case the spec permits as long as it isn't a
-    // genuine cycle.
+    // 2.0 §16.3).  `use=`-attribute keys are materialized lazily on
+    // first lookup; only body-form keys (which need the instruction
+    // evaluator `key()` can't reach) are indexed eagerly here.  Then
+    // re-run the global fixpoint once with the index available — a
+    // global variable may itself call `key()`, the mutual-reference
+    // case the spec permits as long as it isn't a genuine cycle.
     if !style.keys.is_empty() {
         let sc = state.static_ctx;
         let (built, deferred) = {
