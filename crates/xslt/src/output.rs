@@ -32,8 +32,12 @@ fn effective_method(tree: &ResultTree) -> &str {
     if let Some(ResultNode::Element { name, .. }) = tree.children.iter()
         .find(|n| matches!(n, ResultNode::Element { .. }))
     {
-        if name.local.eq_ignore_ascii_case("html") && name.uri.is_empty() {
-            return "html";
+        // XSLT 3.0 §26.1 default-method detection: a root `html` element
+        // selects the html method (no namespace) or the xhtml method (in
+        // the XHTML namespace).
+        if name.local.eq_ignore_ascii_case("html") {
+            if name.uri.is_empty() { return "html"; }
+            if name.uri == "http://www.w3.org/1999/xhtml" { return "xhtml"; }
         }
     }
     "xml"
