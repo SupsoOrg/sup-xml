@@ -889,6 +889,10 @@ pub struct AccumulatorDecl {
     pub name:          QName,
     pub initial_value: Expr,
     pub rules:         Vec<AccumulatorRule>,
+    /// Import precedence (XSLT 3.0 §18.2): when several accumulators
+    /// share a name, the one with highest precedence is used.  Stamped
+    /// during import/package merging; the default is the top level.
+    pub import_precedence: i32,
 }
 
 /// One `<xsl:accumulator-rule>` (XSLT 3.0 §18.2).
@@ -1232,10 +1236,17 @@ pub struct ModeDecl {
     /// Action taken by the built-in template when no user template
     /// matches a node in this mode.
     pub on_no_match: OnNoMatch,
+    /// Whether `on-no-match` was explicitly set on this declaration.
+    /// Several `<xsl:mode>` declarations for one mode merge per-attribute
+    /// by import precedence (XSLT 3.0 §6.6.1); a declaration that omits
+    /// `on-no-match` doesn't override a lower-precedence one that set it.
+    pub on_no_match_explicit: bool,
     /// XSLT 3.0 `visibility=` (§3.5.2).  `None` = the package default
     /// (private).  A used package's final/private mode may not have
     /// template rules added or overridden by the using package.
     pub visibility: Option<String>,
+    /// Import precedence — highest wins when merging same-name modes.
+    pub import_precedence: i32,
 }
 
 /// `on-no-match` action for a mode's built-in template (XSLT 3.0 §6.7).

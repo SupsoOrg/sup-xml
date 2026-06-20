@@ -1897,8 +1897,13 @@ fn mode_on_no_match(style: &StylesheetAst, mode: Option<&QName>) -> OnNoMatch {
         }
     }
     let want = norm(mode);
+    // Several `<xsl:mode>` declarations may name the same mode; the
+    // effective on-no-match is the one explicitly set by the highest
+    // import precedence (XSLT 3.0 §6.6.1).  Declarations that omit the
+    // attribute don't override a lower-precedence one that set it.
     style.modes.iter()
-        .find(|m| norm(m.name.as_ref()) == want)
+        .filter(|m| norm(m.name.as_ref()) == want && m.on_no_match_explicit)
+        .max_by_key(|m| m.import_precedence)
         .map(|m| m.on_no_match)
         .unwrap_or_default()
 }
@@ -8043,8 +8048,21 @@ fn precompute_accumulators(state: &mut EvalState, root: NodeId) -> Result<()> {
         return Ok(()); // already precomputed for this document
     }
     let decls = state.style.accumulators.clone();
+    // XSLT 3.0 §18.2 — when several accumulator declarations share a
+    // name (e.g. via xsl:import), the one with highest import precedence
+    // applies; the others are overridden and must not contribute.
+    let mut best_prec: HashMap<String, i32> = HashMap::new();
+    for d in &decls {
+        let k = qname_key(&d.name);
+        best_prec.entry(k)
+            .and_modify(|p| if d.import_precedence > *p { *p = d.import_precedence; })
+            .or_insert(d.import_precedence);
+    }
+    let mut applied: std::collections::HashSet<String> = std::collections::HashSet::new();
     for decl in &decls {
         let key = qname_key(&decl.name);
+        if decl.import_precedence != best_prec[&key] { continue; }
+        if !applied.insert(key.clone()) { continue; } // precedence tie — first wins
         let initial = state.xpath_eval(&decl.initial_value, root, 1, 1)?;
         // Merge into any data already accumulated for earlier documents
         // — the before/after maps are keyed by globally-unique NodeId.

@@ -2703,8 +2703,14 @@ fn compile_with_imports_inner(
     acc.global_params.extend(local.global_params);
     acc.keys.extend(local.keys);
     acc.attribute_sets.extend(local_attribute_sets);
-    acc.modes.extend(local.modes);
-    acc.accumulators.extend(local.accumulators);
+    for mut m in local.modes {
+        m.import_precedence = this_precedence;
+        acc.modes.push(m);
+    }
+    for mut a in local.accumulators {
+        a.import_precedence = this_precedence;
+        acc.accumulators.push(a);
+    }
     acc.schema_imports.extend(local.schema_imports);
     acc.inline_schemas.extend(local.inline_schemas);
     // Decimal-formats merge per-attribute by import precedence (XSLT 2.0
@@ -3187,8 +3193,16 @@ fn merge_package_components(acc: &mut StylesheetAst, sub: &StylesheetAst, prec: 
     acc.global_variables.extend(sub.global_variables.iter().cloned());
     acc.global_params.extend(sub.global_params.iter().cloned());
     acc.functions.extend(sub.functions.iter().cloned());
-    acc.accumulators.extend(sub.accumulators.iter().cloned());
-    acc.modes.extend(sub.modes.iter().cloned());
+    for a in &sub.accumulators {
+        let mut a = a.clone();
+        a.import_precedence = prec;
+        acc.accumulators.push(a);
+    }
+    for m in &sub.modes {
+        let mut m = m.clone();
+        m.import_precedence = prec;
+        acc.modes.push(m);
+    }
     acc.keys.extend(sub.keys.iter().cloned());
     for (k, df) in &sub.decimal_formats {
         let mask = sub.decimal_format_explicit.get(k).copied().unwrap_or(0);
@@ -3631,8 +3645,10 @@ fn compile_mode(node: &Node) -> Result<ModeDecl, XsltError> {
         Some(other) => return Err(XsltError::InvalidStylesheet(format!(
             "xsl:mode on-no-match='{other}' is not a recognised value (XTSE0020)"))),
     };
+    let on_no_match_explicit = read_attribute(node, "on-no-match").is_some();
     let visibility = read_attribute(node, "visibility").map(str::to_string);
-    Ok(ModeDecl { name, on_no_match, visibility })
+    Ok(ModeDecl { name, on_no_match, on_no_match_explicit, visibility,
+        import_precedence: TOP_LEVEL_IMPORT_PRECEDENCE })
 }
 
 /// Compile an `<xsl:use-package>` declaration (XSLT 3.0 §3.5.1).  The
@@ -3927,7 +3943,8 @@ fn compile_accumulator(node: &Node) -> Result<AccumulatorDecl, XsltError> {
         }
         rules.push(compile_accumulator_rule(child)?);
     }
-    Ok(AccumulatorDecl { name, initial_value, rules })
+    Ok(AccumulatorDecl { name, initial_value, rules,
+        import_precedence: TOP_LEVEL_IMPORT_PRECEDENCE })
 }
 
 fn compile_accumulator_rule(node: &Node) -> Result<AccumulatorRule, XsltError> {
