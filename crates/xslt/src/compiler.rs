@@ -1865,7 +1865,7 @@ fn compile_top_level(node: &Node, ast: &mut StylesheetAst, pos: u32) -> Result<(
         }
         "use-package"     => ast.use_packages.push(compile_use_package(node)?),
         "expose"          => ast.exposes.push(validate_expose(node)?),
-        "output"          => ast.outputs.push(compile_output(node)?),
+        "output"          => ast.outputs.push(compile_output(node, false)?),
         "strip-space"     => collect_whitespace_rules(node, true,  &mut ast.whitespace_rules)?,
         "preserve-space"  => collect_whitespace_rules(node, false, &mut ast.whitespace_rules)?,
         "include"  => {
@@ -3990,7 +3990,27 @@ fn compile_attribute_set(node: &Node) -> Result<AttributeSet, XsltError> {
     })
 }
 
-fn compile_output(node: &Node) -> Result<OutputSpec, XsltError> {
+/// True iff `v` is an attribute value template (contains an unescaped
+/// `{`).  `{{`/`}}` are literal braces, not a template delimiter.
+fn value_is_avt(v: &str) -> bool {
+    let bytes = v.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'{' {
+            if i + 1 < bytes.len() && bytes[i + 1] == b'{' { i += 2; continue; }
+            return true;
+        }
+        i += 1;
+    }
+    false
+}
+
+/// `allow_avt` is set for `xsl:result-document`, whose serialization
+/// attributes may be attribute value templates (XSLT 3.0 §27.1).  An
+/// AVT-valued boolean attribute is left unset here (the field default)
+/// and supplied at run time; `xsl:output` (allow_avt = false) keeps the
+/// strict static value grammar.
+fn compile_output(node: &Node, allow_avt: bool) -> Result<OutputSpec, XsltError> {
     let mut out = OutputSpec::default();
     // `name="qname"` marks this as a named output definition (XSLT 2.0
     // §20), referenced by `xsl:result-document format="qname"`.  It is
@@ -4008,6 +4028,7 @@ fn compile_output(node: &Node) -> Result<OutputSpec, XsltError> {
     let require_yesno = |n: &Node, attr: &str| -> Result<(), XsltError> {
         if in_forwards_compat_mode() { return Ok(()); }
         if let Some(v) = read_attribute(n, attr) {
+            if allow_avt && value_is_avt(&v) { return Ok(()); }
             // XSLT 3.0 widened the boolean lexical space to also accept
             // true / false / 1 / 0.
             let ok = matches!(v.trim(), "yes" | "no")
@@ -4027,7 +4048,9 @@ fn compile_output(node: &Node) -> Result<OutputSpec, XsltError> {
     require_yesno(node, "include-content-type")?;
     require_yesno(node, "undeclare-prefixes")?;
     if !in_forwards_compat_mode() {
-        if let Some(v) = read_attribute(node, "standalone") {
+        if let Some(v) = read_attribute(node, "standalone")
+            .filter(|v| !(allow_avt && value_is_avt(v)))
+        {
             let ok = matches!(v.trim(), "yes" | "no" | "omit")
                 || (is_xslt_3_0_compile() && matches!(v.trim(), "true" | "false" | "1" | "0"));
             if !ok {
@@ -4135,16 +4158,18 @@ fn compile_output(node: &Node) -> Result<OutputSpec, XsltError> {
         }
     }
     out.encoding               = read_attribute(node, "encoding").map(str::to_string);
-    out.indent                 = read_attribute(node, "indent").map(parse_yesno);
-    out.omit_xml_declaration   = read_attribute(node, "omit-xml-declaration").map(parse_yesno);
-    out.standalone             = read_attribute(node, "standalone").map(|v| match v.trim() {
+    let static_attr = |n: &str| read_attribute(node, n)
+        .filter(|v| !(allow_avt && value_is_avt(v)));
+    out.indent                 = static_attr("indent").map(parse_yesno);
+    out.omit_xml_declaration   = static_attr("omit-xml-declaration").map(parse_yesno);
+    out.standalone             = static_attr("standalone").map(|v| match v.trim() {
         "yes" | "true" | "1" => crate::ast::Standalone::Yes,
         "omit"               => crate::ast::Standalone::Omit,
         _                    => crate::ast::Standalone::No,
     });
-    out.escape_uri_attributes  = read_attribute(node, "escape-uri-attributes").map(parse_yesno);
-    out.include_content_type   = read_attribute(node, "include-content-type").map(parse_yesno);
-    out.byte_order_mark        = read_attribute(node, "byte-order-mark").map(parse_yesno);
+    out.escape_uri_attributes  = static_attr("escape-uri-attributes").map(parse_yesno);
+    out.include_content_type   = static_attr("include-content-type").map(parse_yesno);
+    out.byte_order_mark        = static_attr("byte-order-mark").map(parse_yesno);
     out.media_type             = read_attribute(node, "media-type").map(str::to_string);
     out.doctype_public         = read_attribute(node, "doctype-public").map(str::to_string);
     out.doctype_system         = read_attribute(node, "doctype-system").map(str::to_string);
@@ -4873,14 +4898,21 @@ fn compile_raw_instr_into(
         // principal output URI, which is valid only when it is the sole
         // writer of that destination (otherwise XTRE1495 at run time).
         "result-document" => {
-            // XTSE0020 — the output-property attributes inherit
-            // xsl:output's value grammar: yes/no booleans and a numeric
-            // html-version.  An invalid literal is a static error.
+            // The output-property attributes inherit xsl:output's value
+            // grammar (yes/no), but on xsl:result-document each may be an
+            // attribute value template evaluated at run time (XSLT 3.0
+            // §27.1).  A static literal is validated now (XTSE0020); an
+            // AVT-valued attribute is captured and applied at run time.
+            let mut serialization_avts: Vec<(String, Avt)> = Vec::new();
             for a in ["standalone", "omit-xml-declaration", "indent",
                       "include-content-type", "undeclare-prefixes",
                       "escape-uri-attributes", "byte-order-mark"] {
                 if let Some(v) = read_attribute(node, a) {
-                    parse_yesno_strict(v, "xsl:result-document", a)?;
+                    if value_is_avt(&v) {
+                        serialization_avts.push((a.to_string(), avt(node, v)?));
+                    } else {
+                        parse_yesno_strict(v, "xsl:result-document", a)?;
+                    }
                 }
             }
             if let Some(v) = read_attribute(node, "html-version") {
@@ -4907,9 +4939,10 @@ fn compile_raw_instr_into(
             // (method, encoding, standalone, doctype-*, …) the same way
             // xsl:output does; they override the principal/format output
             // for this document.
-            let output = Box::new(compile_output(node)?);
+            let output = Box::new(compile_output(node, true)?);
             Instr::ResultDocument {
-                href, format, format_namespaces, output, body: compile_body(node)?,
+                href, format, format_namespaces, output, serialization_avts,
+                body: compile_body(node)?,
             }
         }
 

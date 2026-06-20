@@ -737,6 +737,11 @@ pub enum Instr {
         /// (or `format=`-named) output for this document only.  Only
         /// fields explicitly present are `Some`.
         output: Box<OutputSpec>,
+        /// Boolean serialization attributes (`standalone`, `indent`,
+        /// `byte-order-mark`, …) whose value is an attribute value
+        /// template (XSLT 3.0 §27.1).  Evaluated at run time and applied
+        /// to `output`; static-valued ones are baked into `output`.
+        serialization_avts: Vec<(String, Avt)>,
         body: Body,
     },
     /// `xsl:namespace name="x" [select="uri"]` (XSLT 2.0 §11.7) —

@@ -4111,7 +4111,7 @@ fn eval_instr(
                 r?;
             }
         }
-        Instr::ResultDocument { href, format, format_namespaces, output, body } => {
+        Instr::ResultDocument { href, format, format_namespaces, output, serialization_avts, body } => {
             use crate::result_tree::ResultBuilder;
             // XSLT 2.0 §19.1.1 / XTDE1460 — the `format=` AVT
             // expansion must be a valid EQName (a non-empty NCName,
@@ -4146,8 +4146,28 @@ fn eval_instr(
             // (or format=-named) output overlaid with the element's own
             // inline serialization parameters.
             let doc_pkg = state.current_package_id;
-            let doc_output = result_document_output(
+            let mut doc_output = result_document_output(
                 state.style, doc_pkg, format_name.as_ref(), output);
+            // XSLT 3.0 §27.1 — boolean serialization attributes given as
+            // attribute value templates are evaluated now and applied.
+            for (attr, attr_avt) in serialization_avts {
+                let v = render_avt(state, attr_avt, ctx_node, pos, size)?;
+                let v = v.trim();
+                let yes = matches!(v, "yes" | "true" | "1");
+                match attr.as_str() {
+                    "standalone" => doc_output.standalone = Some(match v {
+                        "omit"               => crate::ast::Standalone::Omit,
+                        "yes" | "true" | "1" => crate::ast::Standalone::Yes,
+                        _                    => crate::ast::Standalone::No,
+                    }),
+                    "indent"                => doc_output.indent = Some(yes),
+                    "omit-xml-declaration"  => doc_output.omit_xml_declaration = Some(yes),
+                    "byte-order-mark"       => doc_output.byte_order_mark = Some(yes),
+                    "include-content-type"  => doc_output.include_content_type = Some(yes),
+                    "escape-uri-attributes" => doc_output.escape_uri_attributes = Some(yes),
+                    _ => {} // undeclare-prefixes isn't modeled in OutputSpec
+                }
+            }
             // XTDE1480: an xsl:result-document is illegal while the current
             // output state is *temporary* — inside a variable/function
             // body, or an attribute/comment/PI value.  Being nested inside
