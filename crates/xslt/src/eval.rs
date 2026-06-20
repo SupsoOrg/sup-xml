@@ -2674,7 +2674,7 @@ pub fn apply_stylesheet_full_with_params_and_initial(
     // genuine cycle.
     if !style.keys.is_empty() {
         let sc = state.static_ctx;
-        let (mut built, deferred) = {
+        let (built, deferred) = {
             let state_ref = &state;
             KeyIndex::build(style, &idx, |expr, node| {
                 // `current()` in an xsl:key `match`/`use` expression is
