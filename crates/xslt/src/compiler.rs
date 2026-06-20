@@ -4989,6 +4989,22 @@ fn compile_body(node: &Node) -> Result<Body, XsltError> {
             if keep_run[i] { compile_instr_into_body(child, &mut out)?; }
         }
     }
+    // XSLT 3.0 §16.4.1 / XTSE0010 — an xsl:on-empty instruction must not be
+    // followed by any sibling other than xsl:on-empty / xsl:on-non-empty
+    // (nothing that contributes to the result may follow it).  xsl:on-non-
+    // empty carries no such restriction.  Whitespace-only text is already
+    // stripped above, so a survivor after an on-empty is genuine content.
+    let instrs = out.instrs();
+    if let Some(first) = instrs.iter().position(|i| matches!(i, Instr::OnEmpty { .. })) {
+        if instrs[first + 1..].iter().any(|i|
+            !matches!(i, Instr::OnEmpty { .. } | Instr::OnNonEmpty { .. }))
+        {
+            return Err(XsltError::InvalidStylesheet(
+                "xsl:on-empty must be the last instruction in its sequence \
+                 constructor, apart from further xsl:on-empty / xsl:on-non-empty \
+                 instructions (XTSE0010)".into()));
+        }
+    }
     Ok(out)
 }
 
