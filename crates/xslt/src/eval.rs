@@ -4198,6 +4198,27 @@ fn eval_instr(
                     "doctype-public"        => doc_output.doctype_public = Some(v.to_string()),
                     "doctype-system"        => doc_output.doctype_system = Some(v.to_string()),
                     "media-type"            => doc_output.media_type = Some(v.to_string()),
+                    "cdata-section-elements" => {
+                        // A whitespace-separated QName list; resolve each
+                        // prefix against the element's in-scope namespaces.
+                        doc_output.cdata_section_elements = v.split_whitespace()
+                            .map(|tok| {
+                                if let Some(rest) = tok.strip_prefix("Q{") {
+                                    let (uri, local) = rest.split_once('}').unwrap_or(("", rest));
+                                    QName { prefix: None, local: local.to_string(), uri: uri.to_string() }
+                                } else if let Some((p, l)) = tok.split_once(':') {
+                                    let uri = format_namespaces.iter()
+                                        .find(|(pp, _)| pp.as_deref() == Some(p))
+                                        .map(|(_, u)| u.clone()).unwrap_or_default();
+                                    QName { prefix: Some(p.to_string()), local: l.to_string(), uri }
+                                } else {
+                                    // Unprefixed names in an attribute value are
+                                    // in no namespace (XSLT 2.0 §20).
+                                    QName { prefix: None, local: tok.to_string(), uri: String::new() }
+                                }
+                            })
+                            .collect();
+                    }
                     _ => {} // undeclare-prefixes isn't modeled in OutputSpec
                 }
             }

@@ -4178,7 +4178,9 @@ fn compile_output(node: &Node, allow_avt: bool) -> Result<OutputSpec, XsltError>
     out.doctype_public         = static_attr("doctype-public").map(|s| s.to_string());
     out.doctype_system         = static_attr("doctype-system").map(|s| s.to_string());
     out.version                = read_attribute(node, "version").map(str::to_string);
-    if let Some(s) = read_attribute(node, "cdata-section-elements") {
+    if let Some(s) = read_attribute(node, "cdata-section-elements")
+        .filter(|v| !(allow_avt && value_is_avt(v)))
+    {
         out.cdata_section_elements = parse_qname_list(node, s)?;
     }
     if let Some(s) = read_attribute(node, "use-character-maps") {
@@ -4922,13 +4924,16 @@ fn compile_raw_instr_into(
             // String-valued serialization attributes may also be AVTs
             // (§27.1).  A static value is baked into the OutputSpec by
             // compile_output above; an AVT is applied at run time.
-            for a in ["doctype-public", "doctype-system", "media-type"] {
+            for a in ["doctype-public", "doctype-system", "media-type",
+                      "cdata-section-elements"] {
                 if let Some(v) = read_attribute(node, a) {
                     if value_is_avt(&v) {
                         serialization_avts.push((a.to_string(), avt(node, v)?));
                     }
                 }
             }
+            let cdata_is_avt = read_attribute(node, "cdata-section-elements")
+                .is_some_and(|v| value_is_avt(&v));
             if let Some(v) = read_attribute(node, "html-version")
                 .filter(|v| !value_is_avt(v))
             {
@@ -4941,16 +4946,16 @@ fn compile_raw_instr_into(
             let format = read_attribute(node, "format")
                 .map(|s| avt(node, s))
                 .transpose()?;
-            // Capture the in-scope namespaces on this element so a
-            // runtime AVT expansion of `format=` can be QName-validated
-            // (XTDE1460) without re-walking the source tree.  Only
-            // populated when `format=` is present so unused branches
-            // pay no storage.
-            let format_namespaces: Vec<(Option<String>, String)> = if format.is_some() {
-                collect_in_scope_namespaces(node)
-            } else {
-                Vec::new()
-            };
+            // Capture the in-scope namespaces on this element so a runtime
+            // AVT expansion of `format=` (QName) or `cdata-section-elements`
+            // (QName list) can resolve prefixes without re-walking the
+            // source tree.  Only populated when actually needed.
+            let format_namespaces: Vec<(Option<String>, String)> =
+                if format.is_some() || cdata_is_avt {
+                    collect_in_scope_namespaces(node)
+                } else {
+                    Vec::new()
+                };
             // Capture the inline serialization-parameter attributes
             // (method, encoding, standalone, doctype-*, …) the same way
             // xsl:output does; they override the principal/format output
