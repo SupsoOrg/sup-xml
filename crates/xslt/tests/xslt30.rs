@@ -1910,6 +1910,40 @@ fn rewrite_version_to_2_0(src: &str) -> String {
     src.to_string()
 }
 
+/// Collapse `<name attrs></name>` (empty content) to the self-closing
+/// form `<name attrs/>` so the two XML-equivalent spellings compare equal.
+fn collapse_empty_elements(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut rest = s;
+    while let Some(lt) = rest.find('<') {
+        out.push_str(&rest[..lt]);
+        let tail = &rest[lt..];
+        // Only ordinary start tags: not </…>, <!…, <?…, or already-empty.
+        let starts_tag = tail.len() > 1
+            && !matches!(tail.as_bytes()[1], b'/' | b'!' | b'?');
+        let gt = tail.find('>');
+        match (starts_tag, gt) {
+            (true, Some(g)) if !tail[..g].ends_with('/') => {
+                let open = &tail[..=g]; // `<name attrs>`
+                let name = open[1..g].split([' ', '\t', '\n']).next().unwrap_or("");
+                let close = format!("</{name}>");
+                if tail[g + 1..].starts_with(&close) {
+                    out.push_str(&open[..open.len() - 1]); // drop '>'
+                    out.push_str("/>");
+                    rest = &tail[g + 1 + close.len()..];
+                    continue;
+                }
+                out.push_str(open);
+                rest = &tail[g + 1..];
+            }
+            (_, Some(g)) => { out.push_str(&tail[..=g]); rest = &tail[g + 1..]; }
+            (_, None)    => { out.push_str(tail); rest = ""; }
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
 fn canonicalise(s: &str) -> String {
     let stripped = s.trim_start();
     let body = if let Some(rest) = stripped.strip_prefix("<?xml") {
@@ -1923,6 +1957,10 @@ fn canonicalise(s: &str) -> String {
     // the inter-tag whitespace XSLT serializers don't emit by default.
     let pre = collapsed.replace(" >", ">").replace(" />", "/>");
     let pre = pre.replace("> <", "><");
+    // `<x></x>` and `<x/>` are the same empty element in XML; reference
+    // .out files vary on which form they use, so collapse both to the
+    // self-closing form before comparing.
+    let pre = collapse_empty_elements(&pre);
     let pre = sort_tag_attrs(&pre);
     // Numeric character refs (`&#NN;` / `&#xHH;`) and the five
     // built-in named entities are semantically equal to the
