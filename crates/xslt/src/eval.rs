@@ -8031,6 +8031,17 @@ fn apply_attribute_set_one<'a>(
             "no <xsl:attribute-set> named '{key}'"
         )));
     }
+    // XSLT 3.0 §3.5.2 — an abstract attribute-set (from a used package)
+    // that was never overridden has no body and cannot be used.  An
+    // override replaces (removes) the abstract original, so a remaining
+    // abstract set means no implementation was supplied (XTDE3052).
+    if sets.iter().any(|s| s.visibility.as_deref() == Some("abstract")) {
+        return Err(XsltError::Xpath(
+            sup_xml_core::xpath::eval::xpath_err(format!(
+                "cannot use abstract attribute-set '{key}' — no implementation \
+                 was supplied by the using package (XTDE3052)"))
+            .with_xpath_code("XTDE3052")));
+    }
     visiting.push(key);
     // XSLT 1.0 §7.1.4 — only top-level variables and parameters are
     // visible inside an attribute-set body, regardless of the

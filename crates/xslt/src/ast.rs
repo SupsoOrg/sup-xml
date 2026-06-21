@@ -1074,6 +1074,10 @@ pub struct AttributeSet {
     /// precedence order so a higher-precedence import overrides a
     /// lower one's attribute when both bind the same name.
     pub import_precedence:    i32,
+    /// XSLT 3.0 `visibility=` (§3.5.2).  `None` = the package default.
+    /// An abstract attribute-set that was never overridden cannot be used
+    /// (XTDE3052).
+    pub visibility:           Option<String>,
 }
 
 /// `xsl:strip-space` / `xsl:preserve-space` directive set.  Order

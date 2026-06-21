@@ -4241,6 +4241,7 @@ fn compile_attribute_set(node: &Node) -> Result<AttributeSet, XsltError> {
     Ok(AttributeSet {
         name, use_attribute_sets, attributes,
         import_precedence: TOP_LEVEL_IMPORT_PRECEDENCE,
+        visibility: read_attribute(node, "visibility").map(str::to_string),
     })
 }
 
