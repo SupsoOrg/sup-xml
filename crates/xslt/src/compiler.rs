@@ -3623,6 +3623,7 @@ fn compile_variable(node: &Node) -> Result<Variable, XsltError> {
     reject_reserved_name(&name, "xsl:variable")?;
     let (select, body) = split_select_and_body(node)?;
     reject_select_with_body(node, &select, &body, "xsl:variable")?;
+    reject_static_with_body(node, &body, "xsl:variable")?;
     let as_type = read_attribute(node, "as").map(str::to_string);
     // XPath 2.0 §3.1.5 — the body-form temporary tree's document
     // node carries the resolved xml:base from the variable's
@@ -3641,6 +3642,7 @@ fn compile_param(node: &Node) -> Result<Param, XsltError> {
     reject_reserved_name(&name, "xsl:param")?;
     let (select, body) = split_select_and_body(node)?;
     reject_select_with_body(node, &select, &body, "xsl:param")?;
+    reject_static_with_body(node, &body, "xsl:param")?;
     let tunnel = if is_xslt_2_0_compile() {
         match read_attribute(node, "tunnel") {
             Some(v) => parse_yesno_strict(v, "xsl:param", "tunnel")?,
@@ -3664,6 +3666,23 @@ fn compile_param(node: &Node) -> Result<Param, XsltError> {
         )));
     }
     Ok(Param { name, select, body, tunnel, as_type, required })
+}
+
+/// XSLT 3.0 §3.5 / XTSE0010 — a static `xsl:param` / `xsl:variable`
+/// supplies its value through `select=` (or the caller); it may not have
+/// a sequence-constructor body.
+fn reject_static_with_body(node: &Node, body: &[Instr], who: &str) -> Result<(), XsltError> {
+    let is_static = read_attribute(node, "static")
+        .map(|v| matches!(v, "yes" | "true" | "1")).unwrap_or(false);
+    let has_body = body.iter().any(|i| !matches!(i,
+        Instr::LiteralText { text, .. } if text.trim().is_empty()));
+    if is_static && has_body {
+        return Err(XsltError::InvalidStylesheet(format!(
+            "static {who} must take its value from select=, not a \
+             sequence-constructor body (XTSE0010)"
+        )));
+    }
+    Ok(())
 }
 
 /// XSLT 2.0 §9.2 / XTSE0620 — a variable-binding element
