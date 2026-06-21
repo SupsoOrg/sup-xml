@@ -309,7 +309,7 @@ impl Stylesheet {
     ) -> Result<ResultTree, XsltError> {
         eval::apply_stylesheet_full_with_params_and_initial(
             &self.ast, source_doc,
-            loader, base, None, params, initial_template, None,
+            loader, base, None, params, initial_template, None, None,
         )
     }
 
@@ -329,7 +329,28 @@ impl Stylesheet {
     ) -> Result<ResultTree, XsltError> {
         eval::apply_stylesheet_full_with_params_and_initial(
             &self.ast, source_doc,
-            loader, base, None, params, initial_template, initial_mode,
+            loader, base, None, params, initial_template, initial_mode, None,
+        )
+    }
+
+    /// Apply with the full XSLT 3.0 invocation surface, including the
+    /// initial match selection (`select=` on `<initial-template>` /
+    /// `<initial-mode>`, §2.3): an XPath evaluated against the source to
+    /// produce the sequence the entry point processes.
+    #[allow(clippy::too_many_arguments)]
+    pub fn apply_with_initial_selection(
+        &self,
+        source_doc:        &sup_xml_tree::dom::Document,
+        loader:            &dyn Loader,
+        base:              Option<&str>,
+        params:            &[(String, String)],
+        initial_template:  Option<&str>,
+        initial_mode:      Option<&str>,
+        initial_select:    Option<&str>,
+    ) -> Result<ResultTree, XsltError> {
+        eval::apply_stylesheet_full_with_params_and_initial(
+            &self.ast, source_doc,
+            loader, base, None, params, initial_template, initial_mode, initial_select,
         )
     }
 }

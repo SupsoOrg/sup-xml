@@ -2360,7 +2360,7 @@ pub fn apply_stylesheet_full_with_params(
     top_level_params: &[(String, String)],
 ) -> Result<ResultTree> {
     apply_stylesheet_full_with_params_and_initial(
-        style, source_doc, loader, base, extensions, top_level_params, None, None,
+        style, source_doc, loader, base, extensions, top_level_params, None, None, None,
     )
 }
 
@@ -2379,6 +2379,7 @@ pub fn apply_stylesheet_full_with_params_and_initial(
     top_level_params:  &[(String, String)],
     initial_template:  Option<&str>,
     initial_mode:      Option<&str>,
+    initial_select:    Option<&str>,
 ) -> Result<ResultTree> {
     // Reset the XPath step-budget thread-local for this whole apply.
     // Per-expression reset in `xpath_eval` is a finer grain that already
@@ -2834,6 +2835,19 @@ pub fn apply_stylesheet_full_with_params_and_initial(
         precompute_accumulators(&mut state, 0)?;
         capture_streamed_accumulators(&state);
     }
+    // XSLT 3.0 §2.3 — the initial match selection.  When the entry point
+    // carries a select=, evaluate it against the source to get the
+    // sequence the entry point processes (atomic items become synthetic
+    // text nodes); otherwise the selection is the document node.
+    let initial_nodes: Vec<NodeId> = match initial_select {
+        Some(sel) => {
+            let expr = sup_xml_core::xpath::parse_xpath(sel).map_err(XsltError::from)?;
+            let v = state.xpath_eval(&expr, 0, 1, 1)?;
+            iterate_select_nodes(&mut state, v)?
+        }
+        None => vec![0],
+    };
+    let initial_ctx = initial_nodes.first().copied().unwrap_or(0);
     if let Some(name) = initial_template {
         // The harness may pass either an already-expanded Clark-form
         // key (`{uri}local`) or a raw `prefix:local` string; resolve
@@ -2870,7 +2884,7 @@ pub fn apply_stylesheet_full_with_params_and_initial(
                      not declared visibility=\"public\" (XTDE0040)"))
                 .with_xpath_code("XTDE0040")));
         }
-        run_template_body(&mut state, tmpl, 0, 1, 1, &[])?;
+        run_template_body(&mut state, tmpl, initial_ctx, 1, 1, &[])?;
     } else {
         // `<initial-mode name="X"/>` (XSLT 3.0 §2.4) — dispatch
         // the document node with the named mode active.  Mode
@@ -2914,7 +2928,9 @@ pub fn apply_stylesheet_full_with_params_and_initial(
                 }
             }
         }
-        apply_one_to_node(&mut state, 0, mode_qname.as_ref())?;
+        for &n in &initial_nodes {
+            apply_one_to_node(&mut state, n, mode_qname.as_ref())?;
+        }
     }
     state.variables.leave();
 

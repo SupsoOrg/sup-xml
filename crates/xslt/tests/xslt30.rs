@@ -84,6 +84,10 @@ struct TestCase {
     /// default apply-templates dispatch with this mode active.
     /// Mutually exclusive with `initial_template` per spec.
     initial_mode: Option<String>,
+    /// `select=` on `<initial-template>` / `<initial-mode>` — the initial
+    /// match selection (XSLT 3.0 §2.3): an XPath evaluated to the sequence
+    /// the entry point processes (instead of the source document).
+    initial_select: Option<String>,
     /// Library packages declared directly in the `<test>` block via
     /// `<package uri="NAME" file="…"/>` (name → file), for
     /// xsl:use-package resolution.
@@ -337,7 +341,7 @@ fn parse_test_set(path: &Path) -> Vec<TestCase> {
         name: String::new(), stylesheet: None,
         source_inline: None, source_file: None,
         env_ref: None, expects: Expectation::Unsupported,
-            params: Vec::new(), static_params: Vec::new(), initial_template: None, initial_mode: None, packages: Vec::new(), on_multiple_match_error: false, result_doc_asserts: Vec::new(),
+            params: Vec::new(), static_params: Vec::new(), initial_template: None, initial_mode: None, initial_select: None, packages: Vec::new(), on_multiple_match_error: false, result_doc_asserts: Vec::new(),
         requires_post_1_0: false, requires_unsupported_feature: false,
     };
     let mut cur_env_name = String::new();
@@ -357,7 +361,7 @@ fn parse_test_set(path: &Path) -> Vec<TestCase> {
                             name: String::new(), stylesheet: None,
                             source_inline: None, source_file: None,
                             env_ref: None, expects: Expectation::Unsupported,
-            params: Vec::new(), static_params: Vec::new(), initial_template: None, initial_mode: None, packages: Vec::new(), on_multiple_match_error: false, result_doc_asserts: Vec::new(),
+            params: Vec::new(), static_params: Vec::new(), initial_template: None, initial_mode: None, initial_select: None, packages: Vec::new(), on_multiple_match_error: false, result_doc_asserts: Vec::new(),
                             requires_post_1_0: false, requires_unsupported_feature: false,
                         };
                         for a in tag.attrs() {
@@ -639,8 +643,10 @@ fn parse_test_set(path: &Path) -> Vec<TestCase> {
                     "initial-template" if in_test => {
                         for a in tag.attrs() {
                             if let Ok(a) = a {
-                                if a.name() == "name" {
-                                    cur_case.initial_template = Some(a.value().to_string());
+                                match a.name() {
+                                    "name"   => cur_case.initial_template = Some(a.value().to_string()),
+                                    "select" => cur_case.initial_select = Some(a.value().to_string()),
+                                    _ => {}
                                 }
                             }
                         }
@@ -649,8 +655,10 @@ fn parse_test_set(path: &Path) -> Vec<TestCase> {
                         cur_case.requires_post_1_0 = true;
                         for a in tag.attrs() {
                             if let Ok(a) = a {
-                                if a.name() == "name" {
-                                    cur_case.initial_mode = Some(a.value().to_string());
+                                match a.name() {
+                                    "name"   => cur_case.initial_mode = Some(a.value().to_string()),
+                                    "select" => cur_case.initial_select = Some(a.value().to_string()),
+                                    _ => {}
                                 }
                             }
                         }
@@ -803,7 +811,7 @@ fn parse_test_set(path: &Path) -> Vec<TestCase> {
                             name: String::new(), stylesheet: None,
                             source_inline: None, source_file: None,
                             env_ref: None, expects: Expectation::Unsupported,
-            params: Vec::new(), static_params: Vec::new(), initial_template: None, initial_mode: None, packages: Vec::new(), on_multiple_match_error: false, result_doc_asserts: Vec::new(),
+            params: Vec::new(), static_params: Vec::new(), initial_template: None, initial_mode: None, initial_select: None, packages: Vec::new(), on_multiple_match_error: false, result_doc_asserts: Vec::new(),
                             requires_post_1_0: false, requires_unsupported_feature: false,
                         }));
                         in_case = false;
@@ -1563,11 +1571,12 @@ fn run_case_detailed(case: &TestCase, ts_dir: &Path) -> Option<Result<(), FailRe
     let prev_omm = sup_xml_xslt::pattern::set_on_multiple_match_error(
         case.on_multiple_match_error);
     let result = if !case.params.is_empty() || case.initial_template.is_some()
-        || case.initial_mode.is_some()
+        || case.initial_mode.is_some() || case.initial_select.is_some()
     {
-        stylesheet.apply_with_params_initial_and_mode(
+        stylesheet.apply_with_initial_selection(
             &src_doc, &loader, Some(&base),
             &case.params, case.initial_template.as_deref(), case.initial_mode.as_deref(),
+            case.initial_select.as_deref(),
         )
     } else {
         stylesheet.apply_with_loader(&src_doc, &loader, Some(&base))
