@@ -447,7 +447,7 @@ fn handle_event(
             if let Some(emis) = state.current.as_mut() {
                 let parent_ptr = *emis.stack.last().unwrap();
                 let t    = emis.builder.alloc_str(&target);
-                let c    = if content.is_empty() { None } else { Some(&*emis.builder.alloc_str(&content)) };
+                let c    = if content.is_empty() { None } else { Some(emis.builder.alloc_str(&content)) };
                 let node = emis.builder.new_pi(t, c);
                 let parent: &Node<'_> = unsafe { unerase(parent_ptr) };
                 emis.builder.append_child(parent, node);
