@@ -8097,31 +8097,38 @@ fn reject_invalid_pattern_axes(expr: &Expr, who: &str) -> Result<(), XsltError> 
                 // id() or key().  Variable references and arbitrary
                 // function calls (doc(), normalize-space(), …) are
                 // XSLT 3.0+ extensions.
-                match primary.as_ref() {
-                    Expr::FunctionCall(name, _) => {
-                        let local = name.rsplit_once(':')
-                            .map(|(_, l)| l).unwrap_or(name);
-                        if !matches!(local, "id" | "key") {
-                            return Err(XsltError::InvalidStylesheet(format!(
-                                "{who} pattern primary '{local}(...)' is not \
-                                 id() or key() — only those function calls may \
-                                 head a pattern (XSLT 2.0 §5.5.2)"
-                            )));
+                // XSLT 3.0 §5.5.3 widened the pattern grammar: a pattern may
+                // begin with any function call or a variable reference (the
+                // node matches iff it is a member of the resulting sequence).
+                // XSLT 2.0 only allowed id() / key() and no variable head.
+                if !is_xslt_3_0_compile() {
+                    match primary.as_ref() {
+                        Expr::FunctionCall(name, _) => {
+                            let local = name.rsplit_once(':')
+                                .map(|(_, l)| l).unwrap_or(name);
+                            if !matches!(local, "id" | "key") {
+                                return Err(XsltError::InvalidStylesheet(format!(
+                                    "{who} pattern primary '{local}(...)' is not \
+                                     id() or key() — only those function calls may \
+                                     head a pattern (XSLT 2.0 §5.5.2)"
+                                )));
+                            }
                         }
+                        Expr::Variable(name) => return Err(XsltError::InvalidStylesheet(format!(
+                            "{who} pattern starts with a variable reference \
+                             '${name}' — variables aren't permitted at the head \
+                             of an XSLT 2.0 pattern (XPST0003)"
+                        ))),
+                        _ => {}
                     }
-                    Expr::Variable(name) => return Err(XsltError::InvalidStylesheet(format!(
-                        "{who} pattern starts with a variable reference \
-                         '${name}' — variables aren't permitted at the head \
-                         of an XSLT 2.0 pattern (XPST0003)"
-                    ))),
-                    _ => {}
                 }
                 for s in steps { walk_step(s, who)?; }
             }
-            Expr::Variable(name) => return Err(XsltError::InvalidStylesheet(format!(
-                "{who} pattern '${name}' — a bare variable reference is \
-                 not a legal XSLT 2.0 pattern (XPST0003)"
-            ))),
+            Expr::Variable(name) if !is_xslt_3_0_compile() =>
+                return Err(XsltError::InvalidStylesheet(format!(
+                    "{who} pattern '${name}' — a bare variable reference is \
+                     not a legal XSLT 2.0 pattern (XPST0003)"
+                ))),
             Expr::Union(a, b) => { walk(a, who)?; walk(b, who)?; }
             _ => {}
         }
