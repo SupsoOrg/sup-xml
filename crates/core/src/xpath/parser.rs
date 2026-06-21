@@ -2244,6 +2244,57 @@ mod tests {
         super::super::parse_xpath_with(src, &opts)
     }
 
+    fn parse_1_0(src: &str) -> super::super::Result<super::super::ast::Expr> {
+        super::super::parse_xpath_with(src, &super::super::XPathOptions::default())
+    }
+
+    /// The brace-delimited XPath 3.1 constructors — `map { … }`,
+    /// `array { … }`, and inline functions `function(…) { … }` — parse in
+    /// 2.0+ grammar mode, including nested, empty, and `!`/`//`-bearing
+    /// forms taken from the W3C streaming suite.
+    #[test]
+    fn brace_constructors_parse_in_2_0() {
+        for e in [
+            "map{}",
+            "map { 1 : 'a', 2 : 'b' }",
+            "map { 1 : copy-of(.), 2 : copy-of(x) }",
+            "map{'authors'://AUTHOR, 'prices'://PRICE}",
+            "map { 'a' : map { 'b' : 1 } }",
+            "map:merge(*!map{local-name():string(.)})",
+            "(1 to 3) ! map { . : .*. }",
+            "array {}",
+            "array { 1, 2 }",
+            "array { current-group()!@value!xs:decimal(.) }",
+            "function($x) { $x + 1 }",
+            "fold-left((1,2), 0, function($a,$b){$a+$b})",
+        ] {
+            assert!(parse_2_0(e).is_ok(), "expected `{e}` to parse in XPath 2.0 mode");
+        }
+    }
+
+    /// In XPath 1.0 grammar mode the same brace constructors are not part
+    /// of the surface grammar, so the `{` (or `[` for the square array)
+    /// is reported as an unexpected token rather than silently accepted.
+    /// This is the error the XSLT compiler would surface if it ever
+    /// parsed a 2.0+ stylesheet's expressions in 1.0 mode.
+    #[test]
+    fn brace_constructors_rejected_in_1_0() {
+        for (e, needle) in [
+            ("map{}", "LBrace"),
+            ("map { 1 : 'a' }", "LBrace"),
+            ("array { 1, 2 }", "LBrace"),
+            ("function($x) { $x }", "LBrace"),
+            ("[ 1, 2 ]", "LBracket"),
+        ] {
+            let err = parse_1_0(e).expect_err(&format!("`{e}` must be rejected in 1.0 mode"));
+            assert!(
+                err.message.contains(needle),
+                "`{e}` 1.0-mode error should mention {needle}, got: {}",
+                err.message
+            );
+        }
+    }
+
     /// `if (cond) then a else b` parses only when XPath 2.0 mode is
     /// on; the same expression must be rejected in default (1.0) mode
     /// so 1.0 stylesheets don't silently sprout 2.0 semantics.
