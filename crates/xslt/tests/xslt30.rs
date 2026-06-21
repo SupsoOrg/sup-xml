@@ -2605,6 +2605,14 @@ fn run_case_xslt2(
 /// dealing with the engine's literal-only param model.
 fn strip_xpath_string_literal(s: &str) -> String {
     let t = s.trim();
+    // The catalog often writes boolean param values as the XPath
+    // constructors `true()` / `false()`; map them to the xs:boolean
+    // lexical so a param declared `as="xs:boolean"` casts correctly.
+    match t {
+        "true()"  => return "true".to_string(),
+        "false()" => return "false".to_string(),
+        _ => {}
+    }
     if t.len() >= 2 {
         let bytes = t.as_bytes();
         let first = bytes[0];

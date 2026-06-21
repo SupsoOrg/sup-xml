@@ -2715,7 +2715,18 @@ pub fn apply_stylesheet_full_with_params_and_initial(
     for (name, value) in top_level_params {
         for p in &dedup_params {
             if p.name.local == *name {
-                state.variables.bind(qname_key(&p.name), Value::String(value.clone()));
+                // A caller-supplied param value is a string; cast it to the
+                // declared type for the cases where the string vs typed
+                // distinction changes behavior.  xs:boolean is the common
+                // one (a bare non-empty string is otherwise always truthy).
+                let bound = match p.as_type.as_deref()
+                    .map(|t| t.trim().trim_end_matches(['?', '*', '+']).trim())
+                {
+                    Some("xs:boolean") =>
+                        Value::Boolean(matches!(value.trim(), "true" | "1")),
+                    _ => Value::String(value.clone()),
+                };
+                state.variables.bind(qname_key(&p.name), bound);
                 break;
             }
         }
@@ -4136,11 +4147,26 @@ fn eval_instr(
         }
         Instr::CallTemplate { name, with_params } => {
             let key = qname_key(name);
+            // Resolve to the highest import-precedence template of that name
+            // — an xsl:override (or importing module) wins over the original
+            // it replaces (XSLT 1.0 §2.6.2 / XSLT 3.0 §3.5.1).
             let template = state.style.templates.iter()
-                .find(|t| t.name.as_ref().map(qname_key).as_deref() == Some(key.as_str()))
+                .filter(|t| t.name.as_ref().map(qname_key).as_deref() == Some(key.as_str()))
+                .max_by_key(|t| t.import_precedence)
                 .ok_or_else(|| XsltError::UnresolvedReference(format!(
                     "no template named '{key}'"
                 )))?;
+            // XSLT 3.0 §3.5.2 — an abstract named template (from a used
+            // package) that was never overridden has no body and cannot be
+            // called.  Overrides merge ahead of the abstract original, so a
+            // still-abstract match here means no implementation was supplied.
+            if template.visibility.as_deref() == Some("abstract") {
+                return Err(XsltError::Xpath(
+                    sup_xml_core::xpath::eval::xpath_err(format!(
+                        "cannot call abstract template '{key}' — no implementation \
+                         was supplied by the using package (XTDE3052)"))
+                    .with_xpath_code("XTDE3052")));
+            }
             // Snapshot only when there are tunnel params in scope —
             // the empty-HashMap clone is cheap but not free, and most
             // templates have no tunnel params at all.
