@@ -197,15 +197,15 @@ fn analyze_path(path: &LocationPath, ctx: Posture) -> Ps {
         }
 
         for pred in &step.predicates {
-            // A predicate is evaluated with the step's nodes as context.
-            // It inspects them; a consuming predicate is an additional
-            // walk over the same nodes, governed by the one-consuming
-            // rule.
+            // A predicate is evaluated per selected node — a nested
+            // traversal of each item, not a second independent walk of
+            // the outer context — so it folds with `combine_max`, not the
+            // one-consuming rule.  (`item[author]` stays streamable.)
             let p = analyze_expr(pred, posture);
             if p.posture == Posture::Roaming {
                 return Ps::rejected();
             }
-            sweep = combine_strict(sweep, p.sweep);
+            sweep = combine_max(sweep, p.sweep);
         }
 
         if posture == Posture::Roaming || sweep == Sweep::FreeRanging {
@@ -343,7 +343,7 @@ pub fn analyze_expr(expr: &Expr, ctx: Posture) -> Ps {
                 if p.posture == Roaming {
                     return Ps::rejected();
                 }
-                cur.sweep = combine_strict(cur.sweep, p.sweep);
+                cur.sweep = combine_max(cur.sweep, p.sweep);
             }
             for step in steps {
                 let s = apply_axis(cur.posture, step.axis);
@@ -354,7 +354,7 @@ pub fn analyze_expr(expr: &Expr, ctx: Posture) -> Ps {
                     if p.posture == Roaming {
                         return Ps::rejected();
                     }
-                    cur.sweep = combine_strict(cur.sweep, p.sweep);
+                    cur.sweep = combine_max(cur.sweep, p.sweep);
                 }
                 if cur.posture == Roaming || cur.sweep == Sweep::FreeRanging {
                     return Ps::rejected();
@@ -436,7 +436,9 @@ pub fn analyze_expr(expr: &Expr, ctx: Posture) -> Ps {
             if b.posture == Roaming {
                 return Ps::rejected();
             }
-            Ps::new(b.posture, combine_strict(sweep, b.sweep))
+            // The body runs once per bound item — a nested traversal, not
+            // a second walk of the binding sequence — so fold with max.
+            Ps::new(b.posture, combine_max(sweep, b.sweep))
         }
         Expr::Quantified { bindings, test, .. } => {
             let mut sweep = Sweep::Motionless;
@@ -451,7 +453,8 @@ pub fn analyze_expr(expr: &Expr, ctx: Posture) -> Ps {
             if t.posture == Roaming {
                 return Ps::rejected();
             }
-            Ps::new(Grounded, combine_strict(sweep, t.sweep))
+            // The test runs once per bound item.
+            Ps::new(Grounded, combine_max(sweep, t.sweep))
         }
         Expr::SimpleMap(a, b) => {
             let pa = analyze_expr(a, ctx);
@@ -462,7 +465,9 @@ pub fn analyze_expr(expr: &Expr, ctx: Posture) -> Ps {
             if pb.posture == Roaming {
                 return Ps::rejected();
             }
-            Ps::new(pb.posture, combine_strict(pa.sweep, pb.sweep))
+            // `a ! b` evaluates `b` once per item of `a` — a nested
+            // traversal, not two independent walks of the context.
+            Ps::new(pb.posture, combine_max(pa.sweep, pb.sweep))
         }
 
         // ── parenthesised sequence: concatenation of independent

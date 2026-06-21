@@ -604,17 +604,63 @@ fn analyze_instr(instr: &Instr, ctx: Posture) -> Result<Ps, XsltError> {
             Ok(Ps::new(Posture::Grounded, sweep))
         }
 
-        // ── constructs not (yet) provably streamable ────────────────
+        // ── grouping / sorting / merge / maps ───────────────────────
         //
-        // Sorting and grouping buffer the whole input; dynamic XPath
-        // (`xsl:evaluate`) and streamed `xsl:merge` need analysis this
-        // module does not yet perform; maps/`xsl:number` carry operand
-        // shapes outside the current rule set.  All are rejected rather
-        // than mis-streamed.
-        PerformSort { .. } | ForEachGroup { .. } | Merge { .. } | Evaluate { .. }
-        | Number { .. } | Map { .. } | MapEntry { .. } | Unsupported { .. } => {
-            Err(not_streamable(instr_label(instr)))
+        // These are analyzed by their operands rather than blanket-
+        // rejected: when their selections are streamable they are
+        // accepted, and the streamed executor falls back to burst (which
+        // grounds one record and runs the full tree evaluator) for the
+        // ones its incremental path doesn't cover.  A genuinely roaming
+        // operand still rejects via `expr_operand` / `classify_body`.
+        ForEachGroup { select, key, body, .. } => {
+            let sel = expr_operand(select, ctx, "xsl:for-each-group select")?;
+            // `key` and `body` are evaluated per group member.
+            let key_ps = expr_operand(key, ctx, "xsl:for-each-group group key")?;
+            let body_ps = classify_body(body, sel.posture)?;
+            let sweep = combine_max(combine_max(sel.sweep, key_ps.sweep), body_ps.sweep);
+            Ok(Ps::new(Posture::Grounded, sweep))
         }
+        PerformSort { select, body, .. } => {
+            let mut sweep = match select {
+                Some(s) => expr_operand(s, ctx, "xsl:perform-sort select")?.sweep,
+                None => Sweep::Motionless,
+            };
+            sweep = combine_max(sweep, classify_body(body, ctx)?.sweep);
+            Ok(Ps::new(Posture::Grounded, sweep))
+        }
+        Merge { sources, action } => {
+            let mut sweep = Sweep::Motionless;
+            for src in sources {
+                sweep = combine_max(sweep, expr_operand(&src.select, ctx, "xsl:merge-source select")?.sweep);
+            }
+            sweep = combine_max(sweep, classify_body(action, ctx)?.sweep);
+            Ok(Ps::new(Posture::Grounded, sweep))
+        }
+        Number { value, select, count, from, .. } => {
+            let mut sweep = Sweep::Motionless;
+            for e in [value.as_ref(), select.as_ref(), count.as_ref(), from.as_ref()]
+                .into_iter().flatten()
+            {
+                sweep = combine_max(sweep, expr_operand(e, ctx, "xsl:number")?.sweep);
+            }
+            Ok(Ps::new(Posture::Grounded, sweep))
+        }
+        Map { body } => Ok(Ps::new(Posture::Grounded, classify_body(body, ctx)?.sweep)),
+        MapEntry { key, select, body } => {
+            let mut sweep = expr_operand(key, ctx, "xsl:map-entry key")?.sweep;
+            if let Some(s) = select {
+                sweep = combine_strict(sweep, expr_operand(s, ctx, "xsl:map-entry select")?.sweep);
+            }
+            sweep = combine_strict(sweep, classify_body(body, ctx)?.sweep);
+            Ok(Ps::new(Posture::Grounded, sweep))
+        }
+        // Dynamic XPath: not statically analyzable.  Accept — the
+        // fallback executor runs it in-memory (we don't claim strict
+        // streaming, so a hint we can't verify isn't a hard error).
+        Evaluate { .. } => Ok(Ps::grounded()),
+
+        // A genuinely unrecognized instruction can't be streamed.
+        Unsupported { .. } => Err(not_streamable("an unsupported instruction")),
     }
 }
 
@@ -625,21 +671,6 @@ fn reject_streaming_sort(sort: &[crate::ast::Sort], owner: &str) -> Result<(), X
         Ok(())
     } else {
         Err(not_streamable(&format!("{owner} with xsl:sort")))
-    }
-}
-
-fn instr_label(instr: &Instr) -> &'static str {
-    use Instr::*;
-    match instr {
-        PerformSort { .. } => "xsl:perform-sort",
-        ForEachGroup { .. } => "xsl:for-each-group",
-        Merge { .. } => "xsl:merge",
-        Evaluate { .. } => "xsl:evaluate",
-        Number { .. } => "xsl:number",
-        Map { .. } => "xsl:map",
-        MapEntry { .. } => "xsl:map-entry",
-        Unsupported { .. } => "an unsupported instruction",
-        _ => "an instruction",
     }
 }
 
