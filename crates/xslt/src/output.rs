@@ -285,9 +285,7 @@ fn serialize_xml_node(
                 }
                 if is_cdata {
                     if let ResultNode::Text { content, .. } = c {
-                        out.push_str("<![CDATA[");
-                        out.push_str(&content.replace("]]>", "]]]]><![CDATA[>"));
-                        out.push_str("]]>");
+                        push_cdata_content(out, content, enc_cap);
                         continue;
                     }
                 }
@@ -488,6 +486,35 @@ fn normalize_result_node(node: &ResultNode, form: sup_xml_core::normalize::NormF
         ResultNode::Attribute { name, value } =>
             ResultNode::Attribute { name: name.clone(), value: normalize(value, form) },
     }
+}
+
+/// Emit `content` as the character data of a cdata-section element.
+/// Maximal runs of encoding-representable characters are wrapped in
+/// `<![CDATA[…]]>` (with any literal `]]>` split across two sections);
+/// a character that cannot be represented in the output encoding can't
+/// live in a CDATA section, so it breaks out and is emitted as a numeric
+/// character reference before the next CDATA section resumes
+/// (Serialization spec §, recovery from SERE0008).
+fn push_cdata_content(out: &mut String, content: &str, enc_cap: Option<u32>) {
+    let cap = enc_cap.unwrap_or(u32::MAX);
+    let mut run = String::new();
+    fn flush(out: &mut String, run: &mut String) {
+        if !run.is_empty() {
+            out.push_str("<![CDATA[");
+            out.push_str(&run.replace("]]>", "]]]]><![CDATA[>"));
+            out.push_str("]]>");
+            run.clear();
+        }
+    }
+    for c in content.chars() {
+        if c as u32 > cap {
+            flush(out, &mut run);
+            let _ = write!(out, "&#{};", c as u32);
+        } else {
+            run.push(c);
+        }
+    }
+    flush(out, &mut run);
 }
 
 fn render_attr_value(

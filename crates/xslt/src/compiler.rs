@@ -4319,7 +4319,7 @@ fn compile_output(node: &Node, allow_avt: bool) -> Result<OutputSpec, XsltError>
     if let Some(s) = read_attribute(node, "cdata-section-elements")
         .filter(|v| !(allow_avt && value_is_avt(v)))
     {
-        out.cdata_section_elements = parse_qname_list(node, s)?;
+        out.cdata_section_elements = parse_cdata_section_elements(node, s)?;
     }
     if let Some(s) = read_attribute(node, "use-character-maps") {
         out.use_character_maps = parse_qname_list(node, s)?;
@@ -8416,6 +8416,35 @@ fn parse_qname_list(
     let mut out = Vec::new();
     for tok in raw.split_whitespace() {
         out.push(parse_qname_on(context_node, tok)?);
+    }
+    Ok(out)
+}
+
+/// Resolve a `cdata-section-elements` QName list.  Unlike most XSLT
+/// QName-valued attributes, an unprefixed name here takes the default
+/// namespace in scope at the `xsl:output` element (XSLT 2.0 §20).  In a
+/// 1.0 stylesheet an unprefixed name stays in no namespace.
+fn parse_cdata_section_elements(
+    context_node: &Node, raw: &str,
+) -> Result<Vec<QName>, XsltError> {
+    let mut out = parse_qname_list(context_node, raw)?;
+    if is_xslt_2_0_compile() {
+        let default_ns = || -> String {
+            let mut cur = Some(context_node);
+            while let Some(n) = cur {
+                for (pref, href) in n.ns_declarations() {
+                    if pref.is_none() { return href.to_string(); }
+                }
+                cur = n.parent.get();
+            }
+            String::new()
+        };
+        let ns = default_ns();
+        if !ns.is_empty() {
+            for q in out.iter_mut().filter(|q| q.prefix.is_none() && q.uri.is_empty()) {
+                q.uri = ns.clone();
+            }
+        }
     }
     Ok(out)
 }
