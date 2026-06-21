@@ -2721,6 +2721,20 @@ fn compile_with_imports_inner(
     // below moves local's component vectors — needed for the
     // xsl:use-package visibility check (XSLT 3.0 §3.5.2).
     let pkg_refs = (!local.use_packages.is_empty()).then(|| capture_pkg_refs(&local));
+    // The using package's own top-level component names (named templates,
+    // functions as name#arity, global variables, named modes), captured
+    // before the merge moves local's vectors — needed for the XTSE3050
+    // same-name clash check against used packages.
+    let own_components: Option<(
+        std::collections::HashSet<String>, std::collections::HashSet<String>,
+        std::collections::HashSet<String>, std::collections::HashSet<String>,
+    )> = (!local.use_packages.is_empty()).then(|| (
+        local.templates.iter().filter_map(|t| t.name.as_ref().map(qname_key)).collect(),
+        local.functions.iter()
+            .map(|f| format!("{}#{}", qname_key(&f.name), f.params.len())).collect(),
+        local.global_variables.iter().map(|v| qname_key(&v.name)).collect(),
+        local.modes.iter().filter_map(|m| m.name.as_ref().map(qname_key)).collect(),
+    ));
 
     // The locally-compiled stylesheet's precedence is whatever the
     // caller pre-stamped on `acc.templates` length-wise — but
@@ -2974,23 +2988,94 @@ fn compile_with_imports_inner(
                 // effective visibility, not just the local visibility=.
                 let used_exposes: Vec<crate::ast::ExposeDecl> =
                     acc.exposes[before_exposes..].to_vec();
+                // An xsl:expose only sets the visibility of components that
+                // did not declare their own (XSLT 3.0 §3.5.2): a component's
+                // explicit visibility= attribute is not overridden by a
+                // wildcard expose (an explicit-name expose that conflicts is
+                // XTSE3010, checked separately).
                 if !used_exposes.is_empty() {
-                    for f in &mut acc.functions[before_fns..] {
+                    for f in acc.functions[before_fns..].iter_mut().filter(|f| f.visibility.is_none()) {
                         if let Some(v) = expose_visibility(&used_exposes, "function", &f.name) {
                             f.visibility = Some(v);
                         }
                     }
-                    for v in &mut acc.global_variables[before_vars..] {
+                    for v in acc.global_variables[before_vars..].iter_mut().filter(|v| v.visibility.is_none()) {
                         if let Some(vis) = expose_visibility(&used_exposes, "variable", &v.name) {
                             v.visibility = Some(vis);
                         }
                     }
-                    for t in &mut acc.templates[before_templates..] {
-                        if let Some(name) = t.name.clone() {
-                            if let Some(vis) = expose_visibility(&used_exposes, "template", &name) {
-                                t.visibility = Some(vis);
-                            }
+                    for t in acc.templates[before_templates..].iter_mut()
+                        .filter(|t| t.visibility.is_none() && t.name.is_some())
+                    {
+                        let name = t.name.clone().unwrap();
+                        if let Some(vis) = expose_visibility(&used_exposes, "template", &name) {
+                            t.visibility = Some(vis);
                         }
+                    }
+                }
+                // XSLT 3.0 §3.5.1 / XTSE3050 — a component declared at the
+                // top level of the using package (i.e. NOT inside an
+                // xsl:override) must not have the same name and kind as a
+                // public/final/abstract component of the used package.  The
+                // using package's own declarations are exactly `local`'s
+                // top-level components; override bodies live in
+                // `up.overrides` and are the sanctioned way to redeclare a
+                // used component, so they're exempt.
+                if let Some((own_t, own_f, own_v, own_m)) = &own_components {
+                    use std::collections::HashSet;
+                    let clash = |kind: &str, name: &str| -> XsltError {
+                        XsltError::InvalidStylesheet(format!(
+                            "{kind} '{name}' has the same name as a component of used \
+                             package '{}' but is declared outside xsl:override (XTSE3050)",
+                            up.name))
+                    };
+                    // Effective visibility as seen by the using package:
+                    // an xsl:accept on this use-package overrides the
+                    // component's declared visibility (e.g. accepting it as
+                    // hidden removes it from the using package's namespace).
+                    let eff_visible = |kind: &str, name: &QName, declared: &Option<String>| {
+                        // A component the used package keeps private is never
+                        // visible — xsl:accept can only adjust components the
+                        // used package exposes, and may lower them to hidden.
+                        if !visible_to_user(declared) { return false; }
+                        match expose_visibility(&up.accepts, kind, name) {
+                            Some(v) => visible_to_user(&Some(v)),
+                            None    => true,
+                        }
+                    };
+                    let exposed_t: HashSet<String> = acc.templates[before_templates..].iter()
+                        .filter(|t| t.name.as_ref()
+                            .is_some_and(|n| eff_visible("template", n, &t.visibility)))
+                        .filter_map(|t| t.name.as_ref().map(qname_key)).collect();
+                    let exposed_f: HashSet<String> = acc.functions[before_fns..].iter()
+                        .filter(|f| eff_visible("function", &f.name, &f.visibility))
+                        .map(|f| format!("{}#{}", qname_key(&f.name), f.params.len())).collect();
+                    let exposed_v: HashSet<String> = acc.global_variables[before_vars..].iter()
+                        .filter(|v| eff_visible("variable", &v.name, &v.visibility))
+                        .map(|v| qname_key(&v.name)).collect();
+                    let exposed_m: HashSet<String> = acc.modes[before_modes..].iter()
+                        .filter(|m| m.name.as_ref()
+                            .is_some_and(|n| eff_visible("mode", n, &m.visibility)))
+                        .filter_map(|m| m.name.as_ref().map(qname_key)).collect();
+                    let ov_t: HashSet<String> = up.overrides.templates.iter()
+                        .filter_map(|t| t.name.as_ref().map(qname_key)).collect();
+                    let ov_f: HashSet<String> = up.overrides.functions.iter()
+                        .map(|f| format!("{}#{}", qname_key(&f.name), f.params.len())).collect();
+                    let ov_v: HashSet<String> = up.overrides.global_variables.iter()
+                        .map(|v| qname_key(&v.name)).collect();
+                    if let Some(k) = own_t.iter().find(|k| exposed_t.contains(*k) && !ov_t.contains(*k)) {
+                        return Err(clash("named template", k));
+                    }
+                    if let Some(k) = own_f.iter().find(|k| exposed_f.contains(*k) && !ov_f.contains(*k)) {
+                        return Err(clash("function", k));
+                    }
+                    if let Some(k) = own_v.iter().find(|k| exposed_v.contains(*k) && !ov_v.contains(*k)) {
+                        return Err(clash("variable", k));
+                    }
+                    // Modes are not overridable via xsl:override, so any
+                    // same-named mode in the using package is a clash.
+                    if let Some(k) = own_m.iter().find(|k| exposed_m.contains(*k)) {
+                        return Err(clash("mode", k));
                     }
                 }
                 // XSLT 3.0 §3.5.2 — the using package may not reference
@@ -3767,6 +3852,7 @@ fn compile_use_package(node: &Node) -> Result<UsePackage, XsltError> {
     let name = require_attr(node, "name", "xsl:use-package")?.to_string();
     let version = read_attribute(node, "package-version").map(str::to_string);
     let mut overrides = StylesheetAst::default();
+    let mut accepts: Vec<crate::ast::ExposeDecl> = Vec::new();
     let mut pos: u32 = 0;
     for child in node.children() {
         if !child.is_element() || !is_xslt_element(child) { continue; }
@@ -3801,14 +3887,38 @@ fn compile_use_package(node: &Node) -> Result<UsePackage, XsltError> {
                     pos += 1;
                 }
             }
-            // xsl:accept adjusts re-export visibility; accepted as a
-            // no-op (we don't enforce visibility on a single level of
-            // use-package).
-            "accept" => {}
+            // xsl:accept adjusts the visibility of the used package's
+            // components as seen by the using package (XSLT 3.0 §3.5.2) —
+            // notably accepting a component as hidden/private removes it
+            // from the using package's component namespace.
+            "accept" => accepts.push(parse_accept(child)?),
             _ => {}
         }
     }
-    Ok(UsePackage { name, version, overrides: Box::new(overrides) })
+    Ok(UsePackage { name, version, overrides: Box::new(overrides), accepts })
+}
+
+/// Parse an `<xsl:accept>` declaration (XSLT 3.0 §3.5.2) into the same
+/// `ExposeDecl` shape — `(component, visibility, names, namespaces)`.
+/// Unlike `xsl:expose`, accept may name components across kinds and may
+/// lower visibility (including to hidden), so the expose-only static
+/// rejections don't apply here.
+fn parse_accept(node: &Node) -> Result<crate::ast::ExposeDecl, XsltError> {
+    let component = read_attribute(node, "component").map(|c| c.trim().to_string());
+    let ns: std::collections::HashMap<String, String> =
+        collect_in_scope_namespaces(node).into_iter()
+            .filter_map(|(p, u)| p.map(|p| (p, u)))
+            .collect();
+    let names = read_attribute(node, "names")
+        .map(|a| a.split_whitespace().map(str::to_string).collect())
+        .unwrap_or_default();
+    Ok(crate::ast::ExposeDecl {
+        component: component.unwrap_or_default(),
+        visibility: read_attribute(node, "visibility")
+            .map(|v| v.trim().to_string()).unwrap_or_default(),
+        names,
+        namespaces: ns,
+    })
 }
 
 /// Validate an `<xsl:expose>` declaration's attribute values (XSLT 3.0

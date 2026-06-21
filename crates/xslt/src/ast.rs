@@ -864,6 +864,10 @@ pub struct UsePackage {
     /// top-level declarations of the using package so they take
     /// precedence over the used package's originals.
     pub overrides: Box<StylesheetAst>,
+    /// `<xsl:accept>` children (XSLT 3.0 §3.5.2) — adjust the visibility
+    /// of the used package's components as seen by the using package.
+    /// Same shape as an `xsl:expose` declaration.
+    pub accepts:   Vec<ExposeDecl>,
 }
 
 /// `<xsl:expose>` declaration (XSLT 3.0 §3.5.2) — adjusts the
