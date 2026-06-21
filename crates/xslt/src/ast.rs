@@ -1212,6 +1212,10 @@ pub struct StylesheetAst {
     /// `name: None`; modes used by templates but never declared keep
     /// the XSLT 1.0 default (`text-only-copy`).
     pub modes:              Vec<ModeDecl>,
+    /// `<xsl:global-context-item>` declarations (XSLT 3.0 §6.2).  At most
+    /// one is allowed per package (XTSE3087); collected across modules so
+    /// the merged count can be validated.
+    pub global_context_items: Vec<GlobalContextItem>,
     /// `input-type-annotations=` value(s) declared on this stylesheet
     /// module's root.  XSLT 2.0 §3.6 / XTSE0265 — across all modules
     /// of a package the value must be consistent: if any module asks
@@ -1233,6 +1237,19 @@ pub struct StylesheetAst {
     /// `castable as` / `cast as` / `instance of` for user-defined types.
     #[cfg(feature = "xsd")]
     pub schemas: Vec<std::sync::Arc<sup_xml_core::xsd::Schema>>,
+}
+
+/// `<xsl:global-context-item>` declaration (XSLT 3.0 §6.2) — declares
+/// the required type (`as`) and presence (`use`) of the global context
+/// item that the stylesheet is invoked with.
+#[derive(Clone, Debug)]
+pub struct GlobalContextItem {
+    /// `use=` — `"required"`, `"optional"`, or `"absent"` (default
+    /// `"required"` when the element is present).
+    pub use_:    String,
+    /// `as=` required type; `None` when omitted.  Must be absent when
+    /// `use="absent"` (XTSE3089).
+    pub as_type: Option<String>,
 }
 
 /// One `<xsl:mode>` declaration (XSLT 3.0 §6.6).

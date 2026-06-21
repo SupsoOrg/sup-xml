@@ -192,6 +192,7 @@ impl Stylesheet {
         compiler::validate_iterate_constraints(&ast)?;
         compiler::validate_input_type_annotations(&ast)?;
         compiler::validate_package_exposes(&ast)?;
+        compiler::validate_global_context_item(&ast)?;
         // XSLT 3.0 §19: every streamable context (a streamable mode's
         // template rules, xsl:source-document streamable="yes",
         // streamable accumulators) must be guaranteed-streamable.

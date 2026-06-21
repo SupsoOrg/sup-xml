@@ -1877,6 +1877,8 @@ fn compile_top_level(node: &Node, ast: &mut StylesheetAst, pos: u32) -> Result<(
         }
         "attribute-set"   => ast.attribute_sets.push(compile_attribute_set(node)?),
         "mode"            => ast.modes.push(compile_mode(node)?),
+        "global-context-item" if is_xslt_3_0_compile() =>
+            ast.global_context_items.push(compile_global_context_item(node)?),
         "accumulator"     => ast.accumulators.push(compile_accumulator(node)?),
         // XSLT 2.0 §3.13 — record the imported schema for deferred
         // loading; the loader isn't available here, so resolution happens
@@ -2769,6 +2771,7 @@ fn compile_with_imports_inner(
         a.import_precedence = this_precedence;
         acc.accumulators.push(a);
     }
+    acc.global_context_items.extend(local.global_context_items);
     acc.schema_imports.extend(local.schema_imports);
     acc.inline_schemas.extend(local.inline_schemas);
     // Decimal-formats merge per-attribute by import precedence (XSLT 2.0
@@ -3261,6 +3264,7 @@ fn merge_package_components(acc: &mut StylesheetAst, sub: &StylesheetAst, prec: 
         m.import_precedence = prec;
         acc.modes.push(m);
     }
+    acc.global_context_items.extend(sub.global_context_items.iter().cloned());
     acc.keys.extend(sub.keys.iter().cloned());
     for (k, df) in &sub.decimal_formats {
         let mask = sub.decimal_format_explicit.get(k).copied().unwrap_or(0);
@@ -3287,7 +3291,12 @@ fn compile_template(node: &Node) -> Result<Template, XsltError> {
         let mut seen_other = false;
         let mut seen_ci = false;
         for child in node.children() {
-            if !child.is_element() { continue; }
+            // Significant text before xsl:context-item also makes it
+            // misplaced — it must be the very first child (XTSE0010).
+            if !child.is_element() {
+                if is_significant_text(child) { seen_other = true; }
+                continue;
+            }
             if is_xslt_element(child) && child.local_name() == "context-item" {
                 if seen_other || seen_ci {
                     return Err(XsltError::InvalidStylesheet(
@@ -3691,6 +3700,36 @@ fn read_streamable(node: &Node) -> bool {
 /// `on-no-match` action affects evaluation today; the streamability /
 /// typing / multiple-match properties are accepted and validated but
 /// otherwise inert.
+fn compile_global_context_item(node: &Node) -> Result<crate::ast::GlobalContextItem, XsltError> {
+    validate_xslt_only_attributes(node, "xsl:global-context-item", &["use", "as"])?;
+    validate_must_be_empty(node, "xsl:global-context-item")?;
+    let use_ = read_attribute(node, "use").map(|s| s.trim().to_string())
+        .unwrap_or_else(|| "required".to_string());
+    if !matches!(use_.as_str(), "required" | "optional" | "absent") {
+        return Err(XsltError::InvalidStylesheet(format!(
+            "xsl:global-context-item use='{use_}' must be 'required', \
+             'optional', or 'absent' (XTSE0020)")));
+    }
+    let as_attr = read_attribute(node, "as").map(|s| s.trim().to_string());
+    if let Some(a) = &as_attr {
+        // The context item is a single item — no occurrence indicator.
+        if a.ends_with(['?', '*', '+']) {
+            return Err(XsltError::InvalidStylesheet(format!(
+                "xsl:global-context-item as='{a}' must not have an occurrence \
+                 indicator (XTSE0020)")));
+        }
+        // XSLT 3.0 §6.2 / XTSE3089 — `as` is meaningless when no context
+        // item is supplied.
+        if use_ == "absent" {
+            return Err(XsltError::InvalidStylesheet(
+                "xsl:global-context-item use='absent' cannot also specify \
+                 as= (XTSE3089)".into()));
+        }
+    }
+    let as_type = if use_ == "absent" { None } else { as_attr };
+    Ok(crate::ast::GlobalContextItem { use_, as_type })
+}
+
 fn compile_mode(node: &Node) -> Result<ModeDecl, XsltError> {
     validate_xslt_only_attributes(node, "xsl:mode", &[
         "name", "streamable", "on-no-match", "on-multiple-match",
@@ -3915,6 +3954,17 @@ fn expose_visibility(
 /// `xsl:expose` names= list must match a component of the named kind
 /// declared in the (fully assembled) package.  Run from `finalize`,
 /// after includes/imports/used-package components are merged.
+/// XSLT 3.0 §6.2 / XTSE3087 — a package may contain at most one
+/// `xsl:global-context-item` declaration (counting all its modules).
+pub(crate) fn validate_global_context_item(ast: &StylesheetAst) -> Result<(), XsltError> {
+    if ast.global_context_items.len() > 1 {
+        return Err(XsltError::InvalidStylesheet(
+            "more than one xsl:global-context-item declaration in a package \
+             (XTSE3087)".into()));
+    }
+    Ok(())
+}
+
 pub(crate) fn validate_package_exposes(ast: &StylesheetAst) -> Result<(), XsltError> {
     if ast.exposes.is_empty() { return Ok(()); }
     use std::collections::HashSet;
@@ -4960,30 +5010,15 @@ fn compile_raw_instr_into(
         "iterate"        if is_xslt_3_0_compile() => compile_iterate(node)?,
         "next-iteration" if is_xslt_3_0_compile() => compile_next_iteration(node)?,
         "break"          if is_xslt_3_0_compile() => compile_break(node)?,
-        // xsl:context-item (XSLT 3.0 §6.3) declares the required context
-        // item type as the first child of xsl:template.  We validate it
-        // statically; the declared type itself is not yet enforced.
+        // xsl:context-item (XSLT 3.0 §6.3) is a declaration permitted only
+        // as the first child of xsl:template — `compile_template` consumes
+        // it there.  Reaching the instruction compiler means it appears in
+        // a sequence constructor (an xsl:variable / xsl:function body, after
+        // other content, or a second occurrence), which is misplaced.
         "context-item"   if is_xslt_3_0_compile() => {
-            validate_xslt_only_attributes(node, "xsl:context-item", &["use", "as"])?;
-            if let Some(u) = read_attribute(node, "use") {
-                if !matches!(u.trim(), "required" | "optional" | "absent") {
-                    return Err(XsltError::InvalidStylesheet(format!(
-                        "xsl:context-item use='{u}' must be 'required', 'optional', \
-                         or 'absent' (XTSE0020)"
-                    )));
-                }
-            }
-            if let Some(a) = read_attribute(node, "as") {
-                // The context item is always a single item, so its
-                // declared type may not carry an occurrence indicator.
-                if a.trim_end().ends_with(['?', '*', '+']) {
-                    return Err(XsltError::InvalidStylesheet(format!(
-                        "xsl:context-item as='{a}' must not have an occurrence \
-                         indicator (XTSE0020)"
-                    )));
-                }
-            }
-            Instr::Fallback { body: Body::new() }
+            return Err(XsltError::InvalidStylesheet(
+                "xsl:context-item is only allowed as the first child of \
+                 xsl:template (XTSE0010)".into()));
         }
         // xsl:result-document — XSLT 2.0 §19.1.  With `href=` the body
         // becomes a secondary result document written to the resolved
