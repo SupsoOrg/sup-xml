@@ -983,6 +983,11 @@ fn call_user_function_pure_xpath<I: DocIndexLike>(
     use sup_xml_core::error::{ErrorDomain, ErrorLevel, XmlError};
     let err = |m: &str| XmlError::new(ErrorDomain::XPath, ErrorLevel::Error, m.to_string());
 
+    let _depth = FnDepthGuard::enter().ok_or_else(|| err(&format!(
+        "xsl:function calls nested deeper than {MAX_FUNCTION_CALL_DEPTH} levels \
+         — possible infinite recursion"
+    )))?;
+
     if args.len() != uf.params.len() {
         return Err(err(&format!(
             "xsl:function {}:{} expects {} argument(s), got {}",
@@ -2157,6 +2162,40 @@ struct EvalState<'a> {
 /// pathological infinite-recursion stylesheets before they exhaust
 /// the OS thread stack.
 const MAX_TEMPLATE_CALL_DEPTH: u32 = 1024;
+
+/// Recursion-depth cap for `xsl:function` calls (XSLT 2.0 §10.3),
+/// mirroring [`MAX_TEMPLATE_CALL_DEPTH`].  A recursive function that
+/// fails to converge (e.g. an ancestor walk that never reaches the root)
+/// would otherwise overflow the OS thread stack and abort the process;
+/// this converts it into a clean dynamic error.
+const MAX_FUNCTION_CALL_DEPTH: u32 = 1024;
+
+thread_local! {
+    static FUNCTION_CALL_DEPTH: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
+/// RAII guard that bumps the per-thread `xsl:function` recursion depth on
+/// entry and restores it on drop (so every early return / error path
+/// decrements).  `enter` returns `None` when the cap is exceeded.
+struct FnDepthGuard;
+impl FnDepthGuard {
+    fn enter() -> Option<Self> {
+        FUNCTION_CALL_DEPTH.with(|d| {
+            let next = d.get() + 1;
+            if next > MAX_FUNCTION_CALL_DEPTH {
+                None
+            } else {
+                d.set(next);
+                Some(FnDepthGuard)
+            }
+        })
+    }
+}
+impl Drop for FnDepthGuard {
+    fn drop(&mut self) {
+        FUNCTION_CALL_DEPTH.with(|d| d.set(d.get().saturating_sub(1)));
+    }
+}
 
 impl<'a> EvalState<'a> {
     /// Snapshot the state as an [`XsltBindings`] for one XPath call.

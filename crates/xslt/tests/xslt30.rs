@@ -1527,9 +1527,15 @@ fn run_case_detailed(case: &TestCase, ts_dir: &Path) -> Option<Result<(), FailRe
         Err(_) => return Some(check_expectation_against(
             &case.expects, &ApplyResult::SourceParseFailed)),
     };
-    // Stylesheets reference imports/includes by relative URI; load
-    // them off the test-set directory.
-    let loader = FilesystemLoader::new(vec![ts_dir.to_path_buf()]);
+    // Stylesheets reference imports/includes by relative URI off the
+    // test-set directory; some (notably streaming source-document tests)
+    // reference shared data in sibling directories (`../docs/…`), so the
+    // suite root is also an allowed root — matching how a real runner
+    // resolves cross-directory references within the suite.
+    let loader = FilesystemLoader::new(vec![
+        ts_dir.to_path_buf(),
+        PathBuf::from(SUITE_ROOT),
+    ]);
     let base = ts_dir.join(stylesheet_path).to_string_lossy().to_string();
     // Build the xsl:use-package library: package name → (source, base).
     let packages = build_package_library(case, ts_dir);
@@ -2134,6 +2140,12 @@ fn run_suite() {
     let list_fails = std::env::var("XSLT30_LIST_FAILS").is_ok();
     let dump_diffs = std::env::var("XSLT30_DUMP_DIFFS").is_ok();
     let filter_group: Option<String> = std::env::var("XSLT30_GROUP").ok();
+    // Streaming is partially supported (static §19 analysis + a streaming
+    // engine, see `crate::stream`).  Its cases run through the ordinary
+    // apply path here and aren't reliably per-case feature-tagged, so the
+    // group is measured only in the brute attempt-all floor; the
+    // capability gate still skips it.
+    let attempt_all = std::env::var("XSLT3_ATTEMPT_ALL").is_ok();
 
     let mut by_group: HashMap<String, Stats> = HashMap::new();
     let mut total = Stats::default();
@@ -2160,13 +2172,13 @@ fn run_suite() {
         if let Some(g) = &filter_group {
             if g != &group { continue; }
         }
-        // The entire `strm` group is streaming-only (see
-        // `known_unsupported.rs`); streaming is a feature this engine
-        // deliberately doesn't implement.  Its cases aren't reliably
-        // per-case feature-tagged, so skip the group wholesale —
-        // counted as skip, not attempted-and-failed — so the rate
-        // reflects the supported feature surface.
-        let unsupported_set = group == "strm";
+        // The `strm` group is streaming-only.  Streaming is partially
+        // supported (static §19 analysis + the streaming engine in
+        // `crate::stream`); its cases run here through the ordinary apply
+        // path.  They aren't reliably per-case feature-tagged, so the
+        // group is measured only under the brute attempt-all floor and
+        // skipped (not attempted-and-failed) in the capability gate.
+        let unsupported_set = group == "strm" && !attempt_all;
         for case in parse_test_set(ts_path) {
             let qualified = format!("{group}/{}", case.name);
             // Host-encoding-pinned sets and the heavy slow sets are

@@ -27,8 +27,11 @@
 
 pub mod analysis;
 pub mod engine;
+pub mod push;
+pub mod push_eval;
 
 pub use engine::RecordSelector;
+pub use push::stream_copy;
 
 use crate::ast::{
     AccumulatorDecl, Avt, AvtPart, Body, Instr, ModeDecl, QName, StylesheetAst,
@@ -668,7 +671,9 @@ mod tests {
     }
 
     #[test]
-    fn streamable_mode_rejects_absolute_path() {
+    fn streamable_mode_accepts_absolute_downward_path() {
+        // Rooted at the streamed document node, an absolute downward path
+        // is a striding selection (matches the W3C source-document tests).
         let xsl = format!(
             r#"{HEAD}
             <xsl:mode name="s" streamable="yes"/>
@@ -677,8 +682,7 @@ mod tests {
             </xsl:template>
         </xsl:stylesheet>"#
         );
-        let err = compiles(&xsl).unwrap_err();
-        assert!(err.contains("XTSE3430"), "expected XTSE3430, got: {err}");
+        assert!(compiles(&xsl).is_ok(), "{:?}", compiles(&xsl));
     }
 
     #[test]
@@ -740,12 +744,14 @@ mod tests {
     }
 
     #[test]
-    fn streamable_source_document_rejects_absolute_path() {
+    fn streamable_source_document_rejects_roaming_axis() {
+        // A genuinely non-streamable selection (a sibling axis) inside a
+        // streamable source-document body is rejected.
         let xsl = format!(
             r#"{HEAD}
             <xsl:template name="main">
                 <xsl:source-document href="huge.xml" streamable="yes">
-                    <xsl:apply-templates select="/items/item"/>
+                    <out><xsl:value-of select="following-sibling::x"/></out>
                 </xsl:source-document>
             </xsl:template>
         </xsl:stylesheet>"#

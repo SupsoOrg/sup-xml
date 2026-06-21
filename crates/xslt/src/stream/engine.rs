@@ -28,7 +28,7 @@ use sup_xml_core::xpath::ast::{Axis, Expr, LocationPath, NodeTest};
 use sup_xml_core::{ByteStreamParser, StreamParser};
 use sup_xml_tree::dom::Document;
 
-use crate::ast::{Body, Instr};
+use crate::ast::{Body, Instr, OutputSpec, QName};
 use crate::error::XsltError;
 use crate::loader::Loader;
 use crate::result_tree::ResultTree;
@@ -119,11 +119,55 @@ impl Stylesheet {
         records: RecordSelector<'_>,
         mode:    Option<&str>,
     ) -> Result<ResultTree, XsltError> {
+        // When the records are selected by a path and the mode's rules fit
+        // the incremental evaluator's instruction subset, process each
+        // record without grounding (memory bounded by depth, so a single
+        // record larger than memory still streams).  Otherwise fall back
+        // to burst, which grounds one record at a time but handles
+        // arbitrary streamable templates.
+        if let RecordSelector::Path(p) = &records {
+            let mode_q = self.resolve_mode(mode);
+            if super::push_eval::push_eligible(&self.ast, mode_q.as_ref()) {
+                let path: Vec<String> = p.iter().map(|s| (*s).to_string()).collect();
+                let nodes = super::push_eval::stream_apply_push(
+                    &self.ast, source, &path, mode_q.as_ref(),
+                )?;
+                let (output, character_map) = self.streaming_output(mode)?;
+                return Ok(ResultTree { children: nodes, output, character_map, secondary: Vec::new() });
+            }
+        }
         let mut sp = match records {
             RecordSelector::Depth(d) => ByteStreamParser::new(source)?.emit_at_depth(d),
             RecordSelector::Path(p)  => ByteStreamParser::new(source)?.emit_at_path(p),
         };
         self.run_records(mode, || sp.next().map_err(XsltError::from))
+    }
+
+    /// Resolve a mode name (lexical QName) to its expanded form, matching
+    /// the compiler's resolution so it compares equal to template modes.
+    fn resolve_mode(&self, mode: Option<&str>) -> Option<QName> {
+        let raw = mode?;
+        Some(match raw.split_once(':') {
+            Some((p, l)) => QName {
+                prefix: Some(p.to_string()),
+                local:  l.to_string(),
+                uri:    self.ast.namespaces.get(p).cloned().unwrap_or_default(),
+            },
+            None => QName { prefix: None, local: raw.to_string(), uri: String::new() },
+        })
+    }
+
+    /// The stylesheet's serialization settings (output definition +
+    /// character maps), recovered via a probe apply over an empty
+    /// document — used to wrap streamed results consistently with a
+    /// normal apply.
+    fn streaming_output(&self, mode: Option<&str>) -> Result<(OutputSpec, Vec<(char, String)>), XsltError> {
+        let probe = sup_xml_core::parse_str("<_/>", &sup_xml_core::ParseOptions::default())
+            .map_err(XsltError::from)?;
+        let rt = self.apply_with_params_initial_and_mode(
+            &probe, &crate::loader::NullLoader, None, &[], None, mode,
+        )?;
+        Ok((rt.output, rt.character_map))
     }
 
     /// Drive a record source — `next_record` yields one materialized record
@@ -178,27 +222,15 @@ impl Stylesheet {
         }
 
         // With no records the loop never observed the stylesheet's
-        // serialization settings; recover them with a probe apply over an
-        // empty document so an empty stream serializes the same way a
-        // populated one would (e.g. honoring omit-xml-declaration).
+        // serialization settings; recover them so an empty stream
+        // serializes the same way a populated one would (e.g. honoring
+        // omit-xml-declaration).
         let output = match output {
             Some(o) => o,
             None => {
-                let probe = sup_xml_core::parse_str(
-                    "<_/>",
-                    &sup_xml_core::ParseOptions::default(),
-                )
-                .map_err(XsltError::from)?;
-                let mut rt = self.apply_with_params_initial_and_mode(
-                    &probe,
-                    &crate::loader::NullLoader,
-                    None,
-                    &[],
-                    None,
-                    mode,
-                )?;
-                character_map = std::mem::take(&mut rt.character_map);
-                rt.output
+                let (o, cm) = self.streaming_output(mode)?;
+                character_map = cm;
+                o
             }
         };
 

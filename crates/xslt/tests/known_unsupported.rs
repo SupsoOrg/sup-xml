@@ -47,18 +47,16 @@ use sup_xml_xslt::Stylesheet;
 
 /// Static streamability analysis is wired: a `streamable="yes"`
 /// source-document whose body is not guaranteed-streamable is rejected
-/// at compile time (XSLT 3.0 §19, XTSE3430).  Here the body selects via
-/// the absolute path `/items/item` — the leading `/` is climbing and a
-/// downward step from it roams, so the selection leaves the streaming
-/// window.  The idiomatic streamable form drops the slash (see
-/// `streaming_source_document_relative_path_passes_analysis`).
+/// at compile time (XSLT 3.0 §19, XTSE3430).  A sibling-axis selection
+/// (`following-sibling::`) leaves the streaming window, so it is
+/// rejected.
 #[test]
-fn streaming_source_document_absolute_path_rejected() {
+fn streaming_source_document_roaming_axis_rejected() {
     let xsl = r#"<xsl:stylesheet version="3.0"
                                 xmlns:xsl="http://www.w3.org/1999/XSL/Transform">
         <xsl:template name="main">
             <xsl:source-document href="huge.xml" streamable="yes">
-                <xsl:apply-templates select="/items/item"/>
+                <out><xsl:value-of select="following-sibling::x"/></out>
             </xsl:source-document>
         </xsl:template>
     </xsl:stylesheet>"#;
@@ -69,25 +67,24 @@ fn streaming_source_document_absolute_path_rejected() {
         "expected an XTSE3430 streamability rejection, got: {err}");
 }
 
-/// The streamable form of the same transform — a relative downward
-/// selection — passes static analysis and compiles.  Streamed
-/// *execution* is still pending, so applying it (which would load
-/// `huge.xml`) is not exercised here; this test pins the analyzer's
-/// accept side.  When streamed execution lands, replace this with real
-/// W3C-suite coverage (tests/insn/source-document/ etc.).
+/// Guaranteed-streamable source-document bodies compile — both a
+/// relative downward selection and an absolute one (rooted at the
+/// streamed document node, an absolute downward path is striding, as the
+/// W3C streaming tests exercise via `/BOOKLIST/...`).
 #[test]
-fn streaming_source_document_relative_path_passes_analysis() {
-    let xsl = r#"<xsl:stylesheet version="3.0"
+fn streaming_source_document_downward_paths_compile() {
+    for select in ["items/item", "/items/item", "//item"] {
+        let xsl = format!(r#"<xsl:stylesheet version="3.0"
                                 xmlns:xsl="http://www.w3.org/1999/XSL/Transform">
-        <xsl:template name="main">
-            <xsl:source-document href="huge.xml" streamable="yes">
-                <xsl:apply-templates select="items/item"/>
-            </xsl:source-document>
-        </xsl:template>
-    </xsl:stylesheet>"#;
-
-    Stylesheet::compile_str(xsl)
-        .expect("a guaranteed-streamable source-document body must compile");
+            <xsl:template name="main">
+                <xsl:source-document href="huge.xml" streamable="yes">
+                    <xsl:apply-templates select="{select}"/>
+                </xsl:source-document>
+            </xsl:template>
+        </xsl:stylesheet>"#);
+        Stylesheet::compile_str(&xsl)
+            .unwrap_or_else(|e| panic!("select={select:?} must compile: {e}"));
+    }
 }
 
 /// `fn:stream-available($uri)` per XSLT 3.0 — returns true iff the

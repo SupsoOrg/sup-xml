@@ -37,11 +37,10 @@
 //!
 //! 1. A downward axis step (`child`, `descendant`) is streamable only
 //!    from a striding/crawling context; from a climbing or roaming
-//!    context it becomes roaming.  The leading `/` of an absolute path
-//!    is *climbing* (the document root is reached upward through the
-//!    ancestor stack), so any absolute path with a downward step —
-//!    `/a/b`, `//b` — is roaming and rejected.  The same selection
-//!    written relative to the streamed context — `a/b` — stays striding.
+//!    context it becomes roaming.  An absolute path is rooted at the
+//!    streamed document node, so `/a/b` and `//b` are downward
+//!    selections from the root — striding/crawling, streamable — the
+//!    same as the relative `a/b` evaluated at the document node.
 //! 2. A construct may have **at most one consuming operand**, because
 //!    the stream can be walked only once.  Two operands that each read
 //!    the descendants of the same context node make the construct
@@ -152,16 +151,19 @@ pub(crate) fn apply_axis(ctx: Posture, axis: Axis) -> Ps {
 }
 
 /// The starting posture of a location path's first step.  Relative paths
-/// start from the context posture; absolute paths start from the root
-/// expression, which is *climbing* (the document node is reached upward
-/// through the ancestor stack) unless the context is itself grounded.
+/// start from the context posture; absolute paths start from the
+/// document root.  In a streamed context the root is the streamed
+/// document node, so an absolute downward path (`/a/b`, `//x`) is a
+/// downward selection from it — *striding* — exactly as the W3C
+/// streaming tests use `xsl:source-document` bodies that aggregate over
+/// `/BOOKLIST/...`.  (A grounded context keeps its grounded root.)
 fn path_root_posture(path: &LocationPath, ctx: Posture) -> Posture {
     match path {
         LocationPath::Relative(_) => ctx,
         LocationPath::Absolute(_) => match ctx {
             Posture::Grounded => Posture::Grounded,
             Posture::Roaming => Posture::Roaming,
-            _ => Posture::Climbing,
+            _ => Posture::Striding,
         },
     }
 }
@@ -526,18 +528,21 @@ mod tests {
     }
 
     #[test]
-    fn absolute_path_with_descent_is_rejected() {
-        // `/items/item` — leading `/` is climbing, child from climbing
-        // roams.  The load-bearing case.
-        assert!(!streamable("/items/item"));
-        assert!(!streamable("//item"));
+    fn absolute_downward_path_is_striding() {
+        // Rooted at the streamed document node, `/items/item` is a
+        // downward selection — streamable, like the W3C source-document
+        // tests that aggregate over `/BOOKLIST/...`.
+        let r = ps("/items/item", Posture::Striding);
+        assert_eq!(r.posture, Posture::Striding);
+        assert!(r.is_streamable());
+        // `//item` (descendant from root) is crawling — also streamable.
+        assert!(streamable("//item"));
     }
 
     #[test]
-    fn bare_root_is_climbing_motionless() {
+    fn bare_root_is_streamable() {
+        // `/` selects the streamed document node itself.
         let r = ps("/", Posture::Striding);
-        assert_eq!(r.posture, Posture::Climbing);
-        assert_eq!(r.sweep, Sweep::Motionless);
         assert!(r.is_streamable());
     }
 
