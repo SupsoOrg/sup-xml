@@ -8711,16 +8711,24 @@ fn eval_function<I: DocIndexLike>(name: &str, args: &[Expr], ctx: &EvalCtx<'_>, 
                 _ => Ok(Value::String(local.to_string())),
             }
         }
-        // XPath 2.0 §15.2.4 normalize-unicode($s [, $form]).  We
-        // don't carry a Unicode normalization table; emit the input
-        // unchanged for any normalisation form except an unknown one
-        // (where the spec wants an error).
+        // XPath 2.0 §15.2.4 normalize-unicode($s [, $form]).  The
+        // 1-argument form normalizes to NFC; the 2-argument form names
+        // the normalization form (case-insensitive, whitespace-trimmed).
+        // An unrecognized form is FOCH0003.
         "normalize-unicode" => {
             if args.is_empty() || args.len() > 2 {
                 return Err(xpath_err("normalize-unicode() takes 1 or 2 arguments"));
             }
             let s = value_to_string_with(&arg!(0), idx, ctx.bindings);
-            Ok(Value::String(s))
+            let form = if args.len() == 2 {
+                let name = value_to_string_with(&arg!(1), idx, ctx.bindings);
+                crate::normalize::NormForm::parse(&name).ok_or_else(|| xpath_err(format!(
+                    "normalize-unicode(): unsupported normalization form '{}' (FOCH0003)",
+                    name.trim())))?
+            } else {
+                crate::normalize::NormForm::Nfc
+            };
+            Ok(Value::String(crate::normalize::normalize(&s, form)))
         }
         "type-available" => {
             // XSLT 2.0 §16.5.6 — `type-available(name)` answers true

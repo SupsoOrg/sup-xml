@@ -1002,6 +1002,11 @@ pub struct OutputSpec {
     /// stylesheet; their `output-character` substitutions are
     /// applied to character data during serialization.
     pub use_character_maps:     Vec<QName>,
+    /// XSLT 2.0 §20: `normalization-form="NFC|NFD|NFKC|NFKD|none|…"`.
+    /// When set to a normalization form, all serialized character data
+    /// (text content and attribute values) is normalized to that form;
+    /// `none` (the default) leaves it unchanged.
+    pub normalization_form:     Option<String>,
 }
 
 /// `xsl:output standalone="yes|no|omit"` (XSLT 2.0 §20).  Both

@@ -72,6 +72,22 @@ impl ResultTree {
             &self.children
         };
 
+        // normalization-form (XSLT 2.0 §20): normalize all character data
+        // (text content + attribute values) to the requested Unicode form
+        // before serializing.  `none` (the default) is a no-op.
+        let normalized;
+        let children: &[ResultNode] = match self.output.normalization_form.as_deref()
+            .and_then(sup_xml_core::normalize::NormForm::parse)
+            .filter(|f| *f != sup_xml_core::normalize::NormForm::None)
+        {
+            Some(form) => {
+                normalized = children.iter()
+                    .map(|n| normalize_result_node(n, form)).collect::<Vec<_>>();
+                &normalized
+            }
+            None => children,
+        };
+
         let mut out = match method {
             "html"  => serialize_html(children, &self.output, indent, escape_uri),
             "text"  => serialize_text(children),
@@ -444,6 +460,36 @@ fn escape_attr_with_map(
 /// `%HH`-escaped result is then passed through ordinary attribute
 /// escaping so reserved markup characters are still protected.
 #[allow(clippy::too_many_arguments)]
+/// Deep-copy `node`, normalizing all character data (text, attribute
+/// values, comment / PI data) to Unicode `form` — the
+/// `normalization-form` serialization parameter (XSLT 2.0 §20).
+fn normalize_result_node(node: &ResultNode, form: sup_xml_core::normalize::NormForm)
+    -> ResultNode
+{
+    use sup_xml_core::normalize::normalize;
+    match node {
+        ResultNode::Element { name, namespaces, attributes, children, schema_type, attr_types } => {
+            ResultNode::Element {
+                name: name.clone(),
+                namespaces: namespaces.clone(),
+                attributes: attributes.iter()
+                    .map(|(n, v)| (n.clone(), normalize(v, form))).collect(),
+                children: children.iter().map(|c| normalize_result_node(c, form)).collect(),
+                schema_type: schema_type.clone(),
+                attr_types: attr_types.clone(),
+            }
+        }
+        ResultNode::Text { content, dose } =>
+            ResultNode::Text { content: normalize(content, form), dose: *dose },
+        ResultNode::Comment(s) => ResultNode::Comment(normalize(s, form)),
+        ResultNode::ProcessingInstruction { target, data } =>
+            ResultNode::ProcessingInstruction {
+                target: target.clone(), data: normalize(data, form) },
+        ResultNode::Attribute { name, value } =>
+            ResultNode::Attribute { name: name.clone(), value: normalize(value, form) },
+    }
+}
+
 fn render_attr_value(
     element:    &QName,
     attr:       &QName,
@@ -458,7 +504,8 @@ fn render_attr_value(
         && is_uri_attribute(&element.local.to_ascii_lowercase(),
                             &attr.local.to_ascii_lowercase())
     {
-        escape_attr_with_map(&escape_html_uri(value), xml_11, enc_cap, cmap)
+        escape_attr_with_map(
+            &escape_html_uri(&sup_xml_core::normalize::nfc(value)), xml_11, enc_cap, cmap)
     } else {
         escape_attr_with_map(value, xml_11, enc_cap, cmap)
     }

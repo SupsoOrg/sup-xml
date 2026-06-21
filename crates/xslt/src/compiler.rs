@@ -4210,6 +4210,7 @@ fn compile_output(node: &Node, allow_avt: bool) -> Result<OutputSpec, XsltError>
                      normalization form (SESU0011)"
                 )));
             }
+            out.normalization_form = Some(v.to_string());
         }
         // The omit-xml-declaration / standalone / undeclare-prefixes
         // consistency rules below govern the XML serialization method

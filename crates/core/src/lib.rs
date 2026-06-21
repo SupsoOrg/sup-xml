@@ -20,6 +20,7 @@ pub mod parser;
 pub mod serializer;
 pub mod stream_parser;
 pub mod streaming_reader;
+pub mod normalize;
 pub mod ns_helpers;
 pub mod reader;
 pub mod regex;

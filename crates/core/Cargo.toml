@@ -79,6 +79,12 @@ regex = "1"
 # `std::time::SystemTime` and is converted to `DateTime<Utc>`
 # manually.
 chrono = { version = "0.4", default-features = false, features = ["std"] }
+# Unicode normalization (NFC/NFD/NFKC/NFKD) for `fn:normalize-unicode`,
+# the `normalization-form` serialization parameter, and NFC-folding of
+# URI attribute values under the html/xhtml `escape-uri-attributes`
+# rule.  Single small, unsafe-free transitive dep (`tinyvec`); embeds
+# the UCD-derived normalization tables.
+unicode-normalization = "0.1"
 # Append-only vector with stable element references.  Powers the
 # XSLT result-tree-fragment side store in `xpath::context::DocIndex`:
 # RTF subtrees are constructed during evaluation through a `&DocIndex`,

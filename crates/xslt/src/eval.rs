@@ -3506,6 +3506,7 @@ fn overlay_output_into(base: &mut crate::ast::OutputSpec, ov: &crate::ast::Outpu
     if ov.doctype_system.is_some() { base.doctype_system = ov.doctype_system.clone(); }
     if ov.html_version.is_some() { base.html_version = ov.html_version; }
     if ov.version.is_some() { base.version = ov.version.clone(); }
+    if ov.normalization_form.is_some() { base.normalization_form = ov.normalization_form.clone(); }
     // cdata-section-elements accumulate across xsl:output and
     // xsl:result-document (XSLT 2.0 §20) — union, don't replace.
     base.cdata_section_elements.extend(ov.cdata_section_elements.iter().cloned());
