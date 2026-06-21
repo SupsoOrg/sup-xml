@@ -3448,7 +3448,7 @@ fn compile_template(node: &Node) -> Result<Template, XsltError> {
             // leading XPath 2.0 comments `(: ... :)` — those aren't
             // grouping parens, just whitespace.
             let leading = strip_leading_xpath_comments_and_space(s.as_ref());
-            if leading.starts_with('(') {
+            if leading.starts_with('(') && !is_xslt_3_0_compile() {
                 return Err(XsltError::InvalidStylesheet(format!(
                     "xsl:template match='{s}' uses a parenthesised \
                      top-level expression, which is not allowed in a \
@@ -8276,7 +8276,11 @@ fn ensure_pattern_shape(expr: &Expr, who: &str) -> Result<(), XsltError> {
                 // Parenthesised general expressions, sequences, and
                 // unions inside a path (e.g. `/(a|b)` or `//(bar|baz)`)
                 // aren't admitted by the grammar — XPST0003 / XPST0017.
-                Expr::Sequence(_) | Expr::Union(_, _) | Expr::Range(_, _) => {
+                // XSLT 3.0 §5.5.3 admits a parenthesised pattern as a step
+                // (`a/(b|c)`); XSLT 2.0 does not.
+                Expr::Sequence(_) | Expr::Union(_, _) | Expr::Range(_, _)
+                    if !is_xslt_3_0_compile() =>
+                {
                     return Err(XsltError::InvalidStylesheet(format!(
                         "{who} contains a parenthesised expression in a path \
                          step that the pattern grammar doesn't permit (XPST0003)"
