@@ -149,12 +149,16 @@ pub fn serialize_xml(
                 let _ = writeln!(out, r#"<!DOCTYPE {root} SYSTEM "{dt_sys}">"#);
             }
         }
-    } else if xhtml && output.html_version.is_some_and(|v| v >= 5.0)
-        && first_element_name(children).is_some()
-    {
+    } else if xhtml && output.html_version.is_some_and(|v| v >= 5.0) {
         // XSLT 3.0 §26.2 — html-version=5 on the xhtml method emits the
-        // HTML5 doctype (no system/public identifier).
-        out.push_str("<!DOCTYPE html>\n");
+        // HTML5 doctype (no system/public identifier), but only when the
+        // root element is an `html` element.  The document type name
+        // echoes the root's local name (and case), dropping any prefix.
+        if let Some(local) = first_element_local(children)
+            .filter(|l| l.eq_ignore_ascii_case("html"))
+        {
+            let _ = writeln!(out, "<!DOCTYPE {local}>");
+        }
     }
     // `indent="yes"` (XSLT 1.0 §16.1): pretty-print element-only
     // content. Mixed content (any text-node child) suppresses
@@ -184,6 +188,14 @@ fn should_emit_xml_decl(output: &OutputSpec) -> bool {
 fn first_element_name(nodes: &[ResultNode]) -> Option<String> {
     nodes.iter().find_map(|n| match n {
         ResultNode::Element { name, .. } => Some(name.to_qname_string()),
+        _ => None,
+    })
+}
+
+/// The local name of the first top-level element, ignoring any prefix.
+fn first_element_local(nodes: &[ResultNode]) -> Option<String> {
+    nodes.iter().find_map(|n| match n {
+        ResultNode::Element { name, .. } => Some(name.local.clone()),
         _ => None,
     })
 }
