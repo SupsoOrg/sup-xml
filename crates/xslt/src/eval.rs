@@ -2608,6 +2608,36 @@ pub fn apply_stylesheet_full_with_params_and_initial(
         source_types: source_types.as_ref(),
     };
 
+    // XSLT 3.0 §6.2 / XTTE0590 — the global context item (the document
+    // the stylesheet is applied to) must match the type declared by
+    // xsl:global-context-item.  Checked before global variables are bound,
+    // since a global may reference the context.
+    if let Some(gci) = state.style.global_context_items.first() {
+        if let Some(as_t) = &gci.as_type {
+            let fail = || XsltError::Xpath(
+                sup_xml_core::xpath::eval::xpath_err(format!(
+                    "global context item does not match the required type \
+                     '{as_t}' declared by xsl:global-context-item (XTTE0590)"))
+                .with_xpath_code("XTTE0590"));
+            if let Some(st) = parse_as_atomic_type(as_t) {
+                use sup_xml_core::xpath::ast::ItemType;
+                let node_kind = !matches!(st.item, ItemType::Atomic(_) | ItemType::Any);
+                if node_kind && !node_matches_kind_test(&st.item, 0, state.idx) {
+                    return Err(fail());
+                }
+            }
+            // `document-node(element(NAME))` additionally constrains the
+            // document element's name, which the kind-test above (mapped to
+            // a bare document node) does not capture.
+            if let Some(want) = doc_element_constraint(as_t) {
+                let elem = state.idx.children(0).iter()
+                    .find(|&&c| state.idx.is_element(c)).copied();
+                let ok = elem.is_some_and(|e| state.idx.local_name(e) == want);
+                if !ok { return Err(fail()); }
+            }
+        }
+    }
+
     // Stylesheet global variables / params (very partial — proper
     // ordering / circular-reference detection lands later).
     // XSLT 1.0 §12.3 import precedence — the main stylesheet's
@@ -2747,7 +2777,12 @@ pub fn apply_stylesheet_full_with_params_and_initial(
     // document (after global variables are bound, before any template
     // runs) so accumulator-before() / accumulator-after() can read them.
     if !state.style.accumulators.is_empty() {
+        // In a streamed transform, carry each streamable accumulator's
+        // running value in from the previous record before the walk and
+        // out after it, so it spans the stream (XSLT 3.0 §18.2).
+        seed_streamed_accumulators(&mut state);
         precompute_accumulators(&mut state, 0)?;
+        capture_streamed_accumulators(&state);
     }
     if let Some(name) = initial_template {
         // The harness may pass either an already-expanded Clark-form
@@ -3076,6 +3111,11 @@ fn run_template_body(
     // required types over an untyped node always match under the
     // function-conversion rules, so they are not enforced here.
     if let Some(as_t) = &template.context_item_as {
+        let fail = || XsltError::Xpath(
+            sup_xml_core::xpath::eval::xpath_err(format!(
+                "context item does not match the required type '{as_t}' \
+                 declared by xsl:context-item (XTTE0590)"))
+            .with_xpath_code("XTTE0590"));
         if let Some(st) = parse_as_atomic_type(as_t) {
             use sup_xml_core::xpath::ast::ItemType;
             let node_kind = !matches!(st.item, ItemType::Atomic(_) | ItemType::Any);
@@ -3083,11 +3123,16 @@ fn run_template_body(
                 && (in_atomic_for_each()
                     || !node_matches_kind_test(&st.item, ctx_node, state.idx))
             {
-                return Err(XsltError::Xpath(
-                    sup_xml_core::xpath::eval::xpath_err(format!(
-                        "context item does not match the required type '{as_t}' \
-                         declared by xsl:context-item (XTTE0590)"))
-                    .with_xpath_code("XTTE0590")));
+                return Err(fail());
+            }
+        }
+        // `document-node(element(NAME))` also constrains the document
+        // element's name (the kind test alone treats it as a bare document).
+        if let Some(want) = doc_element_constraint(as_t) {
+            let elem = state.idx.children(ctx_node).iter()
+                .find(|&&c| state.idx.is_element(c)).copied();
+            if !elem.is_some_and(|e| state.idx.local_name(e) == want) {
+                return Err(fail());
             }
         }
     }
@@ -3210,6 +3255,15 @@ enum IterateControl {
 
 thread_local! {
     static ITERATE_CONTROL: std::cell::RefCell<Option<IterateControl>> =
+        const { std::cell::RefCell::new(None) };
+    /// XSLT 3.0 §18.2 streaming — while a streamed transform processes
+    /// records one at a time (see [`crate::stream::engine`]), this holds
+    /// the running value of each `streamable` accumulator, keyed by the
+    /// accumulator's expanded name, so the value carries across records
+    /// rather than restarting from `initial-value` per record.  `None`
+    /// outside a streamed run, in which case the ordinary per-document
+    /// precompute applies unchanged.
+    static STREAM_ACCUM: std::cell::RefCell<Option<HashMap<String, Value>>> =
         const { std::cell::RefCell::new(None) };
     /// XPath 2.0 §2.1.2 / XSLT 2.0 §10.3 — true while evaluating an
     /// `xsl:function` body, where the focus is *undefined* (no context
@@ -6282,6 +6336,19 @@ pub(crate) fn parse_as_atomic_type(
 /// local-name), `attribute()` requires Attribute, etc.  Atomic
 /// kind tests on a node always answer false here — callers that
 /// need atomization handle it on their own pre-check path.
+/// Extract the constrained element name from a `document-node(element(NAME))`
+/// sequence type, e.g. `"codd"`.  Returns `None` for a bare
+/// `document-node()`, a wildcard, or any other type — those impose no
+/// element-name constraint on the document.
+fn doc_element_constraint(as_t: &str) -> Option<String> {
+    let inner = as_t.trim()
+        .strip_prefix("document-node(")?.strip_suffix(')')?.trim()
+        .strip_prefix("element(")?.strip_suffix(')')?.trim();
+    let name = inner.split(',').next()?.trim();
+    if name.is_empty() || name == "*" { return None; }
+    Some(name.rsplit_once(':').map(|(_, l)| l).unwrap_or(name).to_string())
+}
+
 fn node_matches_kind_test<I: sup_xml_core::xpath::DocIndexLike>(
     item: &sup_xml_core::xpath::ast::ItemType,
     id:   sup_xml_core::xpath::NodeId,
@@ -8043,6 +8110,60 @@ fn build_rtf_nodes(
 
 /// Compute every declared `xsl:accumulator` over the document rooted
 /// at `root`, caching the before/after value at each node.
+/// Begin a streamed transform's accumulator carry: subsequent per-record
+/// applies thread each `streamable` accumulator's running value across
+/// records instead of resetting it.  Paired with
+/// [`end_streamed_accumulators`].  Called by [`crate::stream::engine`].
+pub(crate) fn begin_streamed_accumulators() {
+    STREAM_ACCUM.with(|c| *c.borrow_mut() = Some(HashMap::new()));
+}
+
+/// End a streamed transform's accumulator carry, discarding the running
+/// values.  After this, applies return to ordinary per-document
+/// accumulator semantics.
+pub(crate) fn end_streamed_accumulators() {
+    STREAM_ACCUM.with(|c| *c.borrow_mut() = None);
+}
+
+/// Seed this record's accumulators from the carried running values so a
+/// streamable accumulator continues across records (a no-op outside a
+/// streamed run).  Must run before [`precompute_accumulators`].
+fn seed_streamed_accumulators(state: &mut EvalState) {
+    STREAM_ACCUM.with(|c| {
+        let carry = c.borrow();
+        let Some(vals) = carry.as_ref() else { return };
+        for decl in state.style.accumulators.iter().filter(|d| d.streamable) {
+            let key = qname_key(&decl.name);
+            if let Some(v) = vals.get(&key) {
+                // A pre-seeded entry makes precompute start this record's
+                // walk from the carried value rather than `initial-value`.
+                state.accumulators.insert(key, AccumulatorData {
+                    before:  HashMap::new(),
+                    after:   HashMap::new(),
+                    initial: v.clone(),
+                });
+            }
+        }
+    });
+}
+
+/// Capture this record's post-walk accumulator values into the carry so
+/// the next record continues from them (a no-op outside a streamed run).
+/// Must run after [`precompute_accumulators`], which records the final
+/// running value as the document node's `after` value.
+fn capture_streamed_accumulators(state: &EvalState) {
+    STREAM_ACCUM.with(|c| {
+        let mut carry = c.borrow_mut();
+        let Some(vals) = carry.as_mut() else { return };
+        for decl in state.style.accumulators.iter().filter(|d| d.streamable) {
+            let key = qname_key(&decl.name);
+            if let Some(v) = state.accumulators.get(&key).and_then(|d| d.after.get(&0)) {
+                vals.insert(key, v.clone());
+            }
+        }
+    });
+}
+
 fn precompute_accumulators(state: &mut EvalState, root: NodeId) -> Result<()> {
     if !state.accumulator_roots.insert(root) {
         return Ok(()); // already precomputed for this document

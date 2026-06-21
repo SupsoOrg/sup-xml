@@ -70,7 +70,7 @@ pub use serializer::{
     serialize_with, SerializeOptions,
 };
 pub use output::OutputCharset;
-pub use stream_parser::StreamParser;
+pub use stream_parser::{ByteStreamParser, StreamParser};
 pub use streaming_reader::{XmlByteStreamReader, DEFAULT_BUFFER_SIZE, HUGE_BUFFER_SIZE};
 pub use reader::{Attr, Attrs, Event, EventInto, XmlReader, unescape};
 pub use selector::{ParseSelectorError, Selector};

@@ -12,6 +12,7 @@
 //! pass it to `Stylesheet::compile_str_with_loader`.
 
 use std::collections::HashMap;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use crate::error::XsltError;
@@ -29,6 +30,19 @@ pub trait Loader {
     /// string.  Implementations should resolve `href` against
     /// `base` when `href` is relative.
     fn load(&self, href: &str, base: Option<&str>) -> Result<String, XsltError>;
+
+    /// Open `href` as a byte stream for incremental (streaming) reading.
+    ///
+    /// Used by `Stylesheet::apply_streaming` to feed `xsl:source-document
+    /// streamable="yes"` without materializing the whole document.  The
+    /// default implementation calls [`Self::load`] and wraps the result —
+    /// so it does *not* bound source memory; a loader that can read lazily
+    /// (e.g. [`FilesystemLoader`], which opens the file) should override
+    /// this to return a reader that pulls on demand.
+    fn open(&self, href: &str, base: Option<&str>) -> Result<Box<dyn Read + '_>, XsltError> {
+        let text = self.load(href, base)?;
+        Ok(Box::new(std::io::Cursor::new(text.into_bytes())))
+    }
 
     /// Load `href`'s contents and return them as a parsed
     /// [`sup_xml_tree::dom::Document`].  Default implementation
@@ -187,6 +201,24 @@ impl Loader for FilesystemLoader {
         std::fs::read_to_string(&path).map_err(|e| XsltError::InvalidStylesheet(
             format!("failed to load '{href}' (resolved to '{}'): {e}", path.display()),
         ))
+    }
+
+    /// Open the on-disk file lazily so streaming reads pull from disk on
+    /// demand — source memory stays bounded regardless of file size.
+    /// Enforces the same `allowed_roots` boundary as [`Self::load`].
+    fn open(&self, href: &str, base: Option<&str>) -> Result<Box<dyn Read + '_>, XsltError> {
+        let path = self.resolve_path(href, base);
+        if !self.is_within_allowed_root(&path) {
+            return Err(XsltError::InvalidStylesheet(format!(
+                "refusing to open '{href}' (resolved to '{}'): \
+                 path is not within the loader's allowed roots",
+                path.display()
+            )));
+        }
+        let file = std::fs::File::open(&path).map_err(|e| XsltError::InvalidStylesheet(
+            format!("failed to open '{href}' (resolved to '{}'): {e}", path.display()),
+        ))?;
+        Ok(Box::new(std::io::BufReader::new(file)))
     }
 
     fn resolve(&self, href: &str, base: Option<&str>) -> Result<String, XsltError> {

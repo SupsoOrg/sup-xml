@@ -49,6 +49,8 @@
 //! assert_eq!(titles, vec!["a", "b"]);
 //! ```
 
+use std::io::Read;
+
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::error::Result;
@@ -57,6 +59,8 @@ use crate::ns_helpers::{
 };
 use crate::options::ParseOptions;
 use crate::reader::{Attr, EventInto, XmlReader};
+use crate::streaming_reader::{XmlByteStreamReader, DEFAULT_BUFFER_SIZE};
+use crate::xml_bytes_reader::BytesEvent;
 use sup_xml_tree::dom::{Document, DocumentBuilder, Namespace, Node};
 
 // ── public type ─────────────────────────────────────────────────────────────
@@ -65,6 +69,10 @@ use sup_xml_tree::dom::{Document, DocumentBuilder, Namespace, Node};
 pub struct StreamParser<'src> {
     reader:   XmlReader<'src>,
     attr_buf: Vec<Attr<'src>>,
+    /// Reusable scratch for the just-opened element's `(name, value)`
+    /// attribute pairs, owned so the emission state machine in
+    /// [`handle_event`] is independent of the borrowed event payload.
+    scratch:  Vec<(String, String)>,
     emit:     EmitMode,
     state:    State,
 }
@@ -163,6 +171,7 @@ impl<'src> StreamParser<'src> {
         Self {
             reader:   XmlReader::from_str(input),
             attr_buf: Vec::new(),
+            scratch:  Vec::new(),
             emit:     EmitMode::None,
             state:    State::default(),
         }
@@ -172,6 +181,7 @@ impl<'src> StreamParser<'src> {
         Ok(Self {
             reader:   XmlReader::from_bytes(input)?,
             attr_buf: Vec::new(),
+            scratch:  Vec::new(),
             emit:     EmitMode::None,
             state:    State::default(),
         })
@@ -238,158 +248,311 @@ impl<'src> StreamParser<'src> {
     #[allow(clippy::should_implement_trait)]
     pub fn next(&mut self) -> Result<Option<Document>> {
         loop {
-            let event = self.reader.next_into(&mut self.attr_buf)?;
-            match event {
-                EventInto::StartElement { name } => {
-                    let name = name.into_owned();
-                    self.state.sax_depth += 1;
-                    self.state.name_stack.push(name.clone());
-                    validate_qname(&name, "element")?;
-
-                    // ── 1. Open a namespace frame, parse xmlns decls into it. ──
-                    self.state.ns_frames.push(self.state.ns_bindings.len());
-                    // Two-pass over attrs is awkward with the drain pattern, so
-                    // capture them into a small Vec first.  The buffer is reused
-                    // across calls in the next `next_into`.
-                    let attrs: Vec<(String, String)> = self.attr_buf.drain(..)
-                        .map(|a| (a.name.to_owned(), a.value.into_owned()))
-                        .collect();
-                    for (an, av) in &attrs {
-                        if an == "xmlns" {
-                            self.state.ns_bindings.push((None, av.clone()));
-                        } else if let Some(local) = an.strip_prefix("xmlns:") {
-                            validate_xmlns_decl(local, av)?;
-                            if local == "xml" { continue; }  // legal no-op redeclare
-                            self.state.ns_bindings.push((Some(local.to_string()), av.clone()));
-                        }
-                    }
-
-                    // ── 2. Should this element start (or continue) an emission? ──
-                    let starts_emission = self.state.current.is_none() && self.element_matches();
-
-                    if starts_emission {
-                        // Spin up a fresh arena.
-                        let mut emis = Emission {
-                            builder:     DocumentBuilder::new(),
-                            start_depth: self.state.sax_depth,
-                            stack:       Vec::new(),
-                            ns_cache:    FxHashMap::default(),
-                        };
-                        let el_ptr = build_element_with_ns(
-                            &mut emis, &name, &attrs, &self.state.ns_bindings,
-                        )?;
-                        emis.stack.push(el_ptr);
-                        self.state.current = Some(emis);
-                    } else if let Some(emis) = self.state.current.as_mut() {
-                        let el_ptr = build_element_with_ns(
-                            emis, &name, &attrs, &self.state.ns_bindings,
-                        )?;
-                        // SAFETY: pointers point into emis.builder (still alive).
-                        let parent: &Node<'_> = unsafe { unerase(*emis.stack.last().unwrap()) };
-                        let el:     &Node<'_> = unsafe { unerase(el_ptr) };
-                        emis.builder.append_child(parent, el);
-                        emis.stack.push(el_ptr);
-                    } else {
-                        // Outside any emission — still validate the element's QName
-                        // namespace resolution (so undeclared prefixes are caught early).
-                        validate_element_ns(&name, &attrs, &self.state.ns_bindings)?;
-                    }
-                }
-
-                EventInto::EndElement { name: _ } => {
-                    self.state.name_stack.pop();
-                    // Pop this element's namespace frame.
-                    if let Some(frame_start) = self.state.ns_frames.pop() {
-                        self.state.ns_bindings.truncate(frame_start);
-                    }
-                    let closed_depth = self.state.sax_depth;
-                    self.state.sax_depth -= 1;
-
-                    if let Some(emis) = self.state.current.as_mut() {
-                        if emis.start_depth == closed_depth {
-                            // Closing the emission anchor — ship it.
-                            let emis = self.state.current.take().unwrap();
-                            // SAFETY: stack[0] is the root of this subtree, still in `emis.builder`.
-                            let root: &Node<'_> = unsafe { unerase(emis.stack[0]) };
-                            emis.builder.set_root(root);
-                            return Ok(Some(emis.builder.build()));
-                        } else {
-                            emis.stack.pop();
-                        }
-                    }
-                }
-
-                EventInto::Text(t) => {
-                    if let Some(emis) = self.state.current.as_mut() {
-                        let parent_ptr = *emis.stack.last().unwrap();
-                        let s    = emis.builder.alloc_str(&t);
-                        let node = emis.builder.new_text(s);
-                        // SAFETY: parent_ptr points into emis.builder's arena.
-                        let parent: &Node<'_> = unsafe { unerase(parent_ptr) };
-                        emis.builder.append_child(parent, node);
-                    }
-                }
-                EventInto::CData(t) => {
-                    if let Some(emis) = self.state.current.as_mut() {
-                        let parent_ptr = *emis.stack.last().unwrap();
-                        let s    = emis.builder.alloc_str(&t);
-                        let node = emis.builder.new_cdata(s);
-                        let parent: &Node<'_> = unsafe { unerase(parent_ptr) };
-                        emis.builder.append_child(parent, node);
-                    }
-                }
-                EventInto::Comment(t) => {
-                    if let Some(emis) = self.state.current.as_mut() {
-                        let parent_ptr = *emis.stack.last().unwrap();
-                        let s    = emis.builder.alloc_str(&t);
-                        let node = emis.builder.new_comment(s);
-                        let parent: &Node<'_> = unsafe { unerase(parent_ptr) };
-                        emis.builder.append_child(parent, node);
-                    }
-                }
-                EventInto::Pi { target, content } => {
-                    if let Some(emis) = self.state.current.as_mut() {
-                        let parent_ptr = *emis.stack.last().unwrap();
-                        let t    = emis.builder.alloc_str(&target);
-                        let c    = if content.is_empty() { None } else { Some(&*emis.builder.alloc_str(&content)) };
-                        let node = emis.builder.new_pi(t, c);
-                        let parent: &Node<'_> = unsafe { unerase(parent_ptr) };
-                        emis.builder.append_child(parent, node);
-                    }
-                }
-                EventInto::EntityRef { name } => {
-                    if let Some(emis) = self.state.current.as_mut() {
-                        let parent_ptr = *emis.stack.last().unwrap();
-                        let n  = emis.builder.alloc_str(&name);
-                        // Reconstruct the literal `&name;` source form
-                        // for round-trip serialization.
-                        let lit = format!("&{name};");
-                        let c  = emis.builder.alloc_str(&lit);
-                        let node = emis.builder.new_entity_ref(n, c);
-                        let parent: &Node<'_> = unsafe { unerase(parent_ptr) };
-                        emis.builder.append_child(parent, node);
-                    }
-                }
-
-                EventInto::Eof => return Ok(None),
+            let ev = pull_str(&mut self.reader, &mut self.attr_buf, &mut self.scratch)?;
+            if matches!(ev, SubtreeEvent::Eof) {
+                return Ok(None);
+            }
+            if let Some(doc) = handle_event(&mut self.state, &self.emit, ev, &self.scratch)? {
+                return Ok(Some(doc));
             }
         }
     }
+}
 
-    /// Does the just-opened element (whose name+attrs are already on the state
-    /// stacks / `attr_buf`) satisfy the emit predicate?
-    fn element_matches(&self) -> bool {
-        match &self.emit {
-            EmitMode::None       => false,
-            // Depth(d) emits when post-pop ancestor stack length == d.  At
-            // StartElement time, sax_depth already reflects the just-opened
-            // element, so the element is at depth `sax_depth`.  Its parent
-            // depth (post-pop) is `sax_depth - 1`.  Match when that equals d.
-            EmitMode::Depth(d)   => self.state.sax_depth.saturating_sub(1) == *d,
-            EmitMode::Path(path) => path.len() == self.state.name_stack.len()
-                && self.state.name_stack.iter().zip(path.iter())
-                    .all(|(a, b)| a == b),
-            EmitMode::When(pred) => pred(&self.state.name_stack),
+// ── shared emission state machine ───────────────────────────────────────────
+//
+// The subtree-emission logic is identical whether events come from an
+// in-memory [`XmlReader`] (string source) or the byte-level
+// [`XmlByteStreamReader`] (`io::Read` source).  Each reader is drained by a
+// tiny `pull_*` adapter into a normalized [`SubtreeEvent`], and the shared
+// [`handle_event`] runs the depth/namespace/build machinery.
+
+/// A reader-independent parse event.  Payloads are owned, decoupling the
+/// emission machine from the borrowed event types of the two readers.
+enum SubtreeEvent {
+    Start(String),
+    End,
+    Text(String),
+    CData(String),
+    Comment(String),
+    Pi(String, String),
+    EntityRef(String),
+    Eof,
+}
+
+/// Adapt one [`XmlReader`] event (string source) into a [`SubtreeEvent`],
+/// filling `scratch` with the start element's `(name, value)` attribute pairs.
+fn pull_str<'src>(
+    reader:   &mut XmlReader<'src>,
+    attr_buf: &mut Vec<Attr<'src>>,
+    scratch:  &mut Vec<(String, String)>,
+) -> Result<SubtreeEvent> {
+    scratch.clear();
+    Ok(match reader.next_into(attr_buf)? {
+        EventInto::StartElement { name } => {
+            for a in attr_buf.drain(..) {
+                scratch.push((a.name.to_owned(), a.value.into_owned()));
+            }
+            SubtreeEvent::Start(name.into_owned())
+        }
+        EventInto::EndElement { .. }       => SubtreeEvent::End,
+        EventInto::Text(t)                 => SubtreeEvent::Text(t.into_owned()),
+        EventInto::CData(t)                => SubtreeEvent::CData(t.into_owned()),
+        EventInto::Comment(t)              => SubtreeEvent::Comment(t.into_owned()),
+        EventInto::Pi { target, content }  => SubtreeEvent::Pi(target.into_owned(), content.into_owned()),
+        EventInto::EntityRef { name }      => SubtreeEvent::EntityRef(name.into_owned()),
+        EventInto::Eof                     => SubtreeEvent::Eof,
+    })
+}
+
+/// Adapt one [`XmlByteStreamReader`] event (`io::Read` source) into a
+/// [`SubtreeEvent`], filling `scratch` with the start element's attributes.
+fn pull_bytes<R: Read>(
+    reader:  &mut XmlByteStreamReader<R>,
+    scratch: &mut Vec<(String, String)>,
+) -> Result<SubtreeEvent> {
+    scratch.clear();
+    Ok(match reader.next_event()? {
+        BytesEvent::StartElement(tag) => {
+            let name = bytes_to_string(tag.name())?;
+            for a in tag.attrs() {
+                let a = a?;
+                scratch.push((bytes_to_string(a.name)?, bytes_to_string(&a.value)?));
+            }
+            SubtreeEvent::Start(name)
+        }
+        BytesEvent::EndElement(_) => SubtreeEvent::End,
+        BytesEvent::Text(t)       => SubtreeEvent::Text(bytes_to_string(t.as_bytes())?),
+        BytesEvent::CData(t)      => SubtreeEvent::CData(bytes_to_string(t.as_bytes())?),
+        BytesEvent::Comment(t)    => SubtreeEvent::Comment(bytes_to_string(t.as_bytes())?),
+        BytesEvent::Pi(p)         => SubtreeEvent::Pi(bytes_to_string(p.target())?, bytes_to_string(p.content())?),
+        BytesEvent::EntityRef(e)  => SubtreeEvent::EntityRef(bytes_to_string(e.name())?),
+        BytesEvent::Eof           => SubtreeEvent::Eof,
+    })
+}
+
+fn bytes_to_string(b: &[u8]) -> Result<String> {
+    std::str::from_utf8(b)
+        .map(str::to_owned)
+        .map_err(|_| ns_err("invalid UTF-8 in streamed document".to_string()))
+}
+
+/// Advance the emission state machine by one normalized event.  Returns
+/// `Ok(Some(doc))` when an emission subtree has just completed, `Ok(None)`
+/// to keep pulling.  `attrs` holds the just-opened element's attributes
+/// (only consulted for [`SubtreeEvent::Start`]).
+fn handle_event(
+    state: &mut State,
+    emit:  &EmitMode,
+    ev:    SubtreeEvent,
+    attrs: &[(String, String)],
+) -> Result<Option<Document>> {
+    match ev {
+        SubtreeEvent::Start(name) => {
+            state.sax_depth += 1;
+            state.name_stack.push(name.clone());
+            validate_qname(&name, "element")?;
+
+            // Open a namespace frame, parse xmlns decls into it.
+            state.ns_frames.push(state.ns_bindings.len());
+            for (an, av) in attrs {
+                if an == "xmlns" {
+                    state.ns_bindings.push((None, av.clone()));
+                } else if let Some(local) = an.strip_prefix("xmlns:") {
+                    validate_xmlns_decl(local, av)?;
+                    if local == "xml" { continue; }  // legal no-op redeclare
+                    state.ns_bindings.push((Some(local.to_string()), av.clone()));
+                }
+            }
+
+            let starts_emission = state.current.is_none() && element_matches(emit, state);
+            if starts_emission {
+                let mut emis = Emission {
+                    builder:     DocumentBuilder::new(),
+                    start_depth: state.sax_depth,
+                    stack:       Vec::new(),
+                    ns_cache:    FxHashMap::default(),
+                };
+                let el_ptr = build_element_with_ns(&mut emis, &name, attrs, &state.ns_bindings)?;
+                emis.stack.push(el_ptr);
+                state.current = Some(emis);
+            } else if let Some(emis) = state.current.as_mut() {
+                let el_ptr = build_element_with_ns(emis, &name, attrs, &state.ns_bindings)?;
+                // SAFETY: pointers point into emis.builder (still alive).
+                let parent: &Node<'_> = unsafe { unerase(*emis.stack.last().unwrap()) };
+                let el:     &Node<'_> = unsafe { unerase(el_ptr) };
+                emis.builder.append_child(parent, el);
+                emis.stack.push(el_ptr);
+            } else {
+                // Outside any emission — still validate the element's QName /
+                // namespace resolution (so undeclared prefixes fail fast).
+                validate_element_ns(&name, attrs, &state.ns_bindings)?;
+            }
+            Ok(None)
+        }
+
+        SubtreeEvent::End => {
+            state.name_stack.pop();
+            if let Some(frame_start) = state.ns_frames.pop() {
+                state.ns_bindings.truncate(frame_start);
+            }
+            let closed_depth = state.sax_depth;
+            state.sax_depth -= 1;
+
+            if let Some(emis) = state.current.as_mut() {
+                if emis.start_depth == closed_depth {
+                    // Closing the emission anchor — ship it.
+                    let emis = state.current.take().unwrap();
+                    // SAFETY: stack[0] is this subtree's root, still in emis.builder.
+                    let root: &Node<'_> = unsafe { unerase(emis.stack[0]) };
+                    emis.builder.set_root(root);
+                    return Ok(Some(emis.builder.build()));
+                }
+                emis.stack.pop();
+            }
+            Ok(None)
+        }
+
+        SubtreeEvent::Text(t) => {
+            if let Some(emis) = state.current.as_mut() {
+                let parent_ptr = *emis.stack.last().unwrap();
+                let s    = emis.builder.alloc_str(&t);
+                let node = emis.builder.new_text(s);
+                let parent: &Node<'_> = unsafe { unerase(parent_ptr) };
+                emis.builder.append_child(parent, node);
+            }
+            Ok(None)
+        }
+        SubtreeEvent::CData(t) => {
+            if let Some(emis) = state.current.as_mut() {
+                let parent_ptr = *emis.stack.last().unwrap();
+                let s    = emis.builder.alloc_str(&t);
+                let node = emis.builder.new_cdata(s);
+                let parent: &Node<'_> = unsafe { unerase(parent_ptr) };
+                emis.builder.append_child(parent, node);
+            }
+            Ok(None)
+        }
+        SubtreeEvent::Comment(t) => {
+            if let Some(emis) = state.current.as_mut() {
+                let parent_ptr = *emis.stack.last().unwrap();
+                let s    = emis.builder.alloc_str(&t);
+                let node = emis.builder.new_comment(s);
+                let parent: &Node<'_> = unsafe { unerase(parent_ptr) };
+                emis.builder.append_child(parent, node);
+            }
+            Ok(None)
+        }
+        SubtreeEvent::Pi(target, content) => {
+            if let Some(emis) = state.current.as_mut() {
+                let parent_ptr = *emis.stack.last().unwrap();
+                let t    = emis.builder.alloc_str(&target);
+                let c    = if content.is_empty() { None } else { Some(&*emis.builder.alloc_str(&content)) };
+                let node = emis.builder.new_pi(t, c);
+                let parent: &Node<'_> = unsafe { unerase(parent_ptr) };
+                emis.builder.append_child(parent, node);
+            }
+            Ok(None)
+        }
+        SubtreeEvent::EntityRef(name) => {
+            if let Some(emis) = state.current.as_mut() {
+                let parent_ptr = *emis.stack.last().unwrap();
+                let n  = emis.builder.alloc_str(&name);
+                // Reconstruct the literal `&name;` source form for round-trip.
+                let lit = format!("&{name};");
+                let c  = emis.builder.alloc_str(&lit);
+                let node = emis.builder.new_entity_ref(n, c);
+                let parent: &Node<'_> = unsafe { unerase(parent_ptr) };
+                emis.builder.append_child(parent, node);
+            }
+            Ok(None)
+        }
+
+        SubtreeEvent::Eof => Ok(None),
+    }
+}
+
+/// Does the just-opened element (whose name + ancestors are on `state`'s
+/// stacks) satisfy the emit predicate?
+fn element_matches(emit: &EmitMode, state: &State) -> bool {
+    match emit {
+        EmitMode::None       => false,
+        // Depth(d) emits when post-pop ancestor stack length == d.  At
+        // StartElement time, sax_depth already reflects the just-opened
+        // element, so its parent depth (post-pop) is `sax_depth - 1`.
+        EmitMode::Depth(d)   => state.sax_depth.saturating_sub(1) == *d,
+        EmitMode::Path(path) => path.len() == state.name_stack.len()
+            && state.name_stack.iter().zip(path.iter()).all(|(a, b)| a == b),
+        EmitMode::When(pred) => pred(&state.name_stack),
+    }
+}
+
+/// Streaming pull parser over an [`io::Read`](std::io::Read) source.
+///
+/// The byte-level counterpart of [`StreamParser`]: it pulls bytes from the
+/// reader on demand into a bounded rolling buffer, so neither the source nor
+/// the working set is ever fully resident.  Combined with one-subtree-at-a-
+/// time emission, total memory is bounded by `max(buffer, largest subtree)`
+/// regardless of document size — suitable for multi-gigabyte inputs from a
+/// file or pipe.  The emit-selection API mirrors [`StreamParser`].
+pub struct ByteStreamParser<R: Read> {
+    reader:  XmlByteStreamReader<R>,
+    scratch: Vec<(String, String)>,
+    emit:    EmitMode,
+    state:   State,
+}
+
+impl<R: Read> ByteStreamParser<R> {
+    /// Construct over `read` with the default working-buffer size.
+    pub fn new(read: R) -> Result<Self> {
+        Self::with_buffer_size(read, DEFAULT_BUFFER_SIZE)
+    }
+
+    /// Construct over `read` with an explicit working-buffer size (which also
+    /// caps the largest single XML token — see [`XmlByteStreamReader`]).
+    pub fn with_buffer_size(read: R, buffer_size: usize) -> Result<Self> {
+        Ok(Self {
+            reader:  XmlByteStreamReader::new(read, buffer_size)?,
+            scratch: Vec::new(),
+            emit:    EmitMode::None,
+            state:   State::default(),
+        })
+    }
+
+    /// Emit elements at the given depth (`depth = 1` ⇒ children of the root).
+    pub fn emit_at_depth(mut self, depth: u32) -> Self {
+        self.emit = EmitMode::Depth(depth);
+        self
+    }
+
+    /// Emit elements whose root-anchored ancestor chain matches `path`.
+    pub fn emit_at_path(mut self, path: &[&str]) -> Self {
+        self.emit = EmitMode::Path(path.iter().map(|s| (*s).to_owned()).collect());
+        self
+    }
+
+    /// Emit elements whose ancestor chain satisfies `predicate` (see
+    /// [`StreamParser::emit_when`]).
+    pub fn emit_when<F>(mut self, predicate: F) -> Self
+    where
+        F: Fn(&[String]) -> bool + Send + Sync + 'static,
+    {
+        self.emit = EmitMode::When(Box::new(predicate));
+        self
+    }
+
+    /// Pull the next emitted subtree.  `Ok(Some(doc))` per match, `Ok(None)`
+    /// on EOF, `Err(_)` on parse / I/O error.
+    #[allow(clippy::should_implement_trait)]
+    pub fn next(&mut self) -> Result<Option<Document>> {
+        loop {
+            let ev = pull_bytes(&mut self.reader, &mut self.scratch)?;
+            if matches!(ev, SubtreeEvent::Eof) {
+                return Ok(None);
+            }
+            if let Some(doc) = handle_event(&mut self.state, &self.emit, ev, &self.scratch)? {
+                return Ok(Some(doc));
+            }
         }
     }
 }
@@ -886,5 +1049,84 @@ mod tests {
         assert!(item.root().namespace.get().is_some());
         let id = item.root().attributes().next().unwrap();
         assert!(id.namespace.get().is_none(), "default ns must not apply to unprefixed attrs");
+    }
+
+    // ── ByteStreamParser (io::Read source) ──────────────────────────────
+
+    use std::io::Cursor;
+
+    fn byte_collect_names<R: std::io::Read>(mut sp: ByteStreamParser<R>) -> Vec<String> {
+        let mut out = Vec::new();
+        while let Some(doc) = sp.next().unwrap() {
+            out.push(doc.root().name().to_string());
+        }
+        out
+    }
+
+    #[test]
+    fn byte_path_matches_records() {
+        let xml = "<data><item><name>a</name></item><item><name>b</name></item></data>";
+        let sp = ByteStreamParser::new(Cursor::new(xml.as_bytes().to_vec()))
+            .unwrap()
+            .emit_at_path(&["data", "item"]);
+        assert_eq!(byte_collect_names(sp), vec!["item", "item"]);
+    }
+
+    #[test]
+    fn byte_depth_and_content_match_str_parser() {
+        // The Read path must produce the same subtrees as the &str path.
+        let xml = "<r><a x=\"1\">t1</a><a x=\"2\">t2</a></r>";
+        let str_doc = {
+            let mut sp = StreamParser::from_str(xml).emit_at_depth(1);
+            let mut v = Vec::new();
+            while let Some(d) = sp.next().unwrap() {
+                v.push(d.root().text_content().unwrap_or_default().to_string());
+            }
+            v
+        };
+        let byte_doc = {
+            let mut sp = ByteStreamParser::new(Cursor::new(xml.as_bytes().to_vec()))
+                .unwrap()
+                .emit_at_depth(1);
+            let mut v = Vec::new();
+            while let Some(d) = sp.next().unwrap() {
+                v.push(d.root().text_content().unwrap_or_default().to_string());
+            }
+            v
+        };
+        assert_eq!(str_doc, byte_doc);
+        assert_eq!(byte_doc, vec!["t1", "t2"]);
+    }
+
+    #[test]
+    fn byte_namespace_inherited_from_ancestor() {
+        let xml = r#"<root xmlns:p="http://ex.com/"><p:item/><p:item/></root>"#;
+        let mut sp = ByteStreamParser::new(Cursor::new(xml.as_bytes().to_vec()))
+            .unwrap()
+            .emit_at_depth(1);
+        let item = sp.next().unwrap().unwrap();
+        assert_eq!(item.root().namespace.get().unwrap().href(), "http://ex.com/");
+    }
+
+    #[test]
+    fn byte_small_buffer_handles_large_document() {
+        // A document far larger than the working buffer, pulled with a
+        // tiny buffer — exercises refill/compact between records.
+        let mut xml = String::from("<data>");
+        for i in 0..2000 {
+            xml.push_str(&format!("<item><name>n{i}</name></item>"));
+        }
+        xml.push_str("</data>");
+        let mut sp = ByteStreamParser::with_buffer_size(
+            Cursor::new(xml.into_bytes()),
+            4096,
+        )
+        .unwrap()
+        .emit_at_path(&["data", "item"]);
+        let mut count = 0;
+        while let Some(_doc) = sp.next().unwrap() {
+            count += 1;
+        }
+        assert_eq!(count, 2000);
     }
 }
