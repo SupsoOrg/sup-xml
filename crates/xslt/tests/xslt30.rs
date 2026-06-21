@@ -1562,10 +1562,12 @@ fn run_case_detailed(case: &TestCase, ts_dir: &Path) -> Option<Result<(), FailRe
     // template conflicts (XTRE0540) for this apply, then restore.
     let prev_omm = sup_xml_xslt::pattern::set_on_multiple_match_error(
         case.on_multiple_match_error);
-    let result = if !case.params.is_empty() || case.initial_template.is_some() {
-        stylesheet.apply_with_params_and_initial(
+    let result = if !case.params.is_empty() || case.initial_template.is_some()
+        || case.initial_mode.is_some()
+    {
+        stylesheet.apply_with_params_initial_and_mode(
             &src_doc, &loader, Some(&base),
-            &case.params, case.initial_template.as_deref(),
+            &case.params, case.initial_template.as_deref(), case.initial_mode.as_deref(),
         )
     } else {
         stylesheet.apply_with_loader(&src_doc, &loader, Some(&base))

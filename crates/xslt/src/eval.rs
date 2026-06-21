@@ -2877,8 +2877,12 @@ pub fn apply_stylesheet_full_with_params_and_initial(
         // names are unprefixed in the W3C harness; resolve via
         // the stylesheet's in-scope namespaces only when the
         // name carries a prefix.
-        let mode_qname = initial_mode.map(|raw| {
-            match raw.split_once(':') {
+        // `#unnamed` / `#default` denote the unnamed mode, which is always
+        // an eligible initial mode; map them to None so dispatch uses the
+        // unnamed mode and the XTDE0045 visibility check below is skipped.
+        let mode_qname = initial_mode.and_then(|raw| match raw {
+            "#unnamed" | "#default" => None,
+            _ => Some(match raw.split_once(':') {
                 Some((p, l)) => QName {
                     prefix: Some(p.to_string()),
                     local:  l.to_string(),
@@ -2889,8 +2893,27 @@ pub fn apply_stylesheet_full_with_params_and_initial(
                     local:  raw.to_string(),
                     uri:    String::new(),
                 },
-            }
+            }),
         });
+        // XSLT 3.0 §3.5.2 / XTDE0045 — in a package, a named mode is an
+        // eligible initial mode only if its effective visibility is public.
+        if let Some(mq) = &mode_qname {
+            if state.style.is_package {
+                let vis = state.style.modes.iter()
+                    .find(|m| m.name.as_ref().map(qname_key).as_deref()
+                        == Some(qname_key(mq).as_str()))
+                    .and_then(|m| m.visibility.clone())
+                    .or_else(|| crate::compiler::expose_visibility(
+                        &state.style.exposes, "mode", mq));
+                if vis.as_deref() != Some("public") {
+                    return Err(XsltError::Xpath(
+                        sup_xml_core::xpath::eval::xpath_err(format!(
+                            "mode '{}' is not an eligible initial mode: it is not \
+                             declared visibility=\"public\" (XTDE0045)", mq.local))
+                        .with_xpath_code("XTDE0045")));
+                }
+            }
+        }
         apply_one_to_node(&mut state, 0, mode_qname.as_ref())?;
     }
     state.variables.leave();
