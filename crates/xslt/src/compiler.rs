@@ -2944,6 +2944,16 @@ fn compile_with_imports_inner(
                     }
                 }
                 PACKAGE_ID_COUNTER.with(|c| c.set(saved_ctr));
+                // XSLT 3.0 §3.5.1 / XTSE3440 — the unnamed mode is always
+                // private to its package, so an xsl:override may not contain
+                // a template rule in the unnamed mode.
+                for t in up.overrides.templates.iter().filter(|t| t.match_pattern.is_some()) {
+                    if t.modes.iter().any(|m| m.local.is_empty() && m.uri.is_empty()) {
+                        return Err(XsltError::InvalidStylesheet(
+                            "xsl:override cannot override a template rule in the \
+                             unnamed mode, which is always private (XTSE3440)".into()));
+                    }
+                }
                 // XSLT 3.0 §3.5.1 / XTSE3060 — a template rule in
                 // xsl:override may not be in a mode that the used package
                 // declares as final or private.
@@ -3490,7 +3500,9 @@ fn compile_template(node: &Node) -> Result<Template, XsltError> {
             }
             match tok {
                 "#all"     => modes_match_all = true,
-                "#default" => modes.push(QName {
+                // `#default` and `#unnamed` both denote the unnamed mode
+                // (the empty-QName entry the matcher compares against).
+                "#default" | "#unnamed" => modes.push(QName {
                     prefix: None, local: String::new(), uri: String::new(),
                 }),
                 "#current" => return Err(XsltError::InvalidStylesheet(
@@ -3865,6 +3877,13 @@ fn compile_mode(node: &Node) -> Result<ModeDecl, XsltError> {
     };
     let on_no_match_explicit = read_attribute(node, "on-no-match").is_some();
     let visibility = read_attribute(node, "visibility").map(str::to_string);
+    // XSLT 3.0 §6.6.1 / XTSE0020 — the unnamed mode is never a component,
+    // so it may not carry a visibility.
+    if name.is_none() && visibility.is_some() {
+        return Err(XsltError::InvalidStylesheet(
+            "xsl:mode for the unnamed mode cannot specify a visibility \
+             (XTSE0020)".into()));
+    }
     let streamable = read_streamable(node);
     Ok(ModeDecl { name, on_no_match, on_no_match_explicit, visibility,
         streamable, import_precedence: TOP_LEVEL_IMPORT_PRECEDENCE })
