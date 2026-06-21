@@ -383,64 +383,100 @@ pub fn tokenize_with(src: &str, allow_exponent: bool) -> LexResult<(Vec<Token>, 
                 else { src[pos..].chars().next().is_some_and(is_name_start_char) }
             } => {
                 let start = pos;
-                loop {
-                    match bytes.get(pos) {
-                        None => break,
-                        Some(&b) if b < 0x80 => {
-                            if ASCII_NCNAME[b as usize] & (NS | NC) == 0 { break; }
-                            pos += 1;
-                        }
-                        Some(_) => {
-                            // pos is at a char boundary (we only ever
-                            // advance by 1 ASCII byte or by a full
-                            // char width), so chars().next() is Some.
-                            let c = src[pos..].chars().next().unwrap();
-                            if !is_name_char_unicode(c) { break; }
-                            pos += c.len_utf8();
+                // XPath 3.0 BracedURILiteral / URIQualifiedName:
+                // `Q{uri}local` (or `Q{uri}*`).  The URI between the braces
+                // may contain ':' and other non-name characters, so the
+                // whole EQName is scanned as one token here rather than
+                // being split like a prefixed `prefix:local` QName.
+                if bytes[pos] == b'Q' && bytes.get(pos + 1) == Some(&b'{') {
+                    pos += 2; // consume "Q{"
+                    while pos < bytes.len() && bytes[pos] != b'}' {
+                        let c = src[pos..].chars().next().unwrap();
+                        pos += c.len_utf8();
+                    }
+                    if pos < bytes.len() {
+                        pos += 1; // consume the closing '}'
+                    }
+                    // Local part: an NCName, or `*` (URIQualifiedName wildcard).
+                    if bytes.get(pos).copied() == Some(b'*') {
+                        pos += 1;
+                    } else {
+                        loop {
+                            match bytes.get(pos) {
+                                Some(&b) if b < 0x80 => {
+                                    if ASCII_NCNAME[b as usize] & (NS | NC) == 0 { break; }
+                                    pos += 1;
+                                }
+                                Some(_) => {
+                                    let c = src[pos..].chars().next().unwrap();
+                                    if !is_name_char_unicode(c) { break; }
+                                    pos += c.len_utf8();
+                                }
+                                None => break,
+                            }
                         }
                     }
-                }
+                    emit!(Token::Name(src[start..pos].to_string()));
+                } else {
+                    loop {
+                        match bytes.get(pos) {
+                            None => break,
+                            Some(&b) if b < 0x80 => {
+                                if ASCII_NCNAME[b as usize] & (NS | NC) == 0 { break; }
+                                pos += 1;
+                            }
+                            Some(_) => {
+                                // pos is at a char boundary (we only ever
+                                // advance by 1 ASCII byte or by a full
+                                // char width), so chars().next() is Some.
+                                let c = src[pos..].chars().next().unwrap();
+                                if !is_name_char_unicode(c) { break; }
+                                pos += c.len_utf8();
+                            }
+                        }
+                    }
 
-                // Check for QName: prefix:local or prefix:*
-                // (but not axis-name::, which uses ColonColon)
-                if pos < bytes.len()
-                    && bytes[pos] == b':'
-                    && bytes.get(pos + 1).copied().unwrap_or(0) != b':'
-                {
-                    let after_b = bytes.get(pos + 1).copied().unwrap_or(0);
-                    let after_start = if after_b < 0x80 {
-                        ASCII_NCNAME[after_b as usize] & NS != 0
-                    } else {
-                        // pos+1 is at a char boundary because bytes[pos]
-                        // is ':' (ASCII, 1 byte).
-                        src[pos + 1..].chars().next().is_some_and(is_name_start_char)
-                    };
-                    let after_star = after_b == b'*';
-                    if after_start || after_star {
-                        pos += 1; // consume ':'
-                        if bytes.get(pos).copied() == Some(b'*') {
-                            pos += 1;
+                    // Check for QName: prefix:local or prefix:*
+                    // (but not axis-name::, which uses ColonColon)
+                    if pos < bytes.len()
+                        && bytes[pos] == b':'
+                        && bytes.get(pos + 1).copied().unwrap_or(0) != b':'
+                    {
+                        let after_b = bytes.get(pos + 1).copied().unwrap_or(0);
+                        let after_start = if after_b < 0x80 {
+                            ASCII_NCNAME[after_b as usize] & NS != 0
                         } else {
-                            loop {
-                                match bytes.get(pos) {
-                                    None => break,
-                                    Some(&b) if b < 0x80 => {
-                                        if ASCII_NCNAME[b as usize] & (NS | NC) == 0 { break; }
-                                        pos += 1;
-                                    }
-                                    Some(_) => {
-                                        let c = src[pos..].chars().next().unwrap();
-                                        if !is_name_char_unicode(c) { break; }
-                                        pos += c.len_utf8();
+                            // pos+1 is at a char boundary because bytes[pos]
+                            // is ':' (ASCII, 1 byte).
+                            src[pos + 1..].chars().next().is_some_and(is_name_start_char)
+                        };
+                        let after_star = after_b == b'*';
+                        if after_start || after_star {
+                            pos += 1; // consume ':'
+                            if bytes.get(pos).copied() == Some(b'*') {
+                                pos += 1;
+                            } else {
+                                loop {
+                                    match bytes.get(pos) {
+                                        None => break,
+                                        Some(&b) if b < 0x80 => {
+                                            if ASCII_NCNAME[b as usize] & (NS | NC) == 0 { break; }
+                                            pos += 1;
+                                        }
+                                        Some(_) => {
+                                            let c = src[pos..].chars().next().unwrap();
+                                            if !is_name_char_unicode(c) { break; }
+                                            pos += c.len_utf8();
+                                        }
                                     }
                                 }
                             }
                         }
                     }
-                }
 
-                let name = src[start..pos].to_string();
-                emit!(Token::Name(name));
+                    let name = src[start..pos].to_string();
+                    emit!(Token::Name(name));
+                }
             }
             _ => {
                 return Err(xpath_err(format!(

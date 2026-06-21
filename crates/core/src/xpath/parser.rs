@@ -2267,6 +2267,12 @@ mod tests {
             "array { current-group()!@value!xs:decimal(.) }",
             "function($x) { $x + 1 }",
             "fold-left((1,2), 0, function($a,$b){$a+$b})",
+            // XPath 3.0 BracedURILiteral / URIQualifiedName (EQName) in
+            // function-call position — the W3C streaming suite's
+            // `Q{f}attribute(...)` shape, plus a real http: URI.
+            "Q{f}attribute('x', 'y')",
+            "count(//PRICE ! Q{f}element('x', string(.)))",
+            "Q{http://www.w3.org/2005/xpath-functions}count((1, 2, 3))",
         ] {
             assert!(parse_2_0(e).is_ok(), "expected `{e}` to parse in XPath 2.0 mode");
         }
