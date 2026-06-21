@@ -89,7 +89,7 @@ impl ResultTree {
         };
 
         let mut out = match method {
-            "html"  => serialize_html(children, &self.output, indent, escape_uri),
+            "html"  => serialize_html(children, &self.output, &self.character_map, indent, escape_uri),
             "text"  => serialize_text(children),
             // The xhtml output method uses XML syntax with the
             // html-family parameter defaults applied above, plus the
@@ -376,10 +376,6 @@ fn encoding_capability(enc: Option<&str>) -> Option<u32> {
 #[inline]
 fn must_ncr_escape(c: char, enc_cap: Option<u32>) -> bool {
     matches!(enc_cap, Some(max) if c as u32 > max)
-}
-
-fn escape_text(s: &str, xml_11: bool, enc_cap: Option<u32>) -> String {
-    escape_text_with_map(s, xml_11, enc_cap, &[])
 }
 
 fn escape_attr(s: &str, xml_11: bool, enc_cap: Option<u32>) -> String {
@@ -696,6 +692,7 @@ const RAW_TEXT_ELEMENTS: &[&str] = &["script", "style"];
 pub fn serialize_html(
     children:   &[ResultNode],
     output:     &OutputSpec,
+    cmap:       &[(char, String)],
     indent:     bool,
     escape_uri: bool,
 ) -> String {
@@ -713,14 +710,14 @@ pub fn serialize_html(
             let _ = writeln!(out, r#"<!DOCTYPE {root} PUBLIC "{pubid}">"#);
         }
     }
-    for c in children { serialize_html_node(c, &mut out, indent, escape_uri, 0); }
+    for c in children { serialize_html_node(c, &mut out, cmap, indent, escape_uri, 0); }
     if indent && !out.ends_with('\n') {
         out.push('\n');
     }
     out
 }
 
-fn serialize_html_node(node: &ResultNode, out: &mut String, format: bool, escape_uri: bool, level: usize) {
+fn serialize_html_node(node: &ResultNode, out: &mut String, cmap: &[(char, String)], format: bool, escape_uri: bool, level: usize) {
     match node {
         ResultNode::Element { name, namespaces, attributes, children, .. } => {
             let local_lc = name.local.to_lowercase();
@@ -736,7 +733,7 @@ fn serialize_html_node(node: &ResultNode, out: &mut String, format: bool, escape
             for (aname, value) in attributes {
                 let _ = write!(out, r#" {}="{}""#,
                     aname.to_qname_string(),
-                    render_attr_value(name, aname, value, escape_uri, false, None, &[]));
+                    render_attr_value(name, aname, value, escape_uri, false, None, cmap));
             }
             // Void elements: close with `>`, no children, no closing tag.
             if name.uri.is_empty() && VOID_ELEMENTS.iter().any(|v| *v == local_lc) {
@@ -762,7 +759,7 @@ fn serialize_html_node(node: &ResultNode, out: &mut String, format: bool, escape
                         continue;
                     }
                 }
-                serialize_html_node(c, out, child_format, escape_uri, level + 1);
+                serialize_html_node(c, out, cmap, child_format, escape_uri, level + 1);
             }
             // An empty element serializes as `<title></title>` — no
             // internal indentation (HTML 5 §8 / XSLT serialization).
@@ -776,7 +773,7 @@ fn serialize_html_node(node: &ResultNode, out: &mut String, format: bool, escape
         }
         ResultNode::Text { content, dose } => {
             if *dose { out.push_str(content); }
-            else     { out.push_str(&escape_text(content, false, None)); }
+            else     { out.push_str(&escape_text_with_map(content, false, None, cmap)); }
         }
         ResultNode::Comment(s) => {
             let _ = write!(out, "<!--{s}-->");
