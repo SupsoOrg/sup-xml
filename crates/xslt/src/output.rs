@@ -141,30 +141,32 @@ pub fn serialize_xml(
         }
         out.push_str("?>\n");
     }
-    if let Some(dt_sys) = output.doctype_system.as_deref() {
-        if let Some(root) = first_element_name(children) {
-            if let Some(pubid) = output.doctype_public.as_deref() {
-                let _ = writeln!(out, r#"<!DOCTYPE {root} PUBLIC "{pubid}" "{dt_sys}">"#);
-            } else {
-                let _ = writeln!(out, r#"<!DOCTYPE {root} SYSTEM "{dt_sys}">"#);
-            }
-        }
+    // The DOCTYPE declaration must come immediately before the first
+    // element (XSLT serialization §) — after any leading comments / PIs.
+    let doctype = if let Some(dt_sys) = output.doctype_system.as_deref() {
+        first_element_name(children).map(|root| match output.doctype_public.as_deref() {
+            Some(pubid) => format!("<!DOCTYPE {root} PUBLIC \"{pubid}\" \"{dt_sys}\">\n"),
+            None        => format!("<!DOCTYPE {root} SYSTEM \"{dt_sys}\">\n"),
+        })
     } else if xhtml && output.html_version.is_some_and(|v| v >= 5.0) {
         // XSLT 3.0 §26.2 — html-version=5 on the xhtml method emits the
         // HTML5 doctype (no system/public identifier), but only when the
         // root element is an `html` element.  The document type name
         // echoes the root's local name (and case), dropping any prefix.
-        if let Some(local) = first_element_local(children)
+        first_element_local(children)
             .filter(|l| l.eq_ignore_ascii_case("html"))
-        {
-            let _ = writeln!(out, "<!DOCTYPE {local}>");
-        }
-    }
+            .map(|local| format!("<!DOCTYPE {local}>\n"))
+    } else { None };
     // `indent="yes"` (XSLT 1.0 §16.1): pretty-print element-only
     // content. Mixed content (any text-node child) suppresses
     // formatting for that element and its whole subtree so text is
     // preserved verbatim.
-    for child in children {
+    let first_elem = children.iter()
+        .position(|n| matches!(n, ResultNode::Element { .. }));
+    for (i, child) in children.iter().enumerate() {
+        if Some(i) == first_elem {
+            if let Some(dt) = &doctype { out.push_str(dt); }
+        }
         serialize_xml_node(child, &mut out, output, "", cmap, indent, escape_uri, xhtml, 0);
     }
     if indent && !out.ends_with('\n') {
@@ -697,20 +699,30 @@ pub fn serialize_html(
     escape_uri: bool,
 ) -> String {
     let mut out = String::new();
-    if let Some(dt_sys) = output.doctype_system.as_deref() {
-        if let Some(root) = first_element_name(children) {
-            if let Some(pubid) = output.doctype_public.as_deref() {
-                let _ = writeln!(out, r#"<!DOCTYPE {root} PUBLIC "{pubid}" "{dt_sys}">"#);
-            } else {
-                let _ = writeln!(out, r#"<!DOCTYPE {root} SYSTEM "{dt_sys}">"#);
-            }
-        }
+    // The DOCTYPE comes immediately before the first element — after any
+    // leading comments / PIs (XSLT serialization §).
+    let doctype = if let Some(dt_sys) = output.doctype_system.as_deref() {
+        first_element_name(children).map(|root| match output.doctype_public.as_deref() {
+            Some(pubid) => format!("<!DOCTYPE {root} PUBLIC \"{pubid}\" \"{dt_sys}\">\n"),
+            None        => format!("<!DOCTYPE {root} SYSTEM \"{dt_sys}\">\n"),
+        })
     } else if let Some(pubid) = output.doctype_public.as_deref() {
-        if let Some(root) = first_element_name(children) {
-            let _ = writeln!(out, r#"<!DOCTYPE {root} PUBLIC "{pubid}">"#);
+        first_element_name(children).map(|root| format!("<!DOCTYPE {root} PUBLIC \"{pubid}\">\n"))
+    } else if output.html_version.is_some_and(|v| v >= 5.0) {
+        // html-version=5 on the html method emits the HTML5 doctype before
+        // the root `html` element.
+        first_element_local(children)
+            .filter(|l| l.eq_ignore_ascii_case("html"))
+            .map(|local| format!("<!DOCTYPE {local}>\n"))
+    } else { None };
+    let first_elem = children.iter()
+        .position(|n| matches!(n, ResultNode::Element { .. }));
+    for (i, c) in children.iter().enumerate() {
+        if Some(i) == first_elem {
+            if let Some(dt) = &doctype { out.push_str(dt); }
         }
+        serialize_html_node(c, &mut out, cmap, indent, escape_uri, 0);
     }
-    for c in children { serialize_html_node(c, &mut out, cmap, indent, escape_uri, 0); }
     if indent && !out.ends_with('\n') {
         out.push('\n');
     }
