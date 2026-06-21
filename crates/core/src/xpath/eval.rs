@@ -7451,8 +7451,15 @@ fn eval_function<I: DocIndexLike>(name: &str, args: &[Expr], ctx: &EvalCtx<'_>, 
             // not a concatenated single string — downstream
             // `xsl:value-of separator=…` consumers depend on the
             // per-item shape to interleave the separator correctly.
-            check_args!(1);
-            let v = arg!(0);
+            // `data()` with no argument is `data(.)` — atomize the
+            // context item (XPath 3.0 §2.5.2 / the implicit-`.` rule that
+            // `string()`, `name()`, etc. follow).
+            let v = if args.is_empty() {
+                Value::NodeSet(vec![ctx.context_node])
+            } else {
+                check_args!(1);
+                arg!(0)
+            };
             match v {
                 Value::NodeSet(ns) => {
                     let items: Vec<Value> = ns.iter()
@@ -8400,6 +8407,21 @@ fn eval_function<I: DocIndexLike>(name: &str, args: &[Expr], ctx: &EvalCtx<'_>, 
         // fn:outermost keeps nodes with no ancestor in the input;
         // fn:innermost keeps nodes with no descendant in the input
         // (F&O §14.2/§14.3).  Both return document order, deduplicated.
+        // XSLT 3.0 §18.5 `fn:copy-of` / `fn:snapshot` — produce a copy of
+        // the argument (snapshot also retains the ancestor chain) for use
+        // off the stream.  In our in-memory evaluation the live nodes
+        // already carry their full subtree and ancestors, so returning
+        // them is value-, navigation-, and serialization-equivalent; the
+        // only difference (fresh node identity) is rarely observed.
+        // No argument means the context item.
+        "copy-of" | "snapshot" => {
+            if args.is_empty() {
+                Ok(Value::NodeSet(vec![ctx.context_node]))
+            } else {
+                check_args!(1);
+                Ok(arg!(0))
+            }
+        }
         "innermost" | "outermost" => {
             check_args!(1);
             let mut set = match arg!(0) {
