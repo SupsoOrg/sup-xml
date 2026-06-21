@@ -9867,9 +9867,29 @@ fn cast_value_to_atomic_impl<I: DocIndexLike>(
             match name.as_str() {
                 "string" | "anyURI" | "anyAtomicType" | "untypedAtomic"
                 | "normalizedString" | "token" | "Name" | "NCName"
-                | "language" | "ID" | "IDREF" | "IDREFS" | "ENTITY"
-                | "ENTITIES" | "NMTOKEN" | "NMTOKENS" | "NOTATION" | "QName" => {
+                | "language" | "ID" | "IDREF" | "ENTITY"
+                | "NMTOKEN" | "NOTATION" | "QName" => {
                     Ok(make_typed(kind, s, None, None))
+                }
+                // XSD 1.0 §3.4 list types atomize to a *sequence* of
+                // items — one per whitespace-separated token, each of the
+                // item type — so e.g. `xs:NMTOKENS('8.3 5.7 1.1')` yields
+                // three atomics that `! xs:decimal(.)` can then cast.
+                "NMTOKENS" | "IDREFS" | "ENTITIES" => {
+                    let item = match name.as_str() {
+                        "NMTOKENS" => "NMTOKEN",
+                        "IDREFS"   => "IDREF",
+                        _          => "ENTITY",
+                    };
+                    let item_kind = atomic_kind_static(item).unwrap_or("token");
+                    let items: Vec<Value> = s
+                        .split_whitespace()
+                        .map(|t| make_typed(item_kind, t.to_string(), None, None))
+                        .collect();
+                    match items.len() {
+                        1 => Ok(items.into_iter().next().unwrap()),
+                        _ => Ok(Value::Sequence(items)),
+                    }
                 }
                 "boolean" => {
                     // XPath 2.0 §17.1.4 — numeric → boolean: zero
@@ -12657,6 +12677,26 @@ fn xs_constructor<I: DocIndexLike>(
         if ns.is_empty() {
             return Ok(Value::NodeSet(Vec::new()));
         }
+    }
+    // XSD 1.0 §3.4 list types: `xs:NMTOKENS('8.3 5.7 1.1')` yields a
+    // *sequence* — one item of the item type per whitespace-separated
+    // token — so a following `! xs:decimal(.)` casts each token, not the
+    // whole list string.
+    if matches!(local, "NMTOKENS" | "IDREFS" | "ENTITIES") {
+        let item = match local {
+            "NMTOKENS" => "NMTOKEN",
+            "IDREFS"   => "IDREF",
+            _          => "ENTITY",
+        };
+        let s = value_to_string(&args[0], idx);
+        let items = s
+            .split_whitespace()
+            .map(|t| xs_constructor(item, &[Value::String(t.to_string())], idx, bindings))
+            .collect::<Result<Vec<_>>>()?;
+        return match items.len() {
+            1 => Ok(items.into_iter().next().unwrap()),
+            _ => Ok(Value::Sequence(items)),
+        };
     }
     // F&O §17.1.5 — same-family precision-narrowing casts that
     // would lose information through the value_to_string round-trip.
