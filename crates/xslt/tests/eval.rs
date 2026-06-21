@@ -434,7 +434,7 @@ fn package_override_attribute_set_replaces_original() {
                 </xsl:attribute-set>
             </xsl:override>
         </xsl:use-package>
-        <xsl:template name="main"><e xsl:use-attribute-sets="s"/></xsl:template>
+        <xsl:template name="main" visibility="public"><e xsl:use-attribute-sets="s"/></xsl:template>
     </xsl:package>"#;
     let xslt = Stylesheet::compile_str_with_packages(
         main, &sup_xml_xslt::loader::NullLoader, None, packages).unwrap();

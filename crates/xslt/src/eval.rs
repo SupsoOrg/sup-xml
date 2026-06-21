@@ -2851,10 +2851,25 @@ pub fn apply_stylesheet_full_with_params_and_initial(
             name.to_string()
         };
         let tmpl = state.style.templates.iter()
-            .find(|t| t.name.as_ref().map(qname_key).as_deref() == Some(key.as_str()))
+            .filter(|t| t.name.as_ref().map(qname_key).as_deref() == Some(key.as_str()))
+            .max_by_key(|t| t.import_precedence)
             .ok_or_else(|| XsltError::UnresolvedReference(format!(
                 "no template named '{key}' for initial-template entry"
             )))?;
+        // XSLT 3.0 §3.5.2 / XTDE0040 — in a package, components default to
+        // private visibility, so a named template is an eligible initial
+        // template only if it is (effectively) public.  The effective
+        // visibility is the explicit visibility= or, failing that, the one
+        // assigned by the package's own xsl:expose declarations.
+        let eff_vis = tmpl.visibility.clone().or_else(|| tmpl.name.as_ref()
+            .and_then(|n| crate::compiler::expose_visibility(&state.style.exposes, "template", n)));
+        if state.style.is_package && eff_vis.as_deref() != Some("public") {
+            return Err(XsltError::Xpath(
+                sup_xml_core::xpath::eval::xpath_err(format!(
+                    "template '{key}' is not an eligible initial template: it is \
+                     not declared visibility=\"public\" (XTDE0040)"))
+                .with_xpath_code("XTDE0040")));
+        }
         run_template_body(&mut state, tmpl, 0, 1, 1, &[])?;
     } else {
         // `<initial-mode name="X"/>` (XSLT 3.0 §2.4) — dispatch

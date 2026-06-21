@@ -1092,6 +1092,11 @@ pub enum WhitespaceRule {
 /// without re-parsing.
 #[derive(Clone, Debug, Default)]
 pub struct StylesheetAst {
+    /// True when the principal stylesheet's root is `xsl:package` (rather
+    /// than `xsl:stylesheet` / `xsl:transform`).  Components of a package
+    /// default to private visibility, so e.g. the initial template must be
+    /// explicitly public to be eligible (XTDE0040).
+    pub is_package:         bool,
     /// `version=` attribute on `xsl:stylesheet`.  Captured purely
     /// for compatibility (and forward-compat warnings later); the
     /// engine only implements 1.0 semantics.

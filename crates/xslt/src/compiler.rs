@@ -2715,6 +2715,14 @@ fn compile_with_imports_inner(
                 return Ok(acc);
             }
         }
+        // The principal stylesheet's root determines package-ness (used
+        // packages compile at a lower precedence and must not flip it):
+        // components of an xsl:package default to private visibility.
+        if *precedence_counter == TOP_LEVEL_IMPORT_PRECEDENCE
+            && is_xslt_element(root) && root.local_name() == "package"
+        {
+            acc.is_package = true;
+        }
     }
     let local = compile(&doc)?;
     // Capture the using package's own references before the merge
@@ -4032,7 +4040,7 @@ fn expand_component_token(tok: &str, ns: &std::collections::HashMap<String, Stri
 /// (XSLT 3.0 §3.5.2).  Specificity: an exact name beats a `prefix:*` /
 /// `*:local` wildcard, which beats `*`.  `None` if no declaration matches
 /// (the component keeps its locally-declared visibility).
-fn expose_visibility(
+pub(crate) fn expose_visibility(
     exposes: &[crate::ast::ExposeDecl], kind: &str, name: &QName,
 ) -> Option<String> {
     let key = qname_key(name);
