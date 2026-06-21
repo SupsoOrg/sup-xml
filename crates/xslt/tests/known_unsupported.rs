@@ -45,13 +45,14 @@ use sup_xml_xslt::Stylesheet;
 
 // ── streaming ───────────────────────────────────────────────────────
 
-/// Static streamability analysis is wired: a `streamable="yes"`
-/// source-document whose body is not guaranteed-streamable is rejected
-/// at compile time (XSLT 3.0 §19, XTSE3430).  A sibling-axis selection
-/// (`following-sibling::`) leaves the streaming window, so it is
-/// rejected.
+/// Streamability analysis (XSLT 3.0 §19) flags a `streamable="yes"`
+/// source-document whose body is not guaranteed-streamable — here a
+/// sibling-axis selection (`following-sibling::`) that leaves the
+/// streaming window.  Compilation itself does *not* reject it: the engine
+/// reports `supports-streaming = no`, so it treats `streamable=` as a
+/// hint and runs in-memory.  The analyzer is exercised directly.
 #[test]
-fn streaming_source_document_roaming_axis_rejected() {
+fn streaming_source_document_roaming_axis_flagged_by_analyzer() {
     let xsl = r#"<xsl:stylesheet version="3.0"
                                 xmlns:xsl="http://www.w3.org/1999/XSL/Transform">
         <xsl:template name="main">
@@ -61,10 +62,14 @@ fn streaming_source_document_roaming_axis_rejected() {
         </xsl:template>
     </xsl:stylesheet>"#;
 
-    let err = Stylesheet::compile_str(xsl)
-        .expect_err("non-streamable source-document body must be rejected");
+    // Compiles (streamable= is a hint for a non-streaming processor)...
+    let style = Stylesheet::compile_str(xsl)
+        .expect("compilation does not reject on streamability");
+    // ...but the analyzer flags the non-streamable body with XTSE3430.
+    let err = sup_xml_xslt::stream::validate_streamability(&style.ast)
+        .expect_err("analyzer must flag the roaming-axis body");
     assert!(err.to_string().contains("XTSE3430"),
-        "expected an XTSE3430 streamability rejection, got: {err}");
+        "expected an XTSE3430 streamability finding, got: {err}");
 }
 
 /// Guaranteed-streamable source-document bodies compile — both a

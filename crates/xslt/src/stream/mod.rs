@@ -65,10 +65,18 @@ fn is_default_mode_qname(q: &QName) -> bool {
     q.uri.is_empty() && q.local.is_empty()
 }
 
-/// Validate every streamable context in the stylesheet, rejecting the
-/// whole stylesheet (XTSE3430) if any contains a construct that is not
-/// guaranteed-streamable.  A no-op for stylesheets that declare nothing
-/// streamable.
+/// Analyze every streamable context in the stylesheet, returning an
+/// `XTSE3430` error if any contains a construct that is not guaranteed-
+/// streamable (XSLT 3.0 §19).  A no-op for stylesheets that declare
+/// nothing streamable.
+///
+/// This is **not** wired into compilation: because the engine reports
+/// `supports-streaming = no`, it treats `streamable="yes"` as a hint and
+/// processes non-streamable stylesheets in-memory rather than rejecting
+/// them.  The analyzer is exposed for choosing the streamed execution
+/// strategy and for a future strict-streaming mode (where it would gate
+/// compilation), and is what [`super::push_eval::push_eligible`] builds
+/// on to decide between incremental and burst execution.
 pub fn validate_streamability(ast: &StylesheetAst) -> Result<(), XsltError> {
     validate_streamable_modes(ast)?;
     validate_streamable_accumulators(ast)?;
@@ -678,8 +686,13 @@ fn reject_streaming_sort(sort: &[crate::ast::Sort], owner: &str) -> Result<(), X
 mod tests {
     use crate::Stylesheet;
 
+    /// Compile, then run the streamability analyzer directly.  Compilation
+    /// itself never rejects on streamability (we report
+    /// `supports-streaming = no`), so these tests exercise
+    /// [`validate_streamability`] on its own to pin the §19 classification.
     fn compiles(xsl: &str) -> Result<(), String> {
-        Stylesheet::compile_str(xsl).map(|_| ()).map_err(|e| e.to_string())
+        let style = Stylesheet::compile_str(xsl).map_err(|e| e.to_string())?;
+        super::validate_streamability(&style.ast).map_err(|e| e.to_string())
     }
 
     const HEAD: &str = r#"<xsl:stylesheet version="3.0"

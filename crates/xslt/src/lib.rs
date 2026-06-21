@@ -193,10 +193,14 @@ impl Stylesheet {
         compiler::validate_input_type_annotations(&ast)?;
         compiler::validate_package_exposes(&ast)?;
         compiler::validate_global_context_item(&ast)?;
-        // XSLT 3.0 §19: every streamable context (a streamable mode's
-        // template rules, xsl:source-document streamable="yes",
-        // streamable accumulators) must be guaranteed-streamable.
-        stream::validate_streamability(&ast)?;
+        // XSLT 3.0 §19 streamability is NOT enforced at compile time: we
+        // report `supports-streaming = no`, and a non-streaming processor
+        // treats `streamable="yes"` as a hint it may ignore, processing
+        // the stylesheet in the ordinary (in-memory) way rather than
+        // raising XTSE3430.  The streamability analyzer
+        // ([`stream::validate_streamability`] / [`stream::analysis`]) is
+        // retained to choose the streamed execution strategy (see
+        // [`stream::push_eval`]) and for a future strict-streaming mode.
         Ok(Stylesheet { ast })
     }
 
