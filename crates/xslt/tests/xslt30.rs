@@ -100,6 +100,11 @@ struct TestCase {
     /// the secondary document `xsl:result-document` produced at that
     /// uri.  Checked in addition to the primary `expects`.
     result_doc_asserts: Vec<(String, Expectation)>,
+    /// `<schema file="…" role="source-reference"/>` declared in the
+    /// environment: the source document is validated against this schema
+    /// (XSLT `validation="strict"/"lax"`) so its nodes carry their
+    /// post-schema-validation types during the transform.
+    source_schema: Option<String>,
 }
 
 /// Test sets whose assertions don't match what a spec-compliant
@@ -255,6 +260,9 @@ struct Environment {
     /// `<on-multiple-match value="error"/>` declared at environment
     /// level — applies to every case that refs this environment.
     on_multiple_match_error: bool,
+    /// `<schema file="…"/>` (role="source-reference") — the source is
+    /// validated against this schema so its nodes are typed.
+    schema_file: Option<String>,
 }
 
 #[derive(Clone, Copy)]
@@ -341,7 +349,7 @@ fn parse_test_set(path: &Path) -> Vec<TestCase> {
         name: String::new(), stylesheet: None,
         source_inline: None, source_file: None,
         env_ref: None, expects: Expectation::Unsupported,
-            params: Vec::new(), static_params: Vec::new(), initial_template: None, initial_mode: None, initial_select: None, packages: Vec::new(), on_multiple_match_error: false, result_doc_asserts: Vec::new(),
+            params: Vec::new(), static_params: Vec::new(), initial_template: None, initial_mode: None, initial_select: None, packages: Vec::new(), on_multiple_match_error: false, result_doc_asserts: Vec::new(), source_schema: None,
         requires_post_1_0: false, requires_unsupported_feature: false,
     };
     let mut cur_env_name = String::new();
@@ -361,7 +369,7 @@ fn parse_test_set(path: &Path) -> Vec<TestCase> {
                             name: String::new(), stylesheet: None,
                             source_inline: None, source_file: None,
                             env_ref: None, expects: Expectation::Unsupported,
-            params: Vec::new(), static_params: Vec::new(), initial_template: None, initial_mode: None, initial_select: None, packages: Vec::new(), on_multiple_match_error: false, result_doc_asserts: Vec::new(),
+            params: Vec::new(), static_params: Vec::new(), initial_template: None, initial_mode: None, initial_select: None, packages: Vec::new(), on_multiple_match_error: false, result_doc_asserts: Vec::new(), source_schema: None,
                             requires_post_1_0: false, requires_unsupported_feature: false,
                         };
                         for a in tag.attrs() {
@@ -435,6 +443,20 @@ fn parse_test_set(path: &Path) -> Vec<TestCase> {
                         in_content = true;
                         text_buf.clear();
                         capturing = Some("source-content");
+                    }
+                    // `<schema file="…"/>` — the schema the source document
+                    // is validated against (role="source-reference").  Only
+                    // file-based schemas are wired through; an inline schema
+                    // (rare) is left for the stylesheet's own import-schema.
+                    "schema" if in_env || in_case => {
+                        let mut file = None;
+                        for a in tag.attrs().flatten() {
+                            if a.name() == "file" { file = Some(a.value().to_string()); }
+                        }
+                        if let Some(f) = file {
+                            if in_env { cur_env.schema_file = Some(f); }
+                            else      { cur_case.source_schema = Some(f); }
+                        }
                     }
                     "test" if in_case => {
                         in_test = true;
@@ -697,15 +719,11 @@ fn parse_test_set(path: &Path) -> Vec<TestCase> {
                             if is_static {
                                 cur_case.static_params.push((name.clone(), select.clone()));
                             }
-                            // Test catalogs almost always wrap the value in
-                            // single or double quotes (`select="'foo'"`).
-                            // The XSLT engine currently treats top-level
-                            // param values as literal strings (not XPath),
-                            // so peel the surrounding quotes off before
-                            // forwarding so the receiving stylesheet sees
-                            // the intended string.
-                            let stripped = strip_xpath_string_literal(&select);
-                            cur_case.params.push((name, stripped));
+                            // Catalog parameter values are XPath
+                            // expressions (`'foo'`, `1`, `true()`,
+                            // `xs:int(23)`); evaluate to the string value so
+                            // the receiving xsl:param's `as=` can re-type it.
+                            cur_case.params.push((name, eval_param_value(&select)));
                         }
                     }
                     "assert-xml" if in_case && in_aux_assert == 0 => {
@@ -811,7 +829,7 @@ fn parse_test_set(path: &Path) -> Vec<TestCase> {
                             name: String::new(), stylesheet: None,
                             source_inline: None, source_file: None,
                             env_ref: None, expects: Expectation::Unsupported,
-            params: Vec::new(), static_params: Vec::new(), initial_template: None, initial_mode: None, initial_select: None, packages: Vec::new(), on_multiple_match_error: false, result_doc_asserts: Vec::new(),
+            params: Vec::new(), static_params: Vec::new(), initial_template: None, initial_mode: None, initial_select: None, packages: Vec::new(), on_multiple_match_error: false, result_doc_asserts: Vec::new(), source_schema: None,
                             requires_post_1_0: false, requires_unsupported_feature: false,
                         }));
                         in_case = false;
@@ -951,6 +969,9 @@ fn parse_test_set(path: &Path) -> Vec<TestCase> {
                 }
                 if env.on_multiple_match_error {
                     case.on_multiple_match_error = true;
+                }
+                if case.source_schema.is_none() {
+                    case.source_schema = env.schema_file.clone();
                 }
                 case.packages.extend(env.packages.iter().cloned());
             }
@@ -1461,6 +1482,32 @@ fn build_package_library(
     packages
 }
 
+/// Validate-and-type the source against the environment's
+/// `<schema role="source-reference">` by compiling it and appending it to
+/// the stylesheet's schema set — `build_source_types` then runs the XSD
+/// validator over the source so its nodes carry their post-schema-
+/// validation types (XSLT `validation="strict"/"lax"`).  A no-op without
+/// the `xsd` feature or when the case declares no source schema.
+#[cfg(feature = "xsd")]
+fn inject_source_schema(stylesheet: &mut Stylesheet, case: &TestCase, ts_dir: &Path) {
+    let Some(schema_file) = &case.source_schema else { return };
+    let Ok(text) = std::fs::read_to_string(ts_dir.join(schema_file)) else { return };
+    struct DirResolver<'a>(&'a Path);
+    impl sup_xml_core::xsd::SchemaResolver for DirResolver<'_> {
+        fn resolve(&self, location: &str, _ns: Option<&str>)
+            -> std::result::Result<Option<Vec<u8>>, std::io::Error>
+        {
+            Ok(std::fs::read(self.0.join(location)).ok())
+        }
+    }
+    if let Ok(schema) = sup_xml_core::xsd::Schema::compile_with(&text, DirResolver(ts_dir)) {
+        stylesheet.ast.schemas.push(std::sync::Arc::new(schema));
+    }
+}
+
+#[cfg(not(feature = "xsd"))]
+fn inject_source_schema(_stylesheet: &mut Stylesheet, _case: &TestCase, _ts_dir: &Path) {}
+
 fn run_case_detailed(case: &TestCase, ts_dir: &Path) -> Option<Result<(), FailReason>> {
     // Three run modes, all through this timeout-safe worker harness:
     //   * default              — XSLT 1.0-level cases only (stable baseline).
@@ -1555,11 +1602,12 @@ fn run_case_detailed(case: &TestCase, ts_dir: &Path) -> Option<Result<(), FailRe
     } else {
         Stylesheet::compile_str_with_loader(&xsl_text, &loader, Some(&base))
     };
-    let stylesheet = match compiled {
+    let mut stylesheet = match compiled {
         Ok(s)  => s,
         Err(_) => return Some(check_expectation_against(
             &case.expects, &ApplyResult::CompileFailed)),
     };
+    inject_source_schema(&mut stylesheet, case, ts_dir);
     // XSLT 3.0 entry conventions (`<initial-template name="…"/>` and
     // top-level `<param>` blocks) are catalog-level test-harness
     // features the 1.0 runner used to ignore.  Route through the
@@ -1628,7 +1676,8 @@ fn check_expectation_against(
         },
         Expectation::AssertXml(want) => match result {
             A::Ok(rt) => match rt.to_string() {
-                Ok(got) if canonicalise(&got) == canonicalise(want) => Ok(()),
+                Ok(got) if canonicalise(&got) == canonicalise(want)
+                    || xml_structurally_equal(&got, want) => Ok(()),
                 Ok(_)  => Err(FailReason::WrongOutput),
                 Err(_) => Err(FailReason::Serialise),
             },
@@ -1966,6 +2015,75 @@ fn canonicalise(s: &str) -> String {
     // built-in named entities are semantically equal to the
     // corresponding characters; decode both sides so they compare.
     decode_basic_entities(&pre)
+}
+
+/// Namespace-aware structural comparison of two serialized XML fragments.
+/// Elements and attributes compare by EXPANDED name (namespace URI + local
+/// name), so `<map xmlns="NS"/>` and `<j:map xmlns:j="NS"/>` are equal —
+/// XML namespace prefixes are insignificant (XDM §2.4).  Used only as a
+/// fallback when the textual `canonicalise` compare fails, so it can never
+/// turn a pass into a fail, only a fail into a pass.
+fn xml_structurally_equal(got: &str, want: &str) -> bool {
+    let mut opts = ParseOptions::default();
+    opts.namespace_aware = true;
+    let (Ok(gd), Ok(wd)) = (parse_str(got, &opts), parse_str(want, &opts))
+        else { return false };
+    let gc = sup_xml_core::XPathContext::new(&gd);
+    let wc = sup_xml_core::XPathContext::new(&wd);
+    // The document node is id 0; compare its significant top-level children.
+    seq_equal(&filtered_children(0, &gc.index), &gc.index,
+              &filtered_children(0, &wc.index), &wc.index)
+}
+
+fn filtered_children<I: sup_xml_core::xpath::DocIndexLike>(n: usize, idx: &I) -> Vec<usize> {
+    use sup_xml_core::xpath::XPathNodeKind as K;
+    idx.children(n).iter().copied().filter(|&c| match idx.kind(c) {
+        K::Text | K::CData => !idx.string_value(c).trim().is_empty(),
+        K::Element | K::Comment | K::PI => true,
+        _ => false,
+    }).collect()
+}
+
+fn attr_set<I: sup_xml_core::xpath::DocIndexLike>(e: usize, idx: &I) -> Vec<(String, String, String)> {
+    let mut v: Vec<(String, String, String)> = idx.attr_range(e).filter_map(|a| {
+        let local = idx.local_name(a);
+        // Namespace declarations are not attributes for comparison.
+        if local == "xmlns" || idx.node_name(a).starts_with("xmlns:") { return None; }
+        Some((idx.namespace_uri(a).to_string(), local.to_string(), idx.string_value(a)))
+    }).collect();
+    v.sort();
+    v
+}
+
+fn node_equal<I: sup_xml_core::xpath::DocIndexLike>(a: usize, ai: &I, b: usize, bi: &I) -> bool {
+    use sup_xml_core::xpath::XPathNodeKind as K;
+    // CDATA and text are the same in the data model; collapse whitespace
+    // in text the way `canonicalise` does so the fallback also matches
+    // cases that differ only in inter-word whitespace.
+    let norm = |k: K| if matches!(k, K::CData) { K::Text } else { k };
+    let ws = |s: String| s.split_whitespace().collect::<Vec<_>>().join(" ");
+    let (ak, bk) = (norm(ai.kind(a)), norm(bi.kind(b)));
+    if ak != bk { return false; }
+    match ak {
+        K::Element => {
+            ai.local_name(a) == bi.local_name(b)
+                && ai.namespace_uri(a) == bi.namespace_uri(b)
+                && attr_set(a, ai) == attr_set(b, bi)
+                && seq_equal(&filtered_children(a, ai), ai,
+                             &filtered_children(b, bi), bi)
+        }
+        K::Text           => ws(ai.string_value(a)) == ws(bi.string_value(b)),
+        K::Comment        => ai.string_value(a) == bi.string_value(b),
+        K::PI             => ai.node_name(a) == bi.node_name(b)
+                                && ws(ai.string_value(a)) == ws(bi.string_value(b)),
+        _ => true,
+    }
+}
+
+fn seq_equal<I: sup_xml_core::xpath::DocIndexLike>(
+    a: &[usize], ai: &I, b: &[usize], bi: &I,
+) -> bool {
+    a.len() == b.len() && a.iter().zip(b).all(|(&x, &y)| node_equal(x, ai, y, bi))
 }
 
 fn decode_basic_entities(s: &str) -> String {
@@ -2736,6 +2854,37 @@ fn assert_bindings(output: &str) -> AssertBindings {
     AssertBindings { map }
 }
 
+/// Evaluate a `<param select="…">` value as XPath and return its string
+/// value.  Test catalogs express parameter values as XPath expressions
+/// (`xs:int(23)`, `true()`, `'yes'`, `1`), so forwarding the raw lexical
+/// form would hand a parameter the literal string `"true()"` /
+/// `"xs:int(23)"`.  Evaluating against an empty context (param values are
+/// constants) and passing the result's string value lets the receiving
+/// `xsl:param`'s `as=` re-type it.  Falls back to the previous
+/// quote-stripping behavior when the expression doesn't parse/evaluate.
+fn eval_param_value(select: &str) -> String {
+    use sup_xml_core::xpath::eval::{EvalCtx, StaticContext, eval_expr, value_to_string_with};
+    let fallback = || strip_xpath_string_literal(select);
+    let mut opts = ParseOptions::default();
+    opts.namespace_aware = true;
+    let Ok(doc) = parse_str("<_/>", &opts) else { return fallback() };
+    let ctx = sup_xml_core::XPathContext::new(&doc);
+    let mut xpath_opts = sup_xml_core::xpath::XPathOptions::default();
+    xpath_opts.xpath_2_0 = true;
+    let Ok(expr) = sup_xml_core::xpath::parse_xpath_with(select.trim(), &xpath_opts)
+        else { return fallback() };
+    let bindings = assert_bindings("");
+    let static_ctx = StaticContext {
+        xpath_2_0: true, xpath_3_0: true, libxml2_compatible: false, current_node: None,
+    };
+    match eval_expr(&expr, &EvalCtx {
+        context_node: 0, pos: 1, size: 1, bindings: &bindings, static_ctx: &static_ctx,
+    }, &ctx.index) {
+        Ok(v)  => value_to_string_with(&v, &ctx.index, &bindings),
+        Err(_) => fallback(),
+    }
+}
+
 fn evaluate_assertion(output: &str, xpath: &str) -> Result<bool, sup_xml_core::error::XmlError> {
     use sup_xml_core::xpath::eval::{EvalCtx, StaticContext, XPathBindings, eval_expr, value_to_bool, validate_prefixes};
     let mut opts = ParseOptions::default();
@@ -2960,7 +3109,8 @@ fn dump_case() {
                 };
                 match compiled {
                     Err(e) => println!("COMPILE ERROR: {e}"),
-                    Ok(ss) => {
+                    Ok(mut ss) => {
+                        inject_source_schema(&mut ss, case, ts_dir);
                         let mut opts = ParseOptions::default();
                         opts.namespace_aware = true;
                         if let Some(f) = &case.source_file {
