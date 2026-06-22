@@ -1544,6 +1544,23 @@ impl Parser {
         }
     }
 
+    /// Parse the governing TypeName argument of an `element(N, T)` /
+    /// `attribute(N, T)` kind test — a (possibly prefixed) QName such as
+    /// `xs:ID` or `my:partNumberType`.  A trailing `?` (nillable marker)
+    /// is consumed and ignored.  Returned as the lexical string; the
+    /// prefix is resolved against in-scope namespaces at match time.
+    fn parse_type_qname_string(&mut self) -> Result<String> {
+        let name = match self.consume() {
+            Token::Name(n) => n,
+            other => return Err(parse_err(format!(
+                "expected a type name in a kind test, got {other:?}"))),
+        };
+        if matches!(self.peek(), Token::Question) {
+            self.consume();
+        }
+        Ok(name)
+    }
+
     fn parse_node_test(&mut self, _is_attr_axis: bool) -> Result<NodeTest> {
         match self.peek().clone() {
             Token::Star => {
@@ -1627,19 +1644,23 @@ impl Parser {
                             self.consume();
                             NodeTest::Wildcard
                         } else {
-                            let nt = self.parse_kind_name_or_wildcard_nt()?;
-                            // Optional second arg: TypeName — ignored.
-                            // (XPath 2.0 also allows a trailing `?` for
-                            // nillable; the lexer doesn't yet tokenise
-                            // `?`, so callers using that form fall into
-                            // a separate compile error we can address
-                            // once we add the token.)
+                            let inner = self.parse_kind_name_or_wildcard_nt()?;
+                            // Optional second arg: the governing TypeName
+                            // (XPath 2.0 §2.5.4.3/4).  When present, carry
+                            // it on a `SchemaType` test so schema-aware
+                            // matching can discriminate by PSVI type; with
+                            // no type the test stays the plain name test.
+                            // A trailing `?` (nillable) is accepted and
+                            // ignored — nillability doesn't affect matching.
                             if matches!(self.peek(), Token::Comma) {
                                 self.consume();
-                                let _ = self.parse_kind_name_or_wildcard_nt()?;
+                                let type_name = self.parse_type_qname_string()?;
+                                self.expect(&Token::RParen)?;
+                                NodeTest::SchemaType { inner: Box::new(inner), type_name }
+                            } else {
+                                self.expect(&Token::RParen)?;
+                                inner
                             }
-                            self.expect(&Token::RParen)?;
-                            nt
                         };
                         nt
                     }
@@ -2025,6 +2046,7 @@ fn desc_or_self_step() -> Step {
 
 #[cfg(test)]
 mod tests {
+
     use super::super::parse_xpath;
 
     /// Security regression: a malicious XPath with deeply nested

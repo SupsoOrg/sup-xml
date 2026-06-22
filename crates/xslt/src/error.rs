@@ -26,6 +26,22 @@ pub enum XsltError {
     /// `<xsl:message terminate="yes">` fired.  Carries the
     /// message-element's stringified content.
     Terminated(String),
+
+    /// A spec-defined dynamic (runtime) error raised during the
+    /// transformation, carrying its error code — e.g. `XTDE0555`
+    /// (no template matches and the mode's `on-no-match` is `fail`).
+    /// The code is what `xsl:try`/`xsl:catch` matches against via its
+    /// `errors="err:…"` QName, so dynamic errors that a stylesheet is
+    /// expected to recover from MUST use this variant rather than
+    /// folding the code into an [`InvalidStylesheet`] message.
+    Dynamic { code: String, message: String },
+}
+
+impl XsltError {
+    /// Construct a coded dynamic error.
+    pub fn dynamic(code: impl Into<String>, message: impl Into<String>) -> Self {
+        XsltError::Dynamic { code: code.into(), message: message.into() }
+    }
 }
 
 impl std::fmt::Display for XsltError {
@@ -48,6 +64,7 @@ impl std::fmt::Display for XsltError {
                 _ => write!(f, "xpath error: {}", e.message),
             },
             XsltError::Terminated(msg)         => write!(f, "xsl:message terminate=yes: {msg}"),
+            XsltError::Dynamic { code, message } => write!(f, "{message} ({code})"),
         }
     }
 }

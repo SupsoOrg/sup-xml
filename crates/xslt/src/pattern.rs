@@ -220,6 +220,19 @@ pub fn default_priority(pattern: &Expr) -> f64 {
             },
             // pi('target') is more specific than pi() — gets 0.
             NodeTest::PI(Some(_)) => 0.0,
+            // A typed `element(N, T)` / `attribute(N, T)` test takes the
+            // specificity of its name part (matching is name-based until
+            // the validator types nodes uniformly): a specific name → 0.0;
+            // a wildcard name (`element(*, T)`) is the least specific,
+            // like bare `*`.
+            NodeTest::SchemaType { inner, .. } => match inner.as_ref() {
+                NodeTest::QName(..)
+                    | NodeTest::DefaultNamespaceName { .. }
+                    | NodeTest::LocalName(_) => 0.0,
+                NodeTest::PrefixWildcard(_)
+                    | NodeTest::LocalNameOnly(_) => -0.25,
+                _ => -0.5,
+            },
         },
         _ => 0.5,
     }

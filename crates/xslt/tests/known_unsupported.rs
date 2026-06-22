@@ -92,11 +92,12 @@ fn streaming_source_document_downward_paths_compile() {
     }
 }
 
-/// `fn:stream-available($uri)` per XSLT 3.0 — returns true iff the
-/// processor can stream from the URI.  Our engine doesn't define it,
-/// so it must surface as an unknown-function error.
+/// `fn:stream-available($uri)` per XSLT 3.0 §18.1 — returns true iff the
+/// processor can stream the document at the URI.  This engine reports
+/// `supports-streaming = no`, so no document is ever streamable and the
+/// function returns `false` (never an error).
 #[test]
-fn stream_available_function_is_unsupported() {
+fn stream_available_returns_false_for_non_streaming() {
     let xsl = r#"<xsl:stylesheet version="3.0"
                                 xmlns:xsl="http://www.w3.org/1999/XSL/Transform"
                                 xmlns:fn="http://www.w3.org/2005/xpath-functions">
@@ -105,21 +106,11 @@ fn stream_available_function_is_unsupported() {
         </xsl:template>
     </xsl:stylesheet>"#;
 
-    let stylesheet = Stylesheet::compile_str(xsl)
-        .expect("compile-time XPath check happens at apply time, not compile");
+    let stylesheet = Stylesheet::compile_str(xsl).expect("compile");
     let src = parse_str("<r/>", &ParseOptions::default()).unwrap();
-    let result = stylesheet.apply(&src);
-    match result {
-        Err(_) => { /* expected — fn:stream-available undefined */ }
-        Ok(rt) => {
-            let s = rt.to_string().unwrap_or_default();
-            // If anyone implements stream-available(), it would emit
-            // "true" or "false".  Either string signals we shipped it.
-            assert!(!s.contains("true") && !s.contains("false"),
-                "fn:stream-available appears to resolve — replace with \
-                 real conformance test from tests/fn/stream-available/");
-        }
-    }
+    let rt = stylesheet.apply(&src).expect("apply");
+    let s = rt.to_string().unwrap();
+    assert!(s.contains(">false</out>"), "expected stream-available()=false, got {s:?}");
 }
 
 // ── schema-awareness ─────────────────────────────────────────────────

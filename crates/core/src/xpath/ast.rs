@@ -65,6 +65,16 @@ pub enum NodeTest {
     /// element name tests.  Stored as expanded URI + local part so
     /// runtime matching is a pair-compare without binding lookup.
     DefaultNamespaceName { uri: String, local: String },
+    /// `element(N, T)` / `attribute(N, T)` typed kind test (XPath 2.0
+    /// §2.5.4.3/4) as it appears in a path step or XSLT pattern.  `inner`
+    /// is the name test (`Wildcard`, `QName`, `LocalName`, …); `type_name`
+    /// is the lexical type QName (e.g. `"xs:ID"`), resolved against the
+    /// in-scope namespaces at match time.  The element/attribute
+    /// distinction comes from the step's axis.  A node matches only when
+    /// it satisfies `inner` AND its governing PSVI type is `type_name`
+    /// or derived from it (schema-aware processing); an unannotated node
+    /// matches leniently (see `node_type_match`).
+    SchemaType { inner: Box<NodeTest>, type_name: String },
 }
 
 #[derive(Debug, Clone)]

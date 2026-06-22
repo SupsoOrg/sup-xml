@@ -756,9 +756,12 @@ impl<'doc> DocIndexLike for DocIndex<'doc> {
         DocIndex::is_synthetic_wrap(self, id)
     }
     fn is_id_attribute(&self, attr_id: NodeId) -> bool {
-        if super::rtf::is_rtf_id(attr_id) { return false; }
         if is_synthetic(attr_id) { return false; }
-        let INodeKind::Attribute(_) = self.nodes[attr_id].kind else { return false; };
+        // Use the kind accessor (RTF-aware) rather than indexing
+        // `self.nodes` directly — constructed-tree (RTF) attributes live
+        // in a separate store and must answer this query too, so `id()`
+        // works over a temporary tree (XSLT 2.0 §11.9.2).
+        if !matches!(self.kind(attr_id), XPathNodeKind::Attribute) { return false; }
         let local = self.local_name(attr_id);
         // Default convention always honoured: any `xml:id` and any
         // attribute literally named `id` count, matching libxml2 in
@@ -766,9 +769,22 @@ impl<'doc> DocIndexLike for DocIndex<'doc> {
         if self.node_name(attr_id) == "xml:id" || local == "id" {
             return true;
         }
+        // Schema-aware: an attribute annotated (or PSVI-validated) as
+        // xs:ID, or a type derived from it, is an ID even in a
+        // constructed tree (XPath 2.0 §14.5.4).
+        if let Some((ns, ln)) = self.rtf_node_type(attr_id) {
+            if ns == "http://www.w3.org/2001/XMLSchema"
+                && (ln == "ID" || super::eval::xsd_is_subtype_of(&ln, "ID"))
+            {
+                return true;
+            }
+        }
         // DTD-typed override: consult the parsed `<!ATTLIST … ID>`
-        // declarations on this attribute's owner element.
-        if self.id_attrs.is_empty() { return false; }
+        // declarations on this attribute's owner element.  Constructed
+        // trees carry no DTD, so this never fires for an RTF attribute.
+        if super::rtf::is_rtf_id(attr_id) || self.id_attrs.is_empty() {
+            return false;
+        }
         let Some(owner) = self.parent(attr_id) else { return false; };
         let owner_name = self.node_name(owner);
         let attr_name = self.node_name(attr_id);

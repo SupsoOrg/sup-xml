@@ -33,29 +33,36 @@
 //!   - [`Sweep::FreeRanging`] — would need content outside the window.
 //!     Not streamable.
 //!
-//! The two central rules this module enforces:
+//! The central rule this module enforces:
 //!
-//! 1. A downward axis step (`child`, `descendant`) is streamable only
-//!    from a striding/crawling context; from a climbing or roaming
-//!    context it becomes roaming.  An absolute path is rooted at the
-//!    streamed document node, so `/a/b` and `//b` are downward
-//!    selections from the root — striding/crawling, streamable — the
-//!    same as the relative `a/b` evaluated at the document node.
-//! 2. A construct may have **at most one consuming operand**, because
-//!    the stream can be walked only once.  Two operands that each read
-//!    the descendants of the same context node make the construct
-//!    free-ranging.  (`xsl:fork` is the escape hatch — see
-//!    [`crate::stream`].)
+//! * A downward axis step (`child`, `descendant`) is streamable only
+//!   from a striding/crawling context; from a climbing or roaming
+//!   context it becomes roaming.  An absolute path is rooted at the
+//!   streamed document node, so `/a/b` and `//b` are downward
+//!   selections from the root — striding/crawling, streamable — the
+//!   same as the relative `a/b` evaluated at the document node.
 //!
-//! This is a conservative analyzer: it implements the guaranteed-
-//! streamable rules for the constructs that carry real streaming
-//! workloads (path/axis composition, comparisons, the common function
-//! library, and the sequence-constructor instructions handled in
-//! [`crate::stream`]).  Constructs whose streamability it cannot prove
-//! are classified free-ranging and rejected rather than mis-streamed —
-//! soundness (never wrongly accept) takes priority over completeness.
+//! The classic single-pass rule — *at most one consuming operand,
+//! because the stream is walked once* (`xsl:fork` being the escape
+//! hatch) — is tracked through [`Sweep`] and still folds expression
+//! operands strictly, but the **engine reports `supports-streaming =
+//! no` and executes streamable constructs by buffering (burst)**.  A
+//! buffered executor can satisfy several downward selections in
+//! document order, so the body / instruction-level classification
+//! ([`crate::stream::classify_body`], `xsl:copy`, path filter steps)
+//! folds with [`combine_max`] rather than the strict rule: a run of
+//! `xsl:map-entry`, or one `xsl:copy` per `for-each` item, is accepted
+//! rather than rejected.  What the analyzer rejects is the genuinely
+//! unbufferable: a roaming posture (`preceding::`, sibling re-access,
+//! descent from a climbed node) or a free-ranging operand.
+//!
+//! It implements the guaranteed-streamable rules for the constructs
+//! that carry real streaming workloads (path/axis composition,
+//! comparisons, the common function library, maps / arrays / function
+//! items, and the sequence-constructor instructions handled in
+//! [`crate::stream`]).
 
-use sup_xml_core::xpath::ast::{Axis, Expr, LocationPath, Step};
+use sup_xml_core::xpath::ast::{Axis, Expr, LocationPath, LookupKey, Step};
 
 /// The posture of an expression's result relative to the streamed
 /// context item.  See the module docs for the meaning of each value.
@@ -185,11 +192,14 @@ fn analyze_path(path: &LocationPath, ctx: Posture) -> Ps {
 
     for step in steps {
         if let Some(filter) = &step.filter {
-            // XPath 2.0 FilterExpr step (`path/key(...)`, `path/(expr)`):
-            // the primary produces its own sequence per input node.
+            // XPath 2.0 FilterExpr step (`path/copy-of(.)`, `path/(expr)`):
+            // the primary is evaluated once per input node — a nested
+            // per-item traversal, like a predicate, not a second
+            // independent walk of the context — so its sweep folds with
+            // `combine_max`.  (`PRICE/copy-of(.)` stays streamable.)
             let f = analyze_expr(filter, posture);
             posture = f.posture;
-            sweep = combine_strict(sweep, f.sweep);
+            sweep = combine_max(sweep, f.sweep);
         } else {
             let s = apply_axis(posture, step.axis);
             posture = s.posture;
@@ -501,13 +511,90 @@ pub fn analyze_expr(expr: &Expr, ctx: Posture) -> Ps {
             analyze_expr(inner, ctx)
         }
 
-        // Constructs whose streamability this analyzer does not (yet)
-        // prove — maps, arrays, inline/dynamic functions, try/catch,
-        // lookups, named-function references, placeholders.  Classified
-        // not-guaranteed-streamable so they are rejected rather than
-        // mis-streamed.
-        _ => Ps::rejected(),
+        // ── XPath 3.1 maps / arrays / function items ────────────────
+        //
+        // These produce a grounded item (a map, array, or function
+        // value); their sub-expressions may navigate the streamed tree.
+        // Because the engine bursts rather than truly streaming, the
+        // members are folded with `combine_max` (no single-pass
+        // at-most-one-consuming constraint) and the construct is only
+        // rejected when a sub-expression is itself roaming — avoiding
+        // false rejections of streamable code that merely happens to
+        // build a map or array.
+        Expr::MapConstructor(entries) => {
+            let parts = entries.iter().flat_map(|(k, v)| [k, v]);
+            fold_grounded_operands(parts, ctx)
+        }
+        Expr::ArrayConstructor { members, .. } =>
+            fold_grounded_operands(members.iter(), ctx),
+        Expr::Lookup(base, key) => {
+            let b = analyze_expr(base, ctx);
+            if b.posture == Roaming { return Ps::rejected(); }
+            let mut sweep = b.sweep;
+            if let LookupKey::Expr(e) = key {
+                let k = analyze_expr(e, ctx);
+                if k.posture == Roaming { return Ps::rejected(); }
+                sweep = combine_max(sweep, k.sweep);
+            }
+            Ps::new(Grounded, sweep)
+        }
+        Expr::UnaryLookup(key) => match key {
+            LookupKey::Expr(e) => {
+                let k = analyze_expr(e, ctx);
+                if k.posture == Roaming { Ps::rejected() }
+                else { Ps::new(Grounded, k.sweep) }
+            }
+            _ => Ps::grounded(),
+        },
+        // An inline function's body is analyzed against an undefined
+        // focus (it carries its own context when applied), so it reads
+        // nothing from the surrounding stream — grounded, motionless.
+        // Dynamic calls and named-function references are likewise
+        // grounded function items; their argument expressions fold in.
+        Expr::InlineFunction { .. } | Expr::NamedFunctionRef { .. }
+        | Expr::Placeholder => Ps::grounded(),
+        Expr::DynamicCall { func, args } => {
+            let f = analyze_expr(func, ctx);
+            if f.posture == Roaming { return Ps::rejected(); }
+            let mut acc = fold_grounded_operands(args.iter(), ctx);
+            acc.sweep = combine_max(acc.sweep, f.sweep);
+            acc
+        }
+        // `try { body } catch { handler }` — only one of body/handler
+        // contributes its result, so their sweeps fold with `combine_max`
+        // like conditional branches; roaming in either rejects.
+        Expr::TryCatch { body, catches } => {
+            let b = analyze_expr(body, ctx);
+            if b.posture == Roaming { return Ps::rejected(); }
+            let mut sweep = b.sweep;
+            let mut posture = b.posture;
+            for c in catches {
+                let h = analyze_expr(&c.body, ctx);
+                if h.posture == Roaming { return Ps::rejected(); }
+                sweep = combine_max(sweep, h.sweep);
+                posture = merge_posture(posture, h.posture);
+            }
+            Ps::new(posture, sweep)
+        }
     }
+}
+
+/// Fold a set of independent operand expressions into a grounded
+/// classification: roaming if any operand roams, otherwise the
+/// `combine_max` of their sweeps.  Used for map/array/dynamic-call
+/// operands, which under burst execution don't impose the single-pass
+/// at-most-one-consuming constraint.
+fn fold_grounded_operands<'a>(
+    operands: impl Iterator<Item = &'a Expr>,
+    ctx: Posture,
+) -> Ps {
+    let mut sweep = Sweep::Motionless;
+    for e in operands {
+        let p = analyze_expr(e, ctx);
+        if p.posture == Posture::Roaming { return Ps::rejected(); }
+        sweep = combine_max(sweep, p.sweep);
+    }
+    Ps::new(Posture::Grounded, sweep)
 }
 
 #[cfg(test)]
@@ -630,4 +717,6 @@ mod tests {
         assert!(ps("/a/b/c", Posture::Grounded).is_streamable());
         assert!(ps("following::x", Posture::Grounded).is_streamable());
     }
+
+
 }

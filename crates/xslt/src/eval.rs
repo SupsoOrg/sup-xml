@@ -758,6 +758,21 @@ impl<'a, I: DocIndexLike> XPathBindings for XsltBindings<'a, I> {
             // first node before loading.  Done here (not in
             // `document_fn`) because base-uri resolution needs the
             // bindings' node-base table and the active Loader.
+            // XSLT 3.0 §18.2.1 — the URI of the result document currently
+            // being written, or the empty sequence when none is (the
+            // principal output without a known base URI, or evaluation
+            // outside any output context such as a global variable).
+            if name == "current-output-uri" && args.is_empty() {
+                return Some(Ok(match current_output_uri() {
+                    Some(uri) => Value::String(uri),
+                    None      => Value::NodeSet(Vec::new()),
+                }));
+            }
+            // XSLT 3.0 §18.1 — this processor reports supports-streaming =
+            // no, so no document is available for streamed processing.
+            if name == "stream-available" && args.len() == 1 {
+                return Some(Ok(Value::Boolean(false)));
+            }
             let args = if name == "document" && args.len() == 2 {
                 self.resolve_document_against_base(args)
             } else if name == "document" && args.len() == 1 {
@@ -1894,9 +1909,8 @@ fn apply_builtin_template_with_args(
     // the XSLT 1.0 default, `text-only-copy`.
     match mode_on_no_match(state.style, mode) {
         OnNoMatch::DeepSkip => Ok(()),
-        OnNoMatch::Fail => Err(XsltError::InvalidStylesheet(
-            "no template rule matches and the mode's on-no-match is \
-             'fail' (XTDE0555)".into())),
+        OnNoMatch::Fail => Err(XsltError::dynamic("XTDE0555",
+            "no template rule matches and the mode's on-no-match is 'fail'")),
         OnNoMatch::DeepCopy => {
             match state.idx.kind(node) {
                 XPathNodeKind::Document => {
@@ -2229,6 +2243,64 @@ const MAX_FUNCTION_CALL_DEPTH: u32 = 1024;
 
 thread_local! {
     static FUNCTION_CALL_DEPTH: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+    /// Non-zero while a `validation="strip"` construct (XSLT 2.0 §19.2)
+    /// is being evaluated: the constructed/copied subtree must carry no
+    /// schema type annotations, so the `set_current_element_type` /
+    /// attribute-type sites become no-ops.  A counter (not a flag) so
+    /// nested strip scopes restore correctly.
+    static STRIP_VALIDATION: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
+/// True while a `validation="strip"` scope is active — the type-annotation
+/// emit sites consult this and skip annotating.
+fn validation_strips_types() -> bool {
+    STRIP_VALIDATION.with(|c| c.get() > 0)
+}
+
+thread_local! {
+    /// The URI of the `xsl:result-document` currently being written, for
+    /// `fn:current-output-uri()` (XSLT 3.0 §18.2.1).  `None` means no
+    /// result-document is in flight — the principal output or a context
+    /// with no established output destination (e.g. global-variable
+    /// evaluation), where the function returns the empty sequence.
+    static CURRENT_OUTPUT_URI: std::cell::RefCell<Option<String>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// The current `xsl:result-document` URI, or `None` outside one.
+fn current_output_uri() -> Option<String> {
+    CURRENT_OUTPUT_URI.with(|c| c.borrow().clone())
+}
+
+/// RAII guard that sets the current-output-uri to `uri` for the duration
+/// of an `xsl:result-document` body, restoring the previous value (which
+/// may itself be an enclosing result-document) on drop.
+struct OutputUriGuard(Option<String>);
+impl OutputUriGuard {
+    fn enter(uri: Option<String>) -> Self {
+        let prev = CURRENT_OUTPUT_URI.with(|c| c.replace(uri));
+        OutputUriGuard(prev)
+    }
+}
+impl Drop for OutputUriGuard {
+    fn drop(&mut self) {
+        CURRENT_OUTPUT_URI.with(|c| *c.borrow_mut() = self.0.take());
+    }
+}
+
+/// RAII guard that marks a `validation="strip"` scope for the duration of
+/// one construction (e.g. an `xsl:copy-of validation="strip"`).
+struct StripGuard;
+impl StripGuard {
+    fn enter() -> Self {
+        STRIP_VALIDATION.with(|c| c.set(c.get() + 1));
+        StripGuard
+    }
+}
+impl Drop for StripGuard {
+    fn drop(&mut self) {
+        STRIP_VALIDATION.with(|c| c.set(c.get().saturating_sub(1)));
+    }
 }
 
 /// RAII guard that bumps the per-thread `xsl:function` recursion depth on
@@ -2900,7 +2972,7 @@ pub fn apply_stylesheet_full_with_params_and_initial(
         Some(sel) => {
             let expr = sup_xml_core::xpath::parse_xpath(sel).map_err(XsltError::from)?;
             let v = state.xpath_eval(&expr, 0, 1, 1)?;
-            iterate_select_nodes(&mut state, v)?
+            atomic_select_to_nodes(&mut state, v)?
         }
         None => vec![0],
     };
@@ -3198,9 +3270,15 @@ fn run_try_instr<'a>(
 /// message.
 fn error_to_qname(e: &XsltError) -> (QName, String) {
     let local = match e {
+        XsltError::Dynamic { code, .. } => code.clone(),
         XsltError::Xpath(xe) => xe.xpath_code.clone()
             .unwrap_or_else(|| "FOER0000".to_string()),
-        _ => "FOER0000".to_string(),
+        // Older raise sites fold the spec code into the message text
+        // (e.g. "… (XTDE0820)").  Recover a trailing parenthesized
+        // code so `xsl:catch errors="err:…"` can still match it; fall
+        // back to the XPath/XQuery "unidentified error" code otherwise.
+        other => spec_code_in_message(&other.to_string())
+            .unwrap_or_else(|| "FOER0000".to_string()),
     };
     let qn = QName {
         prefix: Some("err".into()),
@@ -3208,6 +3286,35 @@ fn error_to_qname(e: &XsltError) -> (QName, String) {
         local,
     };
     (qn, e.to_string())
+}
+
+/// Best-effort recovery of a spec error code (`XTDE0555`, `XPTY0004`,
+/// `FORG0001`, …) from an engine-authored message.  XSLT/XPath error
+/// codes are four uppercase letters followed by four digits; the
+/// last such token in the message is the operative code (messages
+/// append it in parentheses).  Used only as a fallback for error
+/// variants that don't carry a structured code.
+fn spec_code_in_message(msg: &str) -> Option<String> {
+    let bytes = msg.as_bytes();
+    let mut found = None;
+    let mut i = 0;
+    while i + 8 <= bytes.len() {
+        let win = &bytes[i..i + 8];
+        if win[..4].iter().all(|b| b.is_ascii_uppercase())
+            && win[4..].iter().all(|b| b.is_ascii_digit())
+        {
+            // Reject if glued to a longer alphanumeric run on either side.
+            let before_ok = i == 0 || !bytes[i - 1].is_ascii_alphanumeric();
+            let after_ok = i + 8 >= bytes.len() || !bytes[i + 8].is_ascii_alphanumeric();
+            if before_ok && after_ok {
+                found = Some(msg[i..i + 8].to_string());
+                i += 8;
+                continue;
+            }
+        }
+        i += 1;
+    }
+    found
 }
 
 /// Render a QName as it should appear in the `$err:code`
@@ -3737,7 +3844,13 @@ fn set_iterate_control(ctrl: IterateControl) {
 /// Promote an `xsl:iterate select=` value to a list of context nodes,
 /// the same way `xsl:for-each` does — atomic items become synthetic
 /// text nodes so each becomes one iteration with `.` / position().
-fn iterate_select_nodes(state: &mut EvalState, v: Value) -> Result<Vec<NodeId>> {
+/// Flatten a `select=` value into the node sequence an instruction
+/// iterates over.  Real nodes pass through; atomic items (numbers,
+/// booleans, typed values, integer ranges) surface as synthetic text
+/// nodes whose lexical form drives `instance of` / pattern dispatch.
+/// Shared by `xsl:iterate`, `xsl:for-each-group`, and the atomic
+/// branch of `xsl:apply-templates`.
+fn atomic_select_to_nodes(state: &mut EvalState, v: Value) -> Result<Vec<NodeId>> {
     Ok(match v {
         Value::NodeSet(ns) => ns,
         Value::String(s) => state.idx.allocate_rtf_text_nodes_inherent(vec![s]),
@@ -3767,7 +3880,7 @@ fn iterate_select_nodes(state: &mut EvalState, v: Value) -> Result<Vec<NodeId>> 
             out
         }
         other => return Err(XsltError::InvalidStylesheet(format!(
-            "xsl:iterate select= must yield a sequence (got {other:?})"))),
+            "select= must yield a sequence (got {other:?})"))),
     })
 }
 
@@ -3946,7 +4059,16 @@ fn copy_shallow_node<'a>(
             state.builder.close_element();
         }
         XPathNodeKind::Text | XPathNodeKind::CData => {
-            state.builder.push_text(state.idx.string_value(node), false);
+            let s = state.idx.string_value(node);
+            // A synthetic text node stands in for an atomic value (e.g. the
+            // current item of `xsl:for-each select="1 to 4, 'x'"`); copying
+            // it keeps the §5.7.1 adjacent-atomic spacing, so a run of
+            // copied atomics is space-separated rather than concatenated.
+            if sup_xml_core::xpath::is_synthetic_id(node) {
+                state.builder.push_atomic_text(s);
+            } else {
+                state.builder.push_text(s, false);
+            }
         }
         XPathNodeKind::Attribute => {
             // Copy the attribute onto the current element.
@@ -4027,9 +4149,12 @@ fn eval_instr(
             state.builder.open_element(element_name.clone());
             // XSLT 2.0 §11.2.1 — an `xsl:type=` on the LRE annotates the
             // constructed element with that schema type, so its typed
-            // value is recoverable by `data()` / `instance of`.
+            // value is recoverable by `data()` / `instance of`.  A
+            // `validation="strip"` scope discards type annotations.
             if let Some(t) = schema_type {
-                state.builder.set_current_element_type(t.clone());
+                if !validation_strips_types() {
+                    state.builder.set_current_element_type(t.clone());
+                }
             }
             if !element_name.uri.is_empty() {
                 state.builder.push_namespace_decl(element_name.prefix.clone(), element_name.uri.clone());
@@ -4083,28 +4208,11 @@ fn eval_instr(
                 match state.xpath_eval(sel, ctx_node, pos, size)? {
                     Value::NodeSet(ns) => ns,
                     Value::String(s) if s.is_empty() => Vec::new(),
-                    // XPath 2.0 atomic sequence — surface each item as
-                    // a synthetic text node so the template dispatch
-                    // sees a flat node sequence.  Real nodes inside
-                    // the sequence pass through unchanged.
-                    Value::Sequence(items) => {
-                        let mut out: Vec<NodeId> = Vec::with_capacity(items.len());
-                        for item in items {
-                            match item {
-                                Value::NodeSet(ns) => out.extend(ns),
-                                Value::ForeignNodeSet(_) => {}
-                                atomic => {
-                                    let s = value_to_string_styled(&atomic, state.idx, state.num_style());
-                                    let ids = state.idx.allocate_rtf_text_nodes_inherent(vec![s]);
-                                    out.extend(ids);
-                                }
-                            }
-                        }
-                        out
-                    }
-                    other => return Err(XsltError::InvalidStylesheet(format!(
-                        "xsl:apply-templates select= must yield a sequence (got {other:?})"
-                    ))),
+                    // XPath 2.0 atomic sequence — surface each item
+                    // (including integer ranges like `1 to 10`) as a
+                    // synthetic text node so the template dispatch sees a
+                    // flat node sequence.  Real nodes pass through.
+                    other => atomic_select_to_nodes(state, other)?,
                 }
             } else {
                 // XSLT 2.0 §6.2 / XTTE0510 — `xsl:apply-templates` with
@@ -4594,6 +4702,9 @@ fn eval_instr(
                 // The result-document body is a final result tree, so a
                 // result-document nested in it isn't in temporary output.
                 let _final = FinalOutputGuard::enter();
+                // `current-output-uri()` inside the body returns this
+                // document's URI (XSLT 3.0 §18.2.1).
+                let _out_uri = OutputUriGuard::enter(Some(uri.clone()));
                 run_result_document_body(state, body, ctx_node, pos, size, is_json)
             };
             let restored = outer_secondary
@@ -5078,7 +5189,15 @@ fn eval_instr(
             // body straight through.
             eval_body(state, body, ctx_node, pos, size)?;
         }
-        Instr::SourceDocument { href, body, .. } => {
+        Instr::SourceDocument { href, body, streamable } => {
+            // XSLT 3.0 §19 — a `streamable="yes"` source-document body that
+            // is not guaranteed-streamable is an XTSE3430 error.  We don't
+            // actually stream (supports-streaming = no), but the contract
+            // is still enforced, scoped to this instruction so it fires
+            // only for the entry point that reaches it.
+            if *streamable {
+                crate::stream::check_source_document_streamable(body)?;
+            }
             // Non-streamed: load the referenced document fully and run
             // the body against its document node.
             let uri = render_avt(state, href, ctx_node, pos, size)?;
@@ -5354,7 +5473,7 @@ fn eval_instr(
             // way xsl:for-each does (atomics become synthetic text
             // nodes), so position()/last() and `.` work per item.
             let v = state.xpath_eval(select, ctx_node, pos, size)?;
-            let nodes = iterate_select_nodes(state, v)?;
+            let nodes = atomic_select_to_nodes(state, v)?;
             // Initial loop-carried parameter values, keyed by name.
             let mut current: HashMap<String, Value> = HashMap::new();
             for p in params {
@@ -5476,7 +5595,8 @@ fn eval_instr(
             let text = pieces.join(&sep);
             state.builder.push_text(text, *dose);
         }
-        Instr::Copy { use_attribute_sets, body, copy_namespaces, select } => {
+        Instr::Copy { use_attribute_sets, body, copy_namespaces, select, strip_validation } => {
+            let _strip = strip_validation.then(StripGuard::enter);
             // Without select=, copy the context node (classic xsl:copy).
             // With select= (XSLT 3.0), the expression names the item to
             // copy, which also becomes the body's context item.
@@ -5507,12 +5627,20 @@ fn eval_instr(
                 let empty = matches!(&v, Value::Sequence(s) if s.is_empty())
                     || matches!(&v, Value::NodeSet(n) if n.is_empty());
                 if !empty {
-                    state.builder.push_text(
-                        value_to_string_styled(&v, state.idx, state.num_style()), false);
+                    // An atomic value copied into complex content participates
+                    // in the §5.7.1 adjacent-atomic spacing rule — a run of
+                    // copied atomics (e.g. one `xsl:copy` per `for-each` item)
+                    // is space-separated, like `xsl:sequence`.
+                    state.builder.push_atomic_text(
+                        value_to_string_styled(&v, state.idx, state.num_style()));
                 }
             }
         }
-        Instr::CopyOf { select, copy_namespaces } => {
+        Instr::CopyOf { select, copy_namespaces, strip_validation } => {
+            // `validation="strip"` removes schema type annotations from the
+            // copied subtree; the guard is held for the whole copy so every
+            // nested element/attribute emit site sees the strip scope.
+            let _strip = strip_validation.then(StripGuard::enter);
             // Special case: if the select is a single variable
             // reference and we have an RTF for that variable,
             // deep-copy the result-tree nodes instead of treating
@@ -5559,7 +5687,8 @@ fn eval_instr(
             }
             copy_value_into(state, &v, *copy_namespaces)?;
         }
-        Instr::Element { name, namespace, body, use_attribute_sets, in_scope_namespaces } => {
+        Instr::Element { name, namespace, body, use_attribute_sets, in_scope_namespaces, schema_type, strip_validation } => {
+            let _strip = strip_validation.then(StripGuard::enter);
             let name_str = render_avt(state, name, ctx_node, pos, size)?;
             // XSLT spec §7.1.2 / §11.7 — the element name must be a
             // non-empty lexical QName.  Empty / whitespace-only
@@ -5632,6 +5761,15 @@ fn eval_instr(
             };
             let q = QName { prefix, local, uri: resolved_uri };
             state.builder.open_element(q.clone());
+            // XSLT 2.0 §11.2.1 — `type=` on xsl:element annotates the
+            // constructed element with that schema type so its typed
+            // value is recoverable by `data()` / `instance of` /
+            // `element(*, T)` kind tests (mirrors the LRE `xsl:type=` arm).
+            if let Some(t) = schema_type {
+                if !validation_strips_types() {
+                    state.builder.set_current_element_type(t.clone());
+                }
+            }
             if !q.uri.is_empty() {
                 state.builder.push_namespace_decl(q.prefix.clone(), q.uri.clone());
             }
@@ -7710,8 +7848,12 @@ fn copy_value_into_builder<I: DocIndexLike>(
                 first = false;
             }
         }
-        // Maps / arrays have no text projection — emit nothing.
-        Value::Map(_) | Value::Array(_) | Value::Function(_) => {}
+        // An array flattens into the result tree (XPath 3.1 §2.4.5).
+        Value::Array(a) => for member in a.iter() {
+            copy_value_into_builder(builder, idx, member, style);
+        },
+        // Maps / functions have no text projection — emit nothing.
+        Value::Map(_) | Value::Function(_) => {}
     }
 }
 
@@ -7739,7 +7881,9 @@ fn deep_copy_into_builder<I: DocIndexLike>(
             // carry an annotation, so this is a no-op for ordinary
             // untyped copies.
             if let Some(t) = idx.rtf_node_type(node) {
-                builder.set_current_element_type(t);
+                if !validation_strips_types() {
+                    builder.set_current_element_type(t);
+                }
             }
             for ns_id in idx.ns_range(node) {
                 let prefix = idx.local_name(ns_id);
@@ -8264,7 +8408,14 @@ fn sequence_string_items<I: DocIndexLike>(v: &Value, idx: &I, style: NumStyle) -
             .flat_map(|item| sequence_string_items(item, idx, style))
             .collect(),
         Value::IntRange { lo, hi } => (*lo..=*hi).map(|i| i.to_string()).collect(),
-        Value::Map(_) | Value::Array(_) | Value::Function(_) => Vec::new(),
+        // Atomizing an array flattens its members (XPath 3.1 §2.4.5): each
+        // member contributes its own atomized string items, so
+        // `xsl:value-of select="[1,2,3]"` yields the items 1, 2, 3 (which
+        // the caller then joins with the separator).
+        Value::Array(a) => a.iter()
+            .flat_map(|m| sequence_string_items(m, idx, style))
+            .collect(),
+        Value::Map(_) | Value::Function(_) => Vec::new(),
     }
 }
 
@@ -8776,17 +8927,22 @@ fn copy_result_node_into(state: &mut EvalState, node: &ResultNode) {
             state.builder.open_element(name.clone());
             // Preserve the constructed node's schema type across the copy
             // (validation="preserve" / default-validation="preserve").
+            let strip = validation_strips_types();
             if let Some(t) = schema_type {
-                state.builder.set_current_element_type((**t).clone());
+                if !strip {
+                    state.builder.set_current_element_type((**t).clone());
+                }
             }
             for (p, u) in namespaces {
                 state.builder.push_namespace_decl(p.clone(), u.clone());
             }
             for (an, v) in attributes {
-                if let Some((_, t)) = attr_types.iter()
-                    .find(|(n, _)| n.uri == an.uri && n.local == an.local)
-                {
-                    state.builder.set_current_attr_type(an.clone(), (**t).clone());
+                if !strip {
+                    if let Some((_, t)) = attr_types.iter()
+                        .find(|(n, _)| n.uri == an.uri && n.local == an.local)
+                    {
+                        state.builder.set_current_attr_type(an.clone(), (**t).clone());
+                    }
                 }
                 state.builder.push_attribute(an.clone(), v.clone());
             }
@@ -8976,34 +9132,36 @@ fn copy_value_into(state: &mut EvalState, v: &Value, copy_ns: bool) -> Result<()
         // document() support yet here); silently no-op.  lxml path
         // goes through libxslt which has its own xsl:copy-of impl.
         Value::ForeignNodeSet(_) => {}
-        // Atomic / mixed sequence: emit each item with a space
-        // separator between consecutive atomic items (XSLT 2.0
-        // §5.7.2 sequence normalization).  Nodes copy through
-        // without inter-item separators.
+        // Atomic / mixed sequence: each item copies through
+        // recursively.  Atomic items route through `push_atomic_text`,
+        // whose `last_was_atomic` flag inserts the single separating
+        // space between consecutive atomic values (XSLT 2.0 §5.7.2);
+        // copied nodes reset the flag, so a node between two atomics
+        // suppresses the space.  Tracking via the builder flag rather
+        // than locally keeps the rule correct across the surrounding
+        // sequence constructor's instruction boundaries too.
         Value::Sequence(items) => {
-            let mut prev_was_atomic = false;
             for item in items {
-                let is_atomic = !matches!(item,
-                    Value::NodeSet(_) | Value::ForeignNodeSet(_));
-                if is_atomic && prev_was_atomic {
-                    state.builder.push_text(" ".into(), false);
-                }
                 copy_value_into(state, item, copy_ns)?;
-                prev_was_atomic = is_atomic;
             }
         }
-        // XSLT 2.0 §5.7.2 sequence normalisation — each integer
-        // emits its lexical form, separated by single spaces.
+        // XSLT 2.0 §5.7.2 sequence normalisation — each integer emits
+        // its lexical form, space-separated via the atomic-run flag.
         Value::IntRange { lo, hi } => {
-            let mut first = true;
             for i in *lo..=*hi {
-                if !first { state.builder.push_text(" ".into(), false); }
-                state.builder.push_text(i.to_string(), false);
-                first = false;
+                state.builder.push_atomic_text(i.to_string());
             }
         }
-        // Maps / arrays produce no result-tree text here.
-        Value::Map(_) | Value::Array(_) | Value::Function(_) => {}
+        // An array flattens into the result tree (XPath 3.1 §2.4.5): each
+        // member is copied in turn, so `xsl:copy-of select="[$nodes, …]"`
+        // emits the member nodes / atomics rather than nothing.
+        Value::Array(a) => {
+            for member in a.iter() {
+                copy_value_into(state, member, copy_ns)?;
+            }
+        }
+        // Maps / functions have no result-tree projection.
+        Value::Map(_) | Value::Function(_) => {}
     }
     Ok(())
 }
@@ -9095,7 +9253,16 @@ fn deep_copy_node(state: &mut EvalState, node: NodeId, mirrored_parent: Option<N
             state.builder.close_element();
         }
         XPathNodeKind::Text | XPathNodeKind::CData => {
-            state.builder.push_text(state.idx.string_value(node), false);
+            let s = state.idx.string_value(node);
+            // A synthetic text node stands in for an atomic value (e.g. the
+            // current item of `xsl:for-each select="1 to 4, 'x'"`); copying
+            // it keeps the §5.7.1 adjacent-atomic spacing, so a run of
+            // copied atomics is space-separated rather than concatenated.
+            if sup_xml_core::xpath::is_synthetic_id(node) {
+                state.builder.push_atomic_text(s);
+            } else {
+                state.builder.push_text(s, false);
+            }
         }
         XPathNodeKind::Attribute => {
             let q = attribute_qname(state, node);

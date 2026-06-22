@@ -970,6 +970,34 @@ fn ancestor_forces_backwards_compat(node: &Node) -> bool {
 /// nodes) in effect at `node`?  Controlled by the nearest in-scope
 /// `[xsl:]expand-text` attribute; defaults to off.  `node` is a text
 /// node, so the search starts at its parent element.
+/// Validate every `[xsl:]expand-text` attribute in the tree rooted at
+/// `node`: it must be a static boolean (`yes`/`no`/`true`/`false`/`1`/`0`),
+/// not an AVT or arbitrary string (XTSE0020).  On an XSLT element the
+/// attribute is unprefixed; on a literal result element it is the
+/// `xsl:expand-text` form (a plain `expand-text` there is just a literal
+/// attribute and is left alone).
+fn validate_expand_text(node: &Node) -> Result<(), XsltError> {
+    if node.is_element() {
+        let v = if is_xslt_element(node) {
+            read_attribute(node, "expand-text")
+        } else {
+            read_xsl_attribute(node, "expand-text")
+        };
+        if let Some(v) = v {
+            if !matches!(v.trim(), "yes" | "no" | "true" | "false" | "1" | "0") {
+                return Err(XsltError::InvalidStylesheet(format!(
+                    "[xsl:]expand-text='{}' must be a static boolean \
+                     (yes/no/true/false/1/0), not '{}' (XTSE0020)",
+                    v.trim(), v.trim())));
+            }
+        }
+    }
+    for child in node.children() {
+        validate_expand_text(child)?;
+    }
+    Ok(())
+}
+
 fn expand_text_in_scope(node: &Node) -> bool {
     let mut cur = node.parent.get();
     while let Some(n) = cur {
@@ -1009,6 +1037,11 @@ pub fn compile(doc: &Document) -> Result<StylesheetAst, XsltError> {
             "stylesheet document has no root element".into(),
         ));
     }
+    // XSLT 3.0 §4.2 — `[xsl:]expand-text` is a static boolean: every
+    // occurrence must be a recognised yes/no value, not an AVT or other
+    // string (XTSE0020).  `expand_text_in_scope` silently treats an
+    // unrecognised value as "no", so the staticness is enforced here.
+    validate_expand_text(root)?;
     // XSLT 1.0 §2.3 simplified stylesheet: a non-XSLT root with an
     // `xsl:version` attribute is shorthand for an xsl:stylesheet
     // containing a single `xsl:template match="/"` whose body is the
@@ -2722,6 +2755,12 @@ fn compile_with_imports_inner(
             && is_xslt_element(root) && root.local_name() == "package"
         {
             acc.is_package = true;
+            // XSLT 3.0 §6.6.1 — `declared-modes` defaults to "yes" on an
+            // xsl:package; only an explicit "no" turns mode-declaration
+            // checking off.
+            acc.declared_modes = !matches!(
+                read_attribute(root, "declared-modes").as_deref(),
+                Some("no") | Some("false") | Some("0"));
         }
     }
     let local = compile(&doc)?;
@@ -6009,8 +6048,21 @@ fn compile_merge(node: &Node) -> Result<Instr, XsltError> {
                 child.name())));
         }
         match child.local_name() {
-            "merge-source" => sources.push(compile_merge_source(child)?),
+            // XSLT 3.0 §15.2 — every xsl:merge-source must precede the
+            // single xsl:merge-action.
+            "merge-source" => {
+                if action.is_some() {
+                    return Err(XsltError::InvalidStylesheet(
+                        "xsl:merge-source must precede the xsl:merge-action (XTSE0010)".into()));
+                }
+                sources.push(compile_merge_source(child)?);
+            }
             "merge-action" => {
+                // Exactly one xsl:merge-action is permitted (XTSE0010).
+                if action.is_some() {
+                    return Err(XsltError::InvalidStylesheet(
+                        "xsl:merge must have exactly one xsl:merge-action (XTSE0010)".into()));
+                }
                 let mut body = Body::new();
                 for gc in child.children() {
                     if !gc.is_element() && !is_significant_text(gc) { continue; }
@@ -6043,7 +6095,13 @@ fn compile_merge_source(node: &Node) -> Result<MergeSource, XsltError> {
     let mut keys = Vec::new();
     for child in node.children() {
         if child.is_element() && is_xslt_element(child) && child.local_name() == "merge-key" {
-            // xsl:merge-key shares xsl:sort's comparison attributes.
+            // xsl:merge-key shares xsl:sort's comparison attributes EXCEPT
+            // `stable` — a merge is always stable, so `stable` is not in
+            // xsl:merge-key's attribute set (XSLT 3.0 §15.2 / XTSE0090).
+            if read_attribute(child, "stable").is_some() {
+                return Err(XsltError::InvalidStylesheet(
+                    "xsl:merge-key has no 'stable' attribute (XTSE0090)".into()));
+            }
             keys.push(compile_sort(child)?);
         }
     }
@@ -6473,6 +6531,7 @@ fn compile_copy(node: &Node) -> Result<Instr, XsltError> {
         body: compile_body(node)?,
         copy_namespaces,
         select,
+        strip_validation: read_attribute(node, "validation").as_deref() == Some("strip"),
     })
 }
 
@@ -6541,6 +6600,7 @@ fn compile_copy_of(node: &Node) -> Result<Instr, XsltError> {
     Ok(Instr::CopyOf {
         select: parse_xpath_at(node, select).map_err(XsltError::from)?,
         copy_namespaces,
+        strip_validation: read_attribute(node, "validation").as_deref() == Some("strip"),
     })
 }
 
@@ -6558,6 +6618,9 @@ fn compile_element(node: &Node) -> Result<Instr, XsltError> {
         )?,
         body: compile_body(node)?,
         in_scope_namespaces: collect_in_scope_namespaces(node),
+        schema_type: read_attribute(node, "type")
+            .and_then(|v| resolve_type_qname(node, v)),
+        strip_validation: read_attribute(node, "validation").as_deref() == Some("strip"),
     })
 }
 
@@ -7376,6 +7439,90 @@ pub fn validate_call_template_with_params(ast: &StylesheetAst) -> Result<(), Xsl
 ///  * an `xsl:next-iteration` parameter must name a parameter declared
 ///    on the enclosing `xsl:iterate` (XTSE3130);
 ///  * the `xsl:param`s of one `xsl:iterate` must have distinct names.
+/// XSLT 3.0 §6.6.1 — when `declared-modes` is in effect (the default for
+/// an `xsl:package`), every mode named by a template rule or by
+/// `xsl:apply-templates` must be declared with an `xsl:mode`; an
+/// undeclared mode is a static error (XTSE3050).  The unnamed/default
+/// mode and `mode="#current"` impose no requirement.  No-op for plain
+/// stylesheets, which never require mode declarations.
+pub fn validate_declared_modes(ast: &StylesheetAst) -> Result<(), XsltError> {
+    if !ast.declared_modes {
+        return Ok(());
+    }
+    let is_unnamed = |q: &QName| q.uri.is_empty() && q.local.is_empty();
+    let declared: std::collections::HashSet<String> = ast.modes.iter()
+        .filter_map(|m| m.name.as_ref())
+        .filter(|q| !is_unnamed(q))
+        .map(qname_key)
+        .collect();
+    let check = |q: &QName| -> Result<(), XsltError> {
+        if is_unnamed(q) || declared.contains(&qname_key(q)) {
+            return Ok(());
+        }
+        Err(XsltError::InvalidStylesheet(format!(
+            "mode '{}' is used but not declared by an xsl:mode, and the \
+             package's declared-modes is 'yes' (XTSE3050)",
+            q.local)))
+    };
+    let mut used: Vec<QName> = Vec::new();
+    for t in &ast.templates {
+        for m in &t.modes { check(m)?; }
+        collect_apply_modes(&t.body, &mut used);
+    }
+    for v in &ast.global_variables { collect_apply_modes(&v.body, &mut used); }
+    for p in &ast.global_params    { collect_apply_modes(&p.body, &mut used); }
+    for f in &ast.functions        { collect_apply_modes(&f.body, &mut used); }
+    for s in &ast.attribute_sets   { collect_apply_modes(&s.attributes, &mut used); }
+    for m in &used { check(m)?; }
+    Ok(())
+}
+
+/// Collect the named modes referenced by `xsl:apply-templates mode="…"`
+/// anywhere in `body` (recursing into the common body-bearing
+/// instructions).  `mode="#current"` and the unnamed mode contribute
+/// nothing.  A nesting this misses is a safe under-report — it can only
+/// fail to flag an undeclared mode, never wrongly flag a declared one.
+fn collect_apply_modes(body: &crate::ast::Body, out: &mut Vec<QName>) {
+    use crate::ast::Instr::*;
+    for instr in body.instrs() {
+        match instr {
+            ApplyTemplates { mode, mode_current, .. } => {
+                if !*mode_current {
+                    if let Some(m) = mode { out.push(m.clone()); }
+                }
+            }
+            If { body, .. } | ForEach { body, .. } | Break { body, .. }
+            | ValueOfBody { body, .. } | Copy { body, .. } | Element { body, .. }
+            | Attribute { body, .. } | Comment { body, .. }
+            | ProcessingInstruction { body, .. } | Message { body, .. }
+            | Assert { body, .. } | Fallback { body } | Map { body }
+            | MapEntry { body, .. } | ForEachGroup { body, .. }
+            | SourceDocument { body, .. } | OnEmpty { body } | OnNonEmpty { body }
+            | WherePopulated { body } | Fork { body } | PerformSort { body, .. }
+            | Document { body } | ResultDocument { body, .. } | Namespace { body, .. }
+            | LiteralElement { body, .. } => collect_apply_modes(body, out),
+            Iterate { body, on_completion, .. } => {
+                collect_apply_modes(body, out);
+                collect_apply_modes(on_completion, out);
+            }
+            Choose { whens, otherwise } => {
+                for (_, b) in whens { collect_apply_modes(b, out); }
+                if let Some(b) = otherwise { collect_apply_modes(b, out); }
+            }
+            Try { body, catches } => {
+                collect_apply_modes(body, out);
+                for c in catches { collect_apply_modes(&c.body, out); }
+            }
+            AnalyzeString { matching, non_matching, .. } => {
+                collect_apply_modes(matching, out);
+                collect_apply_modes(non_matching, out);
+            }
+            Merge { action, .. } => collect_apply_modes(action, out),
+            _ => {}
+        }
+    }
+}
+
 pub fn validate_iterate_constraints(ast: &StylesheetAst) -> Result<(), XsltError> {
     for t in &ast.templates       { check_iterate(&t.body, None)?; }
     for v in &ast.global_variables { check_iterate(&v.body, None)?; }
@@ -7733,6 +7880,12 @@ fn avt(node: &Node, s: &str) -> Result<Avt, XsltError> {
                 let mut in_quot = false;
                 let mut paren_depth = 0u32;
                 let mut bracket_depth = 0u32;
+                // Brace depth for XPath 3.1 constructs that carry their
+                // own `{ … }` — inline functions `function(){…}`, map
+                // `map{…}` / array `array{…}` constructors.  A `}` that
+                // closes one of those must not be mistaken for the end of
+                // the AVT/TVT expression.
+                let mut brace_depth = 0u32;
                 // XPath 2.0 `(: … :)` comments nest; depth tracks
                 // the open count so a `}` inside a comment is not
                 // mistaken for the end of the AVT expression.
@@ -7778,6 +7931,12 @@ fn avt(node: &Node, s: &str) -> Result<Avt, XsltError> {
                         '[' if !in_apos && !in_quot => { bracket_depth += 1;   expr_text.push(ec); }
                         ']' if !in_apos && !in_quot && bracket_depth > 0
                             => { bracket_depth -= 1; expr_text.push(ec); }
+                        // A `{` inside the expression opens an inline-
+                        // function / map / array body; balance it so its
+                        // matching `}` doesn't terminate the AVT.
+                        '{' if !in_apos && !in_quot => { brace_depth += 1; expr_text.push(ec); }
+                        '}' if !in_apos && !in_quot && brace_depth > 0
+                            => { brace_depth -= 1; expr_text.push(ec); }
                         '}' if !in_apos && !in_quot && paren_depth == 0
                               && bracket_depth == 0 => { closed = true; break; }
                         _ => expr_text.push(ec),
@@ -7797,6 +7956,11 @@ fn avt(node: &Node, s: &str) -> Result<Avt, XsltError> {
                     continue;
                 }
                 let mut expr = parse_xpath(&expr_text).map_err(XsltError::from)?;
+                // An AVT / text-value-template `{expr}` resolves
+                // fn:static-base-uri() / fn:resolve-uri() against the call
+                // site's xml:base scope, the same as a `select=` expression
+                // (which routes through `parse_xpath_at`).
+                apply_static_base_uri(&mut expr, node);
                 if bc {
                     expr = Expr::BackwardsCompat(Box::new(expr));
                 }

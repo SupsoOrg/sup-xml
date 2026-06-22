@@ -173,6 +173,21 @@ fn validate_accumulator(acc: &AccumulatorDecl) -> Result<(), XsltError> {
     Ok(())
 }
 
+/// Validate one `xsl:source-document streamable="yes"` body against the
+/// §19 guaranteed-streamability rules, returning the `XTSE3430` error if
+/// it is not guaranteed-streamable.  Called at the point the instruction
+/// executes (the engine reports `supports-streaming = no`, so the check
+/// is deferred to use), which scopes the error to the streamable context
+/// actually entered — sibling templates sharing the stylesheet are
+/// unaffected.
+pub fn check_source_document_streamable(body: &Body) -> Result<(), XsltError> {
+    require_body_streamable(
+        body,
+        Posture::Striding,
+        "xsl:source-document streamable=\"yes\"",
+    )
+}
+
 /// Recursively find `xsl:source-document streamable="yes"` instructions
 /// and validate each one's body as its own streamable context.
 fn scan_source_documents(body: &Body) -> Result<(), XsltError> {
@@ -270,11 +285,17 @@ fn require_body_streamable(body: &Body, ctx: Posture, what: &str) -> Result<(), 
     }
 }
 
-/// Classify a sequence constructor (a template/instruction body).  Its
-/// instructions share the context node, so they fold under the
-/// at-most-one-consuming rule: more than one consuming instruction makes
-/// the body free-ranging.  The body's result is grounded (a result-tree
-/// fragment); the returned sweep is what it contributes to its parent.
+/// Classify a sequence constructor (a template/instruction body).  The
+/// engine reports `supports-streaming = no` and executes streamable
+/// constructs by buffering (burst), so the body is rejected only when an
+/// instruction is genuinely impossible to evaluate even with buffering —
+/// a roaming posture or a free-ranging operand (backward / sibling axes,
+/// descent from a climbed node).  The "at most one consuming instruction"
+/// single-pass rule is *not* enforced here: multiple downward selections
+/// in document order (e.g. a run of `xsl:map-entry`, or one `xsl:copy`
+/// per `for-each` item) are satisfiable by the buffered executor, so they
+/// fold with `combine_max` rather than the strict rule.  The body's
+/// result is grounded; the returned sweep is what it contributes upward.
 fn classify_body(body: &Body, ctx: Posture) -> Result<Ps, XsltError> {
     let mut sweep = Sweep::Motionless;
     for instr in body.instrs() {
@@ -282,13 +303,7 @@ fn classify_body(body: &Body, ctx: Posture) -> Result<Ps, XsltError> {
         if !ps.is_streamable() {
             return Err(not_streamable("an instruction in a streamable context"));
         }
-        sweep = combine_strict(sweep, ps.sweep);
-        if sweep == Sweep::FreeRanging {
-            return Err(not_streamable(
-                "a sequence constructor with more than one consuming instruction \
-                 (use xsl:fork)",
-            ));
-        }
+        sweep = combine_max(sweep, ps.sweep);
     }
     Ok(Ps::new(Posture::Grounded, sweep))
 }
@@ -398,12 +413,16 @@ fn analyze_instr(instr: &Instr, ctx: Posture) -> Result<Ps, XsltError> {
         }
         Copy { select, body, .. } => {
             // Shallow-copy the context (or `select=`) node, then run the
-            // body in the same context (the identity-transform idiom).
-            let mut sweep = classify_body(body, ctx)?.sweep;
-            if let Some(sel) = select {
-                sweep = combine_strict(sweep, expr_operand(sel, ctx, "xsl:copy select")?.sweep);
-            }
-            Ok(Ps::new(Posture::Grounded, sweep))
+            // body in the context of that node.  The body's selection is
+            // nested within the copied node — the same forward pass that
+            // reached it — so its sweep folds with `combine_max`, not the
+            // independent-walk one-consuming rule.
+            let sel_ps = match select {
+                Some(sel) => expr_operand(sel, ctx, "xsl:copy select")?,
+                None => Ps::new(ctx, Sweep::Motionless),
+            };
+            let body_sweep = classify_body(body, sel_ps.posture)?.sweep;
+            Ok(Ps::new(Posture::Grounded, combine_max(sel_ps.sweep, body_sweep)))
         }
 
         // ── template invocation: select is the consuming operand ────
@@ -743,7 +762,12 @@ mod tests {
     }
 
     #[test]
-    fn streamable_mode_rejects_two_consuming_instructions() {
+    fn streamable_mode_accepts_two_consuming_instructions_via_buffering() {
+        // Two downward selections in document order are satisfiable by the
+        // buffered (burst) executor in a single forward pass, so the
+        // body-level single-pass rule is not enforced — the W3C streaming
+        // suite expects such bodies (e.g. runs of xsl:map-entry, or one
+        // xsl:copy per for-each item) to produce output, not XTSE3430.
         let xsl = format!(
             r#"{HEAD}
             <xsl:mode name="s" streamable="yes"/>
@@ -753,7 +777,7 @@ mod tests {
             </xsl:template>
         </xsl:stylesheet>"#
         );
-        assert!(compiles(&xsl).unwrap_err().contains("XTSE3430"));
+        assert!(compiles(&xsl).is_ok(), "{:?}", compiles(&xsl));
     }
 
     #[test]
@@ -829,4 +853,5 @@ mod tests {
         );
         assert!(compiles(&xsl).is_ok(), "{:?}", compiles(&xsl));
     }
+
 }

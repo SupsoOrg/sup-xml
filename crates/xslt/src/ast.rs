@@ -459,6 +459,9 @@ pub enum Instr {
         /// The expression must yield at most one item, which also
         /// becomes the context item for the body.
         select:             Option<Expr>,
+        /// `validation="strip"` (XSLT 2.0 §19.2) — the shallow copy and
+        /// its body are emitted without schema type annotations.
+        strip_validation:   bool,
     },
     CopyOf {
         select: Expr,
@@ -466,6 +469,12 @@ pub enum Instr {
         /// only the namespaces required by copied nodes' own names,
         /// dropping inherited in-scope declarations.  Default `true`.
         copy_namespaces: bool,
+        /// `validation="strip"` (XSLT 2.0 §19.2) — the copied subtree is
+        /// emitted with all schema type annotations removed.  The other
+        /// validation modes (`preserve` is the no-op default; `strict`/
+        /// `lax` would re-validate against the imported schema) aren't
+        /// modeled, so only the `strip` case sets this.
+        strip_validation: bool,
     },
     Element {
         name:               Avt,                 // AVT — name may be dynamic
@@ -478,6 +487,15 @@ pub enum Instr {
         /// local namespace context (XSLT 1.0 §7.1.2 — "the namespace
         /// declarations in effect for the xsl:element element").
         in_scope_namespaces: Vec<(Option<String>, String)>,
+        /// Schema-aware: expanded name `(ns, local)` of the type named
+        /// by a `type=` attribute (XSLT 2.0 §11.2.1).  `None` for the
+        /// untyped case.  Annotates the constructed element so its
+        /// typed value is recoverable by `data()` / `instance of` /
+        /// `element(*, T)` kind tests.
+        schema_type: Option<(String, String)>,
+        /// `validation="strip"` (XSLT 2.0 §19.2) — the constructed element
+        /// and its body are emitted without schema type annotations.
+        strip_validation: bool,
     },
     Attribute {
         name:      Avt,
@@ -1107,6 +1125,11 @@ pub struct StylesheetAst {
     /// default to private visibility, so e.g. the initial template must be
     /// explicitly public to be eligible (XTDE0040).
     pub is_package:         bool,
+    /// XSLT 3.0 §6.6.1 `declared-modes` — when true, every mode used by
+    /// a template rule or `xsl:apply-templates` must be declared by an
+    /// `xsl:mode` (else XTSE3050).  Defaults to true for an `xsl:package`
+    /// root, false for a plain `xsl:stylesheet`/`xsl:transform`.
+    pub declared_modes:     bool,
     /// `version=` attribute on `xsl:stylesheet`.  Captured purely
     /// for compatibility (and forward-compat warnings later); the
     /// engine only implements 1.0 semantics.

@@ -193,14 +193,17 @@ impl Stylesheet {
         compiler::validate_input_type_annotations(&ast)?;
         compiler::validate_package_exposes(&ast)?;
         compiler::validate_global_context_item(&ast)?;
-        // XSLT 3.0 §19 streamability is NOT enforced at compile time: we
-        // report `supports-streaming = no`, and a non-streaming processor
-        // treats `streamable="yes"` as a hint it may ignore, processing
-        // the stylesheet in the ordinary (in-memory) way rather than
-        // raising XTSE3430.  The streamability analyzer
-        // ([`stream::validate_streamability`] / [`stream::analysis`]) is
-        // retained to choose the streamed execution strategy (see
-        // [`stream::push_eval`]) and for a future strict-streaming mode.
+        compiler::validate_declared_modes(&ast)?;
+        // XSLT 3.0 §19 streamability is enforced lazily, scoped to the
+        // streamable construct actually executed (see the
+        // `Instr::SourceDocument` / streamable-mode entry paths), rather
+        // than as a whole-stylesheet compile gate.  W3C streaming
+        // test-sets pack many independent named templates — some
+        // streamable, some deliberately not — into one shared stylesheet;
+        // a global gate would reject the whole file and poison the
+        // streamable siblings.  A non-streaming processor (we report
+        // `supports-streaming = no`) may legitimately defer the
+        // XTSE3430 check to the point of use.
         Ok(Stylesheet { ast })
     }
 

@@ -1998,13 +1998,26 @@ pub fn eval_expr<I: DocIndexLike>(expr: &Expr, ctx: &EvalCtx<'_>, idx: &I) -> Re
             if !any_node || any_lazy {
                 return Ok(Value::Sequence(evaluated));
             }
-            // Legacy paths for backward compat with XPath 1.0 hot
-            // routes that expect a NodeSet.
-            let mut nodes: Vec<NodeId> = Vec::new();
+            // All items are nodes: a flat NodeSet union is the right
+            // answer and keeps XPath 1.0-shaped consumers happy.
+            let all_nodes = evaluated.iter().all(|v|
+                matches!(v, Value::NodeSet(_) | Value::ForeignNodeSet(_)));
+            if all_nodes {
+                let mut nodes: Vec<NodeId> = Vec::new();
+                for v in evaluated {
+                    if let Value::NodeSet(ns) = v { nodes.extend(ns); }
+                }
+                return Ok(Value::NodeSet(nodes));
+            }
+            // Mixed nodes + atomics on a legacy NodeSet route: flatten to
+            // synthetic text nodes, but preserve the *sequence order* —
+            // each member contributes its string item(s) where it appears,
+            // so `(a/b, 101, 102)` is `b-values, 101, 102`, not atomics
+            // first.
             let mut atoms: Vec<String> = Vec::new();
             for v in evaluated {
                 match v {
-                    Value::NodeSet(ns)       => nodes.extend(ns),
+                    Value::NodeSet(ns)       => for n in ns { atoms.push(idx.string_value(n)); },
                     Value::ForeignNodeSet(_) => {}
                     Value::String(s)         => atoms.push(s),
                     Value::Number(n)         => atoms.push(value_to_string(&Value::Number(n), idx)),
@@ -2012,19 +2025,12 @@ pub fn eval_expr<I: DocIndexLike>(expr: &Expr, ctx: &EvalCtx<'_>, idx: &I) -> Re
                     Value::Typed(t)          => atoms.push(t.lexical),
                     Value::Sequence(_)       => unreachable!(), // flattened above
                     Value::IntRange { .. }   => unreachable!(), // routed to Sequence above
-                    // A map / array can't be a member of a node-set;
-                    // drop it (this path builds a NodeSet result).
                     Value::Map(_) | Value::Array(_) | Value::Function(_) => {}
                 }
             }
-            if atoms.is_empty() {
-                Ok(Value::NodeSet(nodes))
-            } else {
-                for n in &nodes { atoms.push(idx.string_value(*n)); }
-                match idx.allocate_rtf_text_nodes(atoms.clone()) {
-                    Some(ids) => Ok(Value::NodeSet(ids)),
-                    None      => Ok(Value::String(atoms.join(""))),
-                }
+            match idx.allocate_rtf_text_nodes(atoms.clone()) {
+                Some(ids) => Ok(Value::NodeSet(ids)),
+                None      => Ok(Value::String(atoms.join(""))),
             }
         }
         Expr::Quantified { kind, bindings, test } => {
@@ -3257,6 +3263,14 @@ fn node_matches<I: DocIndexLike>(
             idx.local_name(node) == local.as_str()
                 && idx.namespace_prefix(node) == Some(prefix.as_str())
         }
+        // `element(N, T)` / `attribute(N, T)` — match by the underlying
+        // name/kind test.  The governing PSVI type `type_name` is carried
+        // on the test for schema-aware processing, but discriminating by
+        // it here requires accurate source/constructed-node typing the
+        // validator doesn't yet supply uniformly; until it does, matching
+        // stays name-based (the type narrows nothing).
+        NodeTest::SchemaType { inner, .. } =>
+            node_matches(node, inner, axis, idx, bindings, libxml2_compatible),
     }
 }
 
@@ -8640,7 +8654,15 @@ fn eval_function<I: DocIndexLike>(name: &str, args: &[Expr], ctx: &EvalCtx<'_>, 
                         (Some(a), _) => Some(a),
                         (_, b)       => b,
                     };
-                    Ok(Value::String(format_datetime_lexical(y, mo, dd, h, mi, s, frac, tz)))
+                    // Return a properly typed xs:dateTime (not a bare
+                    // string) so `instance of`, value comparison, sorting,
+                    // and xsl:merge grouping treat it by instant — e.g. a
+                    // `…Z` and a `…-00:00` key compare equal.
+                    Ok(Value::Typed(Box::new(TypedAtomic {
+                        kind: "dateTime",
+                        lexical: format_datetime_lexical(y, mo, dd, h, mi, s, frac, tz),
+                        numeric: None, boolean: None, user_type: None,
+                    })))
                 }
                 // Non-lexical inputs — keep a lenient join rather than
                 // failing the whole expression.
@@ -9958,11 +9980,40 @@ pub fn cast_value_to_atomic<I: DocIndexLike>(
     cast_value_to_atomic_impl(v, st, idx).map_err(|e| e.or_xpath_code("FORG0001"))
 }
 
+/// True iff `tok` is a lexically valid value of `item` (the per-item type
+/// of an xs:NMTOKENS / xs:IDREFS / xs:ENTITIES list).  xs:NMTOKEN is one
+/// or more XML NameChars; xs:IDREF and xs:ENTITY are NCNames (a NameStart
+/// char other than ':', then NameChars other than ':').
+fn token_valid_for_list_item(tok: &str, item: &str) -> bool {
+    use crate::charsets::{is_name_start_char, is_name_char_unicode};
+    if tok.is_empty() { return false; }
+    if item == "NMTOKEN" {
+        return tok.chars().all(is_name_char_unicode);
+    }
+    // NCName.
+    let mut chars = tok.chars();
+    match chars.next() {
+        Some(c) if c != ':' && is_name_start_char(c) => {}
+        _ => return false,
+    }
+    chars.all(|c| c != ':' && is_name_char_unicode(c))
+}
+
 fn cast_value_to_atomic_impl<I: DocIndexLike>(
     v: &Value, st: &crate::xpath::ast::SequenceType, idx: &I,
 ) -> Result<Value> {
     use crate::xpath::ast::ItemType;
     let s = value_to_string(v, idx);
+    // XPath 2.0 §17.1 casting table — casting xs:boolean to a numeric
+    // type yields 1 (true) / 0 (false), not the lexical "true"/"false"
+    // that would fail a numeric parse.  Numeric target arms read this
+    // instead of the plain string value.
+    let num_str = match v {
+        Value::Boolean(b) => if *b { "1" } else { "0" }.to_string(),
+        Value::Typed(t) if t.kind == "boolean" =>
+            if t.boolean == Some(true) { "1" } else { "0" }.to_string(),
+        _ => s.clone(),
+    };
     let make_typed = |kind: &'static str, lex: String,
                       numeric: Option<f64>, boolean: Option<bool>| -> Value {
         Value::Typed(Box::new(TypedAtomic {
@@ -9993,11 +10044,24 @@ fn cast_value_to_atomic_impl<I: DocIndexLike>(
                         _          => "ENTITY",
                     };
                     let item_kind = atomic_kind_static(item).unwrap_or("token");
+                    // Each token must be lexically valid for the item type:
+                    // xs:IDREF / xs:ENTITY are NCNames (no leading digit,
+                    // no '/' or ':'); xs:NMTOKEN is one-or-more NameChars.
+                    if s.split_whitespace().any(|t| !token_valid_for_list_item(t, item)) {
+                        return Err(xpath_err(format!(
+                            "cast to xs:{name} failed: a token is not a valid xs:{item} (FORG0001)")));
+                    }
                     let items: Vec<Value> = s
                         .split_whitespace()
                         .map(|t| make_typed(item_kind, t.to_string(), None, None))
                         .collect();
                     match items.len() {
+                        // xs:NMTOKENS / xs:IDREFS / xs:ENTITIES are list
+                        // types with minLength 1 — an empty or whitespace-
+                        // only value has zero tokens and is not castable.
+                        0 => Err(xpath_err(format!(
+                            "cast to xs:{name} failed: a list type requires at \
+                             least one item (FORG0001)"))),
                         1 => Ok(items.into_iter().next().unwrap()),
                         _ => Ok(Value::Sequence(items)),
                     }
@@ -10030,8 +10094,25 @@ fn cast_value_to_atomic_impl<I: DocIndexLike>(
                 | "nonNegativeInteger" | "nonPositiveInteger"
                 | "positiveInteger" | "negativeInteger"
                 | "unsignedLong" | "unsignedInt" | "unsignedShort" | "unsignedByte" => {
-                    let n: i64 = s.trim().parse().map_err(|_| xpath_err(
-                        format!("cast to xs:{name} failed: {s:?}")))?;
+                    let trimmed = num_str.trim();
+                    let n: i64 = match trimmed.parse::<i64>() {
+                        Ok(n) => n,
+                        // XPath 2.0 §17.1.3 — a numeric source (float /
+                        // double / decimal) casts to integer by truncation
+                        // toward zero; a non-numeric lexical like "1.5e0"
+                        // is only valid when it came from a numeric value.
+                        Err(_) => {
+                            let numeric_src = matches!(v, Value::Number(_))
+                                || matches!(v, Value::Typed(t) if t.numeric.is_some());
+                            let f: f64 = trimmed.parse().map_err(|_| xpath_err(
+                                format!("cast to xs:{name} failed: {s:?}")))?;
+                            if !numeric_src || !f.is_finite() {
+                                return Err(xpath_err(
+                                    format!("cast to xs:{name} failed: {s:?}")));
+                            }
+                            f.trunc() as i64
+                        }
+                    };
                     Ok(make_typed(kind, n.to_string(), Some(n as f64), None))
                 }
                 "decimal" | "double" | "float" | "numeric" => {
@@ -10039,7 +10120,7 @@ fn cast_value_to_atomic_impl<I: DocIndexLike>(
                     // canonical lexical forms for xs:double / xs:float
                     // (not "Infinity"/"NaN" as XPath 1.0 used).  Accept
                     // both spellings on input but normalise on output.
-                    let trimmed = s.trim();
+                    let trimmed = num_str.trim();
                     let raw: f64 = match trimmed {
                         "INF"  | "Infinity"   => f64::INFINITY,
                         "-INF" | "-Infinity"  => f64::NEG_INFINITY,
@@ -10138,6 +10219,26 @@ fn cast_value_to_atomic_impl<I: DocIndexLike>(
                         }
                     }
                     let trimmed = s.trim();
+                    // XPath 2.0 §17.1.5.1 — casting a *typed* xs:duration to
+                    // xs:dayTimeDuration / xs:yearMonthDuration EXTRACTS the
+                    // relevant components, so a full duration like "P1Y2M3DT4H"
+                    // is castable (dropping the year/month or day/time part).
+                    // An untyped/string source still casts by lexical match
+                    // (a full-duration string is NOT a valid subtype lexical),
+                    // so this extraction is gated on the source being a
+                    // duration value.
+                    let source_is_duration = matches!(v, Value::Typed(t)
+                        if matches!(t.kind, "duration" | "dayTimeDuration" | "yearMonthDuration"));
+                    if source_is_duration && name == "dayTimeDuration" {
+                        if let Some((_, secs)) = parse_duration_split(trimmed) {
+                            return Ok(make_typed(kind, format_day_time_duration_secs(secs), None, None));
+                        }
+                    }
+                    if source_is_duration && name == "yearMonthDuration" {
+                        if let Some((months, _)) = parse_duration_split(trimmed) {
+                            return Ok(make_typed(kind, format_year_month_duration_months(months), None, None));
+                        }
+                    }
                     if !lexical_matches_type(trimmed, name) {
                         // A lexically-valid value whose year exceeds the
                         // representable range is an overflow (FODT0001),
