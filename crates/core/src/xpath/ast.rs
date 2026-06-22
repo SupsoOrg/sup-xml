@@ -336,11 +336,16 @@ pub enum ItemType {
     Atomic(String),
     /// `node()` — any node.
     AnyNode,
-    /// Specific kind tests with optional name.  Name is `None` for
-    /// the bare-paren form (e.g. `element()`); `Some` for
-    /// `element(foo)`.
-    Element(Option<String>),
-    Attribute(Option<String>),
+    /// Specific kind tests with optional name and optional type.  The
+    /// first field is the element/attribute name (`None` for the
+    /// wildcard form `element()` / `element(*)`).  The second is the
+    /// schema type from the `element(N, T)` / `attribute(N, T)` form
+    /// (the lexical `prefix:local`, resolved against the in-scope schema
+    /// at match time); `None` when no type is given.  A node matches the
+    /// typed form only when its post-schema-validation governing type is
+    /// `T` or derived from it.
+    Element(Option<String>, Option<String>),
+    Attribute(Option<String>, Option<String>),
     Text,
     Comment,
     PI(Option<String>),

@@ -1016,8 +1016,8 @@ impl Parser {
                     "comment"                => Some(ItemType::Comment),
                     "document-node"          => Some(ItemType::Document),
                     "processing-instruction" => Some(ItemType::PI(None)),
-                    "element"                => Some(ItemType::Element(None)),
-                    "attribute"              => Some(ItemType::Attribute(None)),
+                    "element"                => Some(ItemType::Element(None, None)),
+                    "attribute"              => Some(ItemType::Attribute(None, None)),
                     _ => None,
                 };
                 if let Some(k) = kind {
@@ -1063,18 +1063,16 @@ impl Parser {
                             }
                             ItemType::PI(arg)
                         }
-                        ItemType::Element(_) => {
+                        ItemType::Element(..) => {
                             let arg = match self.peek() {
                                 Token::Name(s) => { let s = s.clone(); self.consume(); Some(s) }
                                 Token::Star    => { self.consume(); None }
                                 _              => None,
                             };
-                            while self.peek() != &Token::RParen && self.peek() != &Token::Eof {
-                                self.consume();
-                            }
-                            ItemType::Element(arg)
+                            let ty = self.kind_test_type_arg();
+                            ItemType::Element(arg, ty)
                         }
-                        ItemType::Attribute(_) => {
+                        ItemType::Attribute(..) => {
                             let arg = match self.peek() {
                                 Token::Name(s) => { let s = s.clone(); self.consume(); Some(s) }
                                 Token::At      => { self.consume();
@@ -1085,10 +1083,8 @@ impl Parser {
                                 Token::Star    => { self.consume(); None }
                                 _              => None,
                             };
-                            while self.peek() != &Token::RParen && self.peek() != &Token::Eof {
-                                self.consume();
-                            }
-                            ItemType::Attribute(arg)
+                            let ty = self.kind_test_type_arg();
+                            ItemType::Attribute(arg, ty)
                         }
                         other => other,
                     };
@@ -1117,6 +1113,28 @@ impl Parser {
         Err(self.error(format!(
             "expected SequenceType / ItemType, got {:?}", self.peek()
         )))
+    }
+
+    /// Parse the optional `, TypeName` argument of an `element(N, T)` /
+    /// `attribute(N, T)` kind test (XPath 2.0 §2.5.4.3/4).  Returns the
+    /// type's lexical `prefix:local` (resolved against the in-scope
+    /// schema at match time), or `None` when no type is given.  Any
+    /// trailing nillable marker (`?`) or other tokens up to the closing
+    /// `)` are consumed so the caller's `expect(RParen)` succeeds.
+    fn kind_test_type_arg(&mut self) -> Option<String> {
+        let ty = if self.peek() == &Token::Comma {
+            self.consume(); // ,
+            match self.peek() {
+                Token::Name(s) => { let s = s.clone(); self.consume(); Some(s) }
+                _              => None,
+            }
+        } else {
+            None
+        };
+        while self.peek() != &Token::RParen && self.peek() != &Token::Eof {
+            self.consume();
+        }
+        ty
     }
 
     /// Determine if the current position starts a location path step (not a primary expr).

@@ -1537,6 +1537,12 @@ pub fn eval_expr<I: DocIndexLike>(expr: &Expr, ctx: &EvalCtx<'_>, idx: &I) -> Re
         Expr::InstanceOf(inner, st) => {
             let v = eval_expr(inner, ctx, idx)?;
             let st = resolve_kind_test_namespaces(st, ctx.bindings);
+            // Schema-aware: a typed `element(N, T)` / `attribute(N, T)`
+            // kind test checks the node's governing type, which needs the
+            // bindings (the type-agnostic matcher below can't see it).
+            if let Some(ok) = instance_of_typed_node_test(&v, &st, idx, ctx.bindings) {
+                return Ok(Value::Boolean(ok));
+            }
             // Schema-aware: a user-defined (schema) target type keeps its
             // `prefix:local` name; `instance of` is decided by the value's
             // *declared* type, not its lexical space.
@@ -6463,8 +6469,13 @@ fn xml_node_to_json<I: DocIndexLike>(
     // namespace are recognised; foreign-namespace attributes are
     // ignored (§17.5.5).
     for a in idx.attr_range(elem) {
+        // Namespace declarations (`xmlns` / `xmlns:*`) are not attributes
+        // in the data model — a default-namespace decl can surface here as
+        // an empty-namespace attribute named "xmlns"; skip it.
+        let aname = idx.local_name(a);
+        if aname == "xmlns" || idx.node_name(a).starts_with("xmlns:") { continue; }
         if !idx.namespace_uri(a).is_empty() { continue; }
-        match idx.local_name(a) {
+        match aname {
             "key" | "escaped" | "escaped-key" => {}
             other => return Err(err(&format!("unexpected attribute {other:?}"))),
         }
@@ -7998,25 +8009,30 @@ fn eval_function<I: DocIndexLike>(name: &str, args: &[Expr], ctx: &EvalCtx<'_>, 
         }
         "head" => {
             check_args!(1);
-            if let Value::NodeSet(ns) = arg!(0) {
-                return Ok(Value::NodeSet(ns.into_iter().take(1).collect()));
+            // XPath 3.0 §14.4 — `fn:head` returns the item `$seq[1]`,
+            // preserving its type (not its string value).  `iter_items`
+            // flattens nested sequences so the first item is the true
+            // `$seq[1]` and `fn:tail` cardinality decreases by exactly one.
+            let v = arg!(0);
+            if let Value::NodeSet(ns) = &v {
+                return Ok(Value::NodeSet(ns.iter().take(1).copied().collect()));
             }
-            let pieces = sequence_to_strings(&arg!(0), idx);
-            Ok(match pieces.into_iter().next() {
-                Some(s) => Value::String(s),
-                None    => Value::NodeSet(Vec::new()),
-            })
+            Ok(iter_items(&v).next().unwrap_or(Value::NodeSet(Vec::new())))
         }
         "tail" => {
             check_args!(1);
-            if let Value::NodeSet(ns) = arg!(0) {
-                return Ok(Value::NodeSet(ns.into_iter().skip(1).collect()));
+            // XPath 3.0 §14.4 — `fn:tail` returns the subsequence
+            // `$seq[position() gt 1]`, preserving each item's type.
+            let v = arg!(0);
+            if let Value::NodeSet(ns) = &v {
+                return Ok(Value::NodeSet(ns.iter().skip(1).copied().collect()));
             }
-            let pieces: Vec<String> = sequence_to_strings(&arg!(0), idx).into_iter().skip(1).collect();
-            match idx.allocate_rtf_text_nodes(pieces.clone()) {
-                Some(ids) => Ok(Value::NodeSet(ids)),
-                None      => Ok(Value::String(pieces.join(""))),
-            }
+            let mut rest: Vec<Value> = iter_items(&v).skip(1).collect();
+            Ok(match rest.len() {
+                0 => Value::NodeSet(Vec::new()),
+                1 => rest.pop().unwrap(),
+                _ => Value::Sequence(rest),
+            })
         }
         // XPath 2.0 §15.1.7 `insert-before($seq, $pos, $insert)` —
         // insert items into a sequence at 1-based `$pos`.  Out-of-
@@ -9353,10 +9369,10 @@ fn resolve_kind_test_namespaces(
         Some(format!("{{{uri}}}{local}"))
     };
     let item = match &st.item {
-        ItemType::Element(name @ Some(_)) =>
-            ItemType::Element(resolve(name).or_else(|| name.clone())),
-        ItemType::Attribute(name @ Some(_)) =>
-            ItemType::Attribute(resolve(name).or_else(|| name.clone())),
+        ItemType::Element(name @ Some(_), ty) =>
+            ItemType::Element(resolve(name).or_else(|| name.clone()), ty.clone()),
+        ItemType::Attribute(name @ Some(_), ty) =>
+            ItemType::Attribute(resolve(name).or_else(|| name.clone()), ty.clone()),
         other => other.clone(),
     };
     crate::xpath::ast::SequenceType { item, occurrence: st.occurrence }
@@ -9381,6 +9397,95 @@ fn kind_test_name_matches<I: DocIndexLike>(
             None => idx.local_name(id) == n,
         },
     }
+}
+
+/// True when the node at `id` has a post-schema-validation governing type
+/// equal to or derived from `{turi}tlocal` (XPath 2.0 §2.5.4.3 — the type
+/// argument of `element(N, T)` / `attribute(N, T)`).  Derivation is decided
+/// by the XSD built-in lattice for XSD-namespace targets (so an `xs:ID`
+/// node satisfies `attribute(*, xs:string)`); user-defined types match by
+/// exact name.  A node with no recorded type satisfies only `xs:anyType`.
+/// Does the node's governing type satisfy `{turi}tlocal`?  Tri-state:
+/// `Some(true)`/`Some(false)` when the answer is certain, `None` when it
+/// can't be decided — a node our validator left untyped, tested against a
+/// specific (non-untyped) type, might really carry that type in a fully
+/// schema-aware processor, so the caller defers to the lenient
+/// name/kind match rather than asserting a (possibly wrong) `false`.
+fn node_type_match(
+    bindings: &dyn XPathBindings, id: NodeId, is_attr: bool, turi: &str, tlocal: &str,
+) -> Option<bool> {
+    const XSD: &str = "http://www.w3.org/2001/XMLSchema";
+    // xs:anyType is the universal type — every node is an instance.
+    if turi == XSD && tlocal == "anyType" { return Some(true); }
+    match bindings.node_schema_type(id) {
+        Some((nuri, nlocal)) => Some(
+            (nuri == turi && nlocal == tlocal)
+            || (turi == XSD && nuri == XSD && xsd_is_subtype_of(&nlocal, tlocal))),
+        // An un-validated node has the default annotation: xs:untyped for
+        // an element, xs:untypedAtomic for an attribute (XDM §2.4).  Those
+        // forms (and their bases) match; any other specific type is
+        // undecidable here.
+        None if turi == XSD && is_attr
+            && matches!(tlocal, "untypedAtomic" | "anySimpleType" | "anyAtomicType")
+            => Some(true),
+        None if turi == XSD && !is_attr && tlocal == "untyped" => Some(true),
+        None => None,
+    }
+}
+
+/// `instance of element(N, T)` / `attribute(N, T)`: decide a typed
+/// element/attribute kind test, which needs the schema-aware `bindings`
+/// (node kind + name + governing type).  Returns `None` when `st` is not
+/// a typed element/attribute test, so the caller falls through to the
+/// type-agnostic `value_matches_sequence_type`.
+fn instance_of_typed_node_test<I: DocIndexLike>(
+    v: &Value, st: &crate::xpath::ast::SequenceType, idx: &I,
+    bindings: &dyn XPathBindings,
+) -> Option<bool> {
+    use crate::xpath::ast::{ItemType, Occurrence};
+    use crate::xpath::XPathNodeKind as K;
+    let (want, name, ty) = match &st.item {
+        ItemType::Element(name, Some(ty))   => (K::Element,   name, ty),
+        ItemType::Attribute(name, Some(ty)) => (K::Attribute, name, ty),
+        _ => return None,
+    };
+    let (turi, tlocal) = match ty.split_once(':') {
+        Some((p, l)) => (resolve_prefix_or_implicit(bindings, p)?, l.to_string()),
+        None         => (String::new(), ty.clone()),
+    };
+    let is_attr = want == K::Attribute;
+    let items: Vec<Value> = iter_items(v).collect();
+    let card_ok = match items.len() {
+        0 => matches!(st.occurrence, Occurrence::Optional | Occurrence::ZeroOrMore),
+        1 => true,
+        _ => matches!(st.occurrence, Occurrence::OneOrMore | Occurrence::ZeroOrMore),
+    };
+    // Combine per-item verdicts.  A wrong kind/name/cardinality or a
+    // type that definitely doesn't match is a certain `false`; a node
+    // whose type can't be decided (`node_type_match` → None) makes the
+    // whole test undecidable, so we defer to the lenient name/kind match.
+    let mut definite_fail = !card_ok;
+    let mut undecidable = false;
+    for it in &items {
+        match it {
+            Value::NodeSet(ns) if ns.len() == 1 => {
+                let id = ns[0];
+                if idx.kind(id) != want || !kind_test_name_matches(name.as_deref(), id, idx) {
+                    definite_fail = true;
+                } else {
+                    match node_type_match(bindings, id, is_attr, &turi, &tlocal) {
+                        Some(true)  => {}
+                        Some(false) => definite_fail = true,
+                        None        => undecidable = true,
+                    }
+                }
+            }
+            _ => definite_fail = true,
+        }
+    }
+    if definite_fail { Some(false) }
+    else if undecidable { None }
+    else { Some(true) }
 }
 
 fn value_matches_sequence_type<I: DocIndexLike>(
@@ -9460,13 +9565,17 @@ fn value_matches_sequence_type<I: DocIndexLike>(
         }
         ItemType::AnyNode => matches!(v,
             Value::NodeSet(_) | Value::ForeignNodeSet(_)),
-        ItemType::Element(name) => match v {
+        // The optional schema type (`element(N, T)`) is checked by the
+        // `instance of` evaluator, which has the schema-aware bindings;
+        // here (typed `as=`/`treat as` sites without bindings) only the
+        // node kind and name are matched.
+        ItemType::Element(name, _ty) => match v {
             Value::NodeSet(ns) => ns.iter().all(|&id|
                 matches!(idx.kind(id), crate::xpath::XPathNodeKind::Element)
                 && kind_test_name_matches(name.as_deref(), id, idx)),
             _ => false,
         },
-        ItemType::Attribute(name) => match v {
+        ItemType::Attribute(name, _ty) => match v {
             Value::NodeSet(ns) => ns.iter().all(|&id|
                 matches!(idx.kind(id), crate::xpath::XPathNodeKind::Attribute)
                 && kind_test_name_matches(name.as_deref(), id, idx)),
@@ -9554,11 +9663,13 @@ fn item_type_subtype_of(a: &ItemType, b: &ItemType) -> bool {
         (ItemType::EmptySequence, _) => true,
         (ItemType::Atomic(x), ItemType::Atomic(y)) => xsd_is_subtype_of(x, y),
         (ItemType::AnyNode, ItemType::AnyNode) => true,
-        (ItemType::Element(_) | ItemType::Attribute(_) | ItemType::Text
+        (ItemType::Element(..) | ItemType::Attribute(..) | ItemType::Text
             | ItemType::Comment | ItemType::PI(_) | ItemType::Document,
          ItemType::AnyNode) => true,
-        (ItemType::Element(x), ItemType::Element(y)) => y.is_none() || x == y,
-        (ItemType::Attribute(x), ItemType::Attribute(y)) => y.is_none() || x == y,
+        (ItemType::Element(x, _), ItemType::Element(y, yt)) =>
+            yt.is_none() && (y.is_none() || x == y),
+        (ItemType::Attribute(x, _), ItemType::Attribute(y, yt)) =>
+            yt.is_none() && (y.is_none() || x == y),
         (ItemType::PI(x), ItemType::PI(y)) => y.is_none() || x == y,
         (ItemType::Text, ItemType::Text)
             | (ItemType::Comment, ItemType::Comment)
@@ -11821,6 +11932,25 @@ fn min_max_avg<I: DocIndexLike>(
             Value::IntRange { .. } => Some("integer"),
             other => numeric_kind_of(other),
         }.unwrap_or("double");
+        // F&O §15.4.4 — avg over exact-typed (xs:integer / xs:decimal)
+        // inputs is computed in exact decimal arithmetic, so a half-way
+        // result is the true value (`avg((4.95, 6.76))` is exactly 5.855)
+        // rather than its f64 neighbour (5.8549999…) which would later
+        // round the wrong way.  xs:double inputs keep the f64 path.
+        if matches!(op, MinMaxOp::Avg) && matches!(kind, "integer" | "decimal") {
+            use core::str::FromStr;
+            use rust_decimal::Decimal;
+            let decs: Option<Vec<Decimal>> = strs.iter()
+                .map(|s| Decimal::from_str(s.trim()).ok())
+                .collect();
+            if let Some(decs) = decs.filter(|d| !d.is_empty()) {
+                let count = Decimal::from(decs.len());
+                let sum: Decimal = decs.iter().copied().sum();
+                if let Some(avg) = sum.checked_div(count) {
+                    return Ok(Value::Number(Numeric::Decimal(avg)));
+                }
+            }
+        }
         let kind = if matches!(op, MinMaxOp::Avg) && kind == "integer" { "decimal" } else { kind };
         return Ok(Value::Number(Numeric::of_kind(kind, result)));
     }
