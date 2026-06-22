@@ -90,7 +90,10 @@ impl ResultTree {
 
         let mut out = match method {
             "html"  => serialize_html(children, &self.output, &self.character_map, indent, escape_uri),
-            "text"  => serialize_text(children),
+            // `method="json"` (XSLT 3.0 §26.2): the JSON string is built
+            // as a text node by the evaluator — emit it raw, with no XML
+            // declaration or markup escaping.
+            "text" | "json" => serialize_text(children),
             // The xhtml output method uses XML syntax with the
             // html-family parameter defaults applied above, plus the
             // XHTML empty-element rules (non-void elements keep an
@@ -416,6 +419,12 @@ fn escape_text_with_map(
             // parser's XML § 2.11 end-of-line normalization, so always
             // escape it as a character reference for round-trip.
             '\r' => out.push_str("&#xD;"),
+            // The DEL/C1 "discouraged" characters (#x7F–#x9F) are valid
+            // in XML 1.0 and 1.1 but standard serializers emit them as
+            // character references (XSLT 3.0 Serialization §).
+            c if matches!(c as u32, 0x80..=0x84 | 0x86..=0x9f) => {
+                let _ = write!(out, "&#{};", c as u32);
+            }
             c if xml_11 && xml_11_must_escape(c) => {
                 let _ = write!(out, "&#{};", c as u32);
             }
@@ -448,6 +457,11 @@ fn escape_attr_with_map(
             '\n' => out.push_str("&#10;"),
             '\r' => out.push_str("&#13;"),
             '\t' => out.push_str("&#9;"),
+            // DEL/C1 discouraged characters (#x7F–#x9F): valid but
+            // serialized as character references (see escape_text_with_map).
+            c if matches!(c as u32, 0x80..=0x84 | 0x86..=0x9f) => {
+                let _ = write!(out, "&#{};", c as u32);
+            }
             c if xml_11 && xml_11_must_escape(c) => {
                 let _ = write!(out, "&#{};", c as u32);
             }

@@ -318,6 +318,57 @@ impl<'a, I: DocIndexLike> XsltBindings<'a, I> {
     }
 }
 
+/// Validate a constructed node's string value against its declared
+/// `type=` / `xsl:type=` (XSLT 2.0 §19.3 — a value that doesn't conform to
+/// the named simple type is a type error, XTTE1540).  A no-op when the
+/// `xsd` feature is off, when the type is unknown, or when it isn't a
+/// simple type (complex-content validation is handled at element level).
+/// Returns `Ok(Some(canonical))` when the value validates and its typed
+/// value has a canonical lexical form that differs from author input
+/// (e.g. `xs:integer` "003" → "3"), `Ok(None)` to keep the raw value, or
+/// `Err` (XTTE1540) on validation failure.
+#[cfg(feature = "xsd")]
+fn validate_constructed_value(
+    style: &StylesheetAst, ty: &(String, String), value: &str,
+) -> Result<Option<String>> {
+    use sup_xml_core::xsd::{BuiltinType, SimpleType, QName as XQName, TypeRef, Value as XV};
+    const XSD_NS: &str = "http://www.w3.org/2001/XMLSchema";
+    let (ns, local) = ty;
+    let fail = || XsltError::InvalidStylesheet(format!(
+        "constructed value {value:?} is not valid for type {{{ns}}}{local} (XTTE1540)"));
+    // The string value of a schema-typed node is its typed value's
+    // canonical lexical form (XDM §2.4).  Only the unambiguous numeric /
+    // boolean cases are canonicalized; strings, lists, dates, and floats
+    // keep the author's lexical to avoid diverging on intricate rules.
+    let canonical = |xv: &XV| -> Option<String> {
+        match xv {
+            XV::Int(n)     => Some(n.to_string()),
+            XV::Bool(b)    => Some(if *b { "true" } else { "false" }.to_string()),
+            XV::Decimal(d) => Some(d.normalize().to_string()),
+            _ => None,
+        }
+    };
+    if ns == XSD_NS {
+        if let Some(bt) = BuiltinType::from_name(local) {
+            return SimpleType::of_builtin(bt).validate(value)
+                .map(|xv| canonical(&xv)).map_err(|_| fail());
+        }
+        return Ok(None);
+    }
+    let qn = XQName::new((!ns.is_empty()).then_some(ns.as_str()), local);
+    for schema in &style.schemas {
+        if let Some(TypeRef::Simple(st)) = schema.type_def(&qn) {
+            return st.validate(value).map(|xv| canonical(&xv)).map_err(|_| fail());
+        }
+    }
+    Ok(None)
+}
+
+#[cfg(not(feature = "xsd"))]
+fn validate_constructed_value(
+    _style: &StylesheetAst, _ty: &(String, String), _value: &str,
+) -> Result<Option<String>> { Ok(None) }
+
 /// Does the stylesheet's `version=` attribute select XSLT 3.0 or
 /// higher?  Used to gate XSLT-3-only static-context pre-bindings
 /// (`fn`, `math`, etc.) — XSLT 1.0 / 2.0 leave these unbound and
@@ -652,6 +703,12 @@ impl<'a, I: DocIndexLike> XPathBindings for XsltBindings<'a, I> {
     }
     #[cfg(feature = "xsd")]
     fn node_schema_type(&self, node_id: NodeId) -> Option<(String, String)> {
+        // Constructed (RTF) nodes carry their `type=`/`xsl:type` annotation
+        // in the index's RTF PSVI table; source nodes carry theirs in the
+        // validated-source table.
+        if let Some(t) = self.idx.rtf_node_type(node_id) {
+            return Some(t);
+        }
         self.source_types?.by_node.get(&node_id)?.name.clone()
     }
     #[cfg(feature = "xsd")]
@@ -2716,16 +2773,16 @@ pub fn apply_stylesheet_full_with_params_and_initial(
     for (name, value) in top_level_params {
         for p in &dedup_params {
             if p.name.local == *name {
-                // A caller-supplied param value is a string; cast it to the
-                // declared type for the cases where the string vs typed
-                // distinction changes behavior.  xs:boolean is the common
-                // one (a bare non-empty string is otherwise always truthy).
-                let bound = match p.as_type.as_deref()
-                    .map(|t| t.trim().trim_end_matches(['?', '*', '+']).trim())
-                {
-                    Some("xs:boolean") =>
-                        Value::Boolean(matches!(value.trim(), "true" | "1")),
-                    _ => Value::String(value.clone()),
+                // A caller-supplied param value arrives as a string; cast it
+                // to the param's declared type so `as="xs:int"` /
+                // `as="xs:boolean"` / `as="xs:double"` bind a typed value
+                // rather than a string (a bare non-empty string would
+                // otherwise be always truthy, never `instance of xs:int`,
+                // etc.).  Lenient: an uncastable value keeps its string form.
+                let bound = match p.as_type.as_deref() {
+                    Some(t) => fn_coerce_as(Value::String(value.clone()), Some(t), state.idx)
+                        .unwrap_or_else(|_| Value::String(value.clone())),
+                    None => Value::String(value.clone()),
                 };
                 state.variables.bind(qname_key(&p.name), bound);
                 break;
@@ -2848,6 +2905,13 @@ pub fn apply_stylesheet_full_with_params_and_initial(
         None => vec![0],
     };
     let initial_ctx = initial_nodes.first().copied().unwrap_or(0);
+    // XSLT 3.0 §26.2 — with `method="json"` the principal result is an
+    // XDM value (map/array/atomic), not an element tree: capture the
+    // top-level sequence through a sink and serialize it as JSON, the
+    // same shape `run_result_document_body` uses for a json
+    // xsl:result-document.
+    let primary_is_json = merge_principal_output(style).method.as_deref() == Some("json");
+    if primary_is_json { state.sequence_sinks.push(Vec::new()); }
     if let Some(name) = initial_template {
         // The harness may pass either an already-expanded Clark-form
         // key (`{uri}local`) or a raw `prefix:local` string; resolve
@@ -2931,6 +2995,17 @@ pub fn apply_stylesheet_full_with_params_and_initial(
         for &n in &initial_nodes {
             apply_one_to_node(&mut state, n, mode_qname.as_ref())?;
         }
+    }
+    if primary_is_json {
+        let items = state.sequence_sinks.pop().unwrap_or_default();
+        let value = match items.len() {
+            1 => items.into_iter().next().unwrap(),
+            _ => Value::Sequence(items),
+        };
+        let mut out = String::new();
+        sup_xml_core::xpath::eval::value_to_json(&value, state.idx, &mut out)
+            .map_err(XsltError::from)?;
+        state.builder.push_text(out, true);
     }
     state.variables.leave();
 
@@ -5369,12 +5444,21 @@ fn eval_instr(
                 // the separator's rendered value.
                 Some(sep_avt) => {
                     let sep = render_avt(state, sep_avt, ctx_node, pos, size)?;
-                    let pieces = sequence_string_items(&v, state.idx, state.num_style());
+                    let pieces = match &v {
+                        Value::NodeSet(ns) =>
+                            ns.iter().map(|&id| node_canonical_string(state, id)).collect(),
+                        _ => sequence_string_items(&v, state.idx, state.num_style()),
+                    };
                     pieces.join(&sep)
                 }
                 // XSLT 1.0 path — take the first node's / value's
-                // string representation.
-                None => value_to_string_styled(&v, state.idx, state.num_style()),
+                // string representation; a single schema-typed node uses
+                // its canonical lexical form.
+                None => match &v {
+                    Value::NodeSet(ns) if ns.len() == 1 =>
+                        node_canonical_string(state, ns[0]),
+                    _ => value_to_string_styled(&v, state.idx, state.num_style()),
+                },
             };
             state.builder.push_text(text, *dose);
         }
@@ -5681,8 +5765,14 @@ fn eval_instr(
                 state.builder.push_namespace_decl(aq.prefix.clone(), aq.uri.clone());
             }
             // XSLT 2.0 §11.3 — a `type=` on xsl:attribute annotates the
-            // constructed attribute so its typed value is recoverable.
+            // constructed attribute, and its value must conform to that
+            // type (XTTE1540) before it's recorded; a numeric/boolean
+            // value is stored in its canonical lexical form (XDM §2.4).
+            let mut value = value;
             if let Some(t) = schema_type {
+                if let Some(canon) = validate_constructed_value(state.style, t, &value)? {
+                    value = canon;
+                }
                 state.builder.set_current_attr_type(aq.clone(), t.clone());
             }
             state.builder.push_attribute(aq, value);
@@ -6409,8 +6499,8 @@ pub(crate) fn parse_as_atomic_type(
         };
         let item = match bare {
             "node"           => ItemType::AnyNode,
-            "element"        => ItemType::Element(first_arg_local(inside)),
-            "attribute"      => ItemType::Attribute(first_arg_local(inside)),
+            "element"        => ItemType::Element(first_arg_local(inside), None),
+            "attribute"      => ItemType::Attribute(first_arg_local(inside), None),
             // We don't implement schema-aware processing, but a
             // `schema-element(N)` / `schema-attribute(N)` target still
             // identifies the bound value as an element / attribute, so
@@ -6418,8 +6508,8 @@ pub(crate) fn parse_as_atomic_type(
             // type is unrecognised, the body-form RTF stays wrapped in
             // its synthetic document node, and `apply-templates` over
             // the variable re-matches `/` — an infinite loop.
-            "schema-element"   => ItemType::Element(None),
-            "schema-attribute" => ItemType::Attribute(None),
+            "schema-element"   => ItemType::Element(None, None),
+            "schema-attribute" => ItemType::Attribute(None, None),
             "document-node"  => ItemType::Document,
             "text"           => ItemType::Text,
             "comment"        => ItemType::Comment,
@@ -6479,9 +6569,9 @@ fn node_matches_kind_test<I: sup_xml_core::xpath::DocIndexLike>(
     let k = idx.kind(id);
     match item {
         ItemType::Any | ItemType::AnyNode => true,
-        ItemType::Element(name) => matches!(k, K::Element)
+        ItemType::Element(name, _) => matches!(k, K::Element)
             && name.as_ref().map_or(true, |n| idx.local_name(id) == n),
-        ItemType::Attribute(name) => matches!(k, K::Attribute)
+        ItemType::Attribute(name, _) => matches!(k, K::Attribute)
             && name.as_ref().map_or(true, |n| idx.local_name(id) == n),
         ItemType::Text     => matches!(k, K::Text | K::CData),
         ItemType::Comment  => matches!(k, K::Comment),
@@ -6508,7 +6598,7 @@ fn template_result_type_is_node_kind(
 ) -> bool {
     use sup_xml_core::xpath::ast::ItemType;
     matches!(&st.item,
-        ItemType::Element(_) | ItemType::Attribute(_) | ItemType::Text
+        ItemType::Element(..) | ItemType::Attribute(..) | ItemType::Text
         | ItemType::Comment | ItemType::PI(_) | ItemType::AnyNode
         | ItemType::Document)
 }
@@ -6561,10 +6651,10 @@ fn result_node_matches_item(
     use crate::result_tree::ResultNode as R;
     match item {
         ItemType::Any | ItemType::AnyNode => true,
-        ItemType::Element(name) => matches!(node,
+        ItemType::Element(name, _) => matches!(node,
             R::Element { name: qn, .. }
                 if name.as_ref().map_or(true, |n| &qn.local == n)),
-        ItemType::Attribute(name) => matches!(node,
+        ItemType::Attribute(name, _) => matches!(node,
             R::Attribute { name: qn, .. }
                 if name.as_ref().map_or(true, |n| &qn.local == n)),
         ItemType::Text     => matches!(node, R::Text { .. }),
@@ -6644,8 +6734,8 @@ pub(crate) fn coerce_to_atomic_sequence<I: sup_xml_core::xpath::DocIndexLike>(
             // RTF (which is materialised as a synthetic Document).
             let needs_unwrap = matches!(&st.item,
                 ItemType::AnyNode
-                | ItemType::Element(_)
-                | ItemType::Attribute(_)
+                | ItemType::Element(..)
+                | ItemType::Attribute(..)
                 | ItemType::Text
                 | ItemType::Comment
                 | ItemType::PI(_));
@@ -7162,7 +7252,7 @@ fn as_is_nonnode_item_type(t: &str) -> bool {
 fn as_is_attribute_kind(t: &str) -> bool {
     matches!(
         parse_as_atomic_type(t).map(|st| st.item),
-        Some(sup_xml_core::xpath::ast::ItemType::Attribute(_))
+        Some(sup_xml_core::xpath::ast::ItemType::Attribute(..))
     )
 }
 
@@ -8142,6 +8232,21 @@ pub(crate) fn value_to_number_xpath<I: DocIndexLike>(v: &Value, idx: &I) -> f64 
     sup_xml_core::xpath::eval::value_to_number(v, idx)
 }
 
+/// String value of a node, canonicalizing a schema-typed node's content
+/// to its typed value's canonical lexical form (XDM §2.4 — e.g. an
+/// xs:integer node "003" has string value "3").  Untyped nodes (and
+/// builds without the `xsd` feature) return the raw string value.
+fn node_canonical_string(state: &EvalState, id: NodeId) -> String {
+    use sup_xml_core::xpath::eval::XPathBindings;
+    let lex = state.idx.string_value(id);
+    if let Some(t) = state.bindings().node_schema_type(id) {
+        if let Ok(Some(canon)) = validate_constructed_value(state.style, &t, &lex) {
+            return canon;
+        }
+    }
+    lex
+}
+
 /// Decompose a Value into one string per sequence item.  Used by
 /// XSLT 2.0 `xsl:value-of` to render every member of the result with
 /// a separator (XPath 1.0 only ever looked at the first node).
@@ -8316,6 +8421,7 @@ fn precompute_accumulators(state: &mut EvalState, root: NodeId) -> Result<()> {
         if decl.import_precedence != best_prec[&key] { continue; }
         if !applied.insert(key.clone()) { continue; } // precedence tie — first wins
         let initial = state.xpath_eval(&decl.initial_value, root, 1, 1)?;
+        let initial = fn_coerce_as(initial, decl.as_type.as_deref(), state.idx)?;
         // Merge into any data already accumulated for earlier documents
         // — the before/after maps are keyed by globally-unique NodeId.
         let mut data = state.accumulators.remove(&key).unwrap_or_else(|| AccumulatorData {
@@ -8365,10 +8471,13 @@ fn accumulate_walk(
     // attributes/children (XSLT 3.0 §18.4).
     apply_accum_rule(state, decl, node, Start, value)?;
     data.before.insert(node, value.clone());
+    // XSLT 3.0 §18.2 — a rule whose pattern matches an attribute or
+    // namespace node is permitted but never triggered, so the accumulator
+    // value is unchanged across an element's attributes.  Their
+    // before/after values are still recorded (equal to the current value)
+    // so accumulator-before(@x) / accumulator-after(@x) are well-defined.
     for a in state.idx.attr_range(node).collect::<Vec<_>>() {
-        apply_accum_rule(state, decl, a, Start, value)?;
         data.before.insert(a, value.clone());
-        apply_accum_rule(state, decl, a, End, value)?;
         data.after.insert(a, value.clone());
     }
     for c in state.idx.children(node).to_vec() {
@@ -8415,7 +8524,7 @@ fn apply_accum_rule(
             .map(|ns| Value::NodeSet(rtf_children_into_index(state.idx, &ns))),
     };
     state.variables.leave();
-    *value = nv?;
+    *value = fn_coerce_as(nv?, decl.as_type.as_deref(), state.idx)?;
     Ok(())
 }
 

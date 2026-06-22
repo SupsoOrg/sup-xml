@@ -2999,6 +2999,26 @@ fn compile_with_imports_inner(
                     acc.attribute_sets.extend(tail.into_iter()
                         .filter(|a| !overridden_sets.contains(&qname_key(&a.name))));
                 }
+                // The same applies to global variables and parameters, which
+                // (unlike templates/functions) carry no import precedence, so
+                // the used package's original would otherwise shadow the
+                // override at run time.  An override may also change the
+                // declared kind — replacing a used xsl:variable with an
+                // xsl:param or vice versa — so remove the used package's
+                // homonym from BOTH global tables regardless of which kind
+                // the override declares.
+                let overridden_globals: std::collections::HashSet<String> =
+                    up.overrides.global_variables.iter().map(|v| qname_key(&v.name))
+                        .chain(up.overrides.global_params.iter().map(|p| qname_key(&p.name)))
+                        .collect();
+                if !overridden_globals.is_empty() {
+                    let tail_v = acc.global_variables.split_off(before_vars);
+                    acc.global_variables.extend(tail_v.into_iter()
+                        .filter(|v| !overridden_globals.contains(&qname_key(&v.name))));
+                    let tail_p = acc.global_params.split_off(before_params);
+                    acc.global_params.extend(tail_p.into_iter()
+                        .filter(|p| !overridden_globals.contains(&qname_key(&p.name))));
+                }
                 // XSLT 3.0 §3.5.2 — a component's visibility for the using
                 // package is its declared visibility as adjusted by the used
                 // package's xsl:expose declarations.  Apply them now so the
@@ -3815,7 +3835,10 @@ fn compile_key(node: &Node) -> Result<Key, XsltError> {
 /// affirmative as `yes`/`true`/`1`; absence or any other value is
 /// `false` (the construct is processed in the ordinary tree-based way).
 fn read_streamable(node: &Node) -> bool {
-    read_attribute(node, "streamable")
+    // `streamable` may be supplied via a `_streamable="{avt}"` shadow
+    // attribute (XSLT 3.0 §3.9), as the accumulator/mode conformance
+    // cases routinely do to drive streamability from a static parameter.
+    read_attr_with_shadow(node, "streamable").ok().flatten()
         .map(|s| matches!(s.trim(), "yes" | "true" | "1"))
         .unwrap_or(false)
 }
@@ -4198,9 +4221,12 @@ fn compile_accumulator(node: &Node) -> Result<AccumulatorDecl, XsltError> {
         None => return Err(XsltError::InvalidStylesheet(
             "xsl:accumulator requires a name= attribute (XTSE0010)".into())),
     };
-    let initial_value = parse_xpath_at(node,
-        require_attr(node, "initial-value", "xsl:accumulator")?)
-        .map_err(XsltError::from)?;
+    let initial_src = read_attr_with_shadow(node, "initial-value")?.ok_or_else(|| {
+        XsltError::InvalidStylesheet(
+            "xsl:accumulator requires initial-value= attribute (XTSE0010)".into())
+    })?;
+    let initial_value = parse_xpath_at(node, &initial_src).map_err(XsltError::from)?;
+    let as_type = read_attr_with_shadow(node, "as")?.map(|s| s.trim().to_string());
     let mut rules = Vec::new();
     for child in node.children() {
         if !child.is_element() {
@@ -4218,7 +4244,7 @@ fn compile_accumulator(node: &Node) -> Result<AccumulatorDecl, XsltError> {
         rules.push(compile_accumulator_rule(child)?);
     }
     let streamable = read_streamable(node);
-    Ok(AccumulatorDecl { name, initial_value, rules, streamable,
+    Ok(AccumulatorDecl { name, initial_value, as_type, rules, streamable,
         import_precedence: TOP_LEVEL_IMPORT_PRECEDENCE })
 }
 

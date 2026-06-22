@@ -519,7 +519,14 @@ impl ResultBuilder {
     /// a captured sub-tree — e.g. the retained content of
     /// `xsl:where-populated`.
     pub fn push_built_node(&mut self, node: ResultNode) {
-        self.push_node(node);
+        // A replayed attribute must attach to the open element's
+        // attribute list (or become a parentless attribute when none is
+        // open) — pushing it as a child would drop it on serialization.
+        if let ResultNode::Attribute { name, value } = node {
+            self.push_attribute(name, value);
+        } else {
+            self.push_node(node);
+        }
     }
 
     fn current_children_mut(&mut self) -> Option<&mut Vec<ResultNode>> {

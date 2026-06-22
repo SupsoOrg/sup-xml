@@ -895,6 +895,12 @@ pub struct ExposeDecl {
 pub struct AccumulatorDecl {
     pub name:          QName,
     pub initial_value: Expr,
+    /// `as="xs:T"` (XSLT 3.0 §18.2): the required type of the
+    /// accumulator value.  The initial value and every value produced
+    /// by an accumulator rule are coerced to this type, so e.g. an
+    /// `as="xs:integer*"` accumulator yields integers (not the strings
+    /// an attribute-value-template initial value would otherwise carry).
+    pub as_type:       Option<String>,
     pub rules:         Vec<AccumulatorRule>,
     /// `streamable="yes"` (XSLT 3.0 §18.2.1): the accumulator's rules
     /// are subject to streamability analysis and may be applied while
