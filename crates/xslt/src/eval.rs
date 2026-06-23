@@ -4058,7 +4058,13 @@ fn eval_body_conditional(
     body:  &Body,
     ctx_node: NodeId, pos: usize, size: usize,
 ) -> Result<()> {
-    let prev = std::mem::replace(&mut state.builder, ResultBuilder::new());
+    let mut capture = ResultBuilder::new();
+    // §16.4.1/2 — a top-level zero-length string in the ordinary content
+    // is dropped, so it neither separates other values nor makes the
+    // content non-empty ("separators between zero-length strings do not
+    // make the content non-empty").
+    capture.drop_top_level_empty_atomics = true;
+    let prev = std::mem::replace(&mut state.builder, capture);
     let r = capture_on_conditional_body(state, body, ctx_node, pos, size);
     let captured = std::mem::replace(&mut state.builder, prev).finish();
     r?;
@@ -5291,7 +5297,7 @@ fn eval_instr(
             // (XSLT 3.0 §16.4.3): suppress an empty wrapper such as an
             // element with no attributes/children, or a zero-length
             // text node.
-            let nodes = build_rtf_nodes(state, body, ctx_node, pos, size)?;
+            let nodes = build_rtf_nodes_populated(state, body, ctx_node, pos, size)?;
             if nodes.iter().any(result_node_is_significant) {
                 for n in nodes { state.builder.push_built_node(n); }
             }
@@ -8578,6 +8584,27 @@ fn build_rtf_nodes(
     state: &mut EvalState, body: &Body,
     ctx_node: NodeId, pos: usize, size: usize,
 ) -> Result<Vec<ResultNode>> {
+    build_rtf_nodes_inner(state, body, ctx_node, pos, size, false)
+}
+
+/// `build_rtf_nodes` for `xsl:where-populated` content: a top-level
+/// zero-length string is dropped before §5.7.2 separator insertion
+/// (XSLT 3.0 §16.4.3), so it neither pads adjacent values with a
+/// separator nor makes the element populated.
+fn build_rtf_nodes_populated(
+    state: &mut EvalState, body: &Body,
+    ctx_node: NodeId, pos: usize, size: usize,
+) -> Result<Vec<ResultNode>> {
+    build_rtf_nodes_inner(state, body, ctx_node, pos, size, true)
+}
+
+fn build_rtf_nodes_inner(
+    state: &mut EvalState, body: &Body,
+    ctx_node: NodeId, pos: usize, size: usize,
+    drop_top_empty: bool,
+) -> Result<Vec<ResultNode>> {
+    let mut builder = ResultBuilder::new();
+    builder.drop_top_level_empty_atomics = drop_top_empty;
     let mut tmp = EvalState {
         style: state.style, idx: state.idx, namespaces: state.namespaces,
         keys: state.keys,
@@ -8589,7 +8616,7 @@ fn build_rtf_nodes(
         variables: std::mem::take(&mut state.variables),
         rtfs: std::mem::take(&mut state.rtfs),
         rtf_scopes: std::mem::take(&mut state.rtf_scopes),
-        builder: ResultBuilder::new(),
+        builder,
         principal_buf: None,
         unparsed_entities: state.unparsed_entities.clone(),
         source_doc: state.source_doc,

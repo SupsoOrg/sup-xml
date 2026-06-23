@@ -127,6 +127,14 @@ pub struct ResultBuilder {
     /// at element open/close (each element body is its own
     /// sequence constructor).
     pub last_was_atomic: bool,
+    /// XSLT 3.0 §16.4 — when constructing the content of
+    /// `xsl:where-populated` / `xsl:on-empty` / `xsl:on-non-empty`, a
+    /// top-level zero-length string contributes nothing: it is removed
+    /// before §5.7.2 separator insertion, so "separators between
+    /// zero-length strings do not make the content non-empty".  Only
+    /// applies to the top level (no element open) of those bodies;
+    /// nested element content follows normal §5.7.2 rules.
+    pub drop_top_level_empty_atomics: bool,
 }
 
 impl ResultBuilder {
@@ -483,15 +491,19 @@ impl ResultBuilder {
     /// Tracking the "last emit was atomic" flag on the builder lets
     /// us slot that space in without reshaping the value model.
     pub fn push_atomic_text(&mut self, content: String) {
-        if content.is_empty() {
-            // An empty atomic still counts — `("", "")` should
-            // normalise to a single space — so flip the flag.
-            self.last_was_atomic = true;
+        if content.is_empty() && self.drop_top_level_empty_atomics && self.stack.is_empty() {
+            // §16.4 content: a top-level zero-length string is removed
+            // entirely — it neither emits a separator nor counts toward
+            // populated/non-empty status.
             return;
         }
+        // §5.7.2 normalises a run of adjacent atomic values to a single
+        // text node with one space between each pair.  The separator
+        // precedes every atomic value that follows another atomic value —
+        // including an empty one, so `("a","","b")` yields `"a  b"` and a
+        // trailing empty value contributes a trailing space.  `push_text`
+        // clears `last_was_atomic`, so it is restored below.
         if self.last_was_atomic {
-            // Same merging rules as a literal text node, but
-            // prefixed with a single space.
             self.push_text(format!(" {content}"), false);
         } else {
             self.push_text(content, false);
