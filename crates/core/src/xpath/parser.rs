@@ -728,17 +728,17 @@ impl Parser {
     }
 
     fn parse_multiplicative_expr(&mut self) -> Result<Expr> {
-        let mut left = self.parse_unary_expr()?;
+        let mut left = self.parse_union_expr()?;
         loop {
             match self.peek() {
                 Token::Star => {
                     self.consume();
-                    let right = self.parse_unary_expr()?;
+                    let right = self.parse_union_expr()?;
                     left = Expr::Mul(Box::new(left), Box::new(right));
                 }
                 tok if is_name_tok(tok, "div") => {
                     self.consume();
-                    let right = self.parse_unary_expr()?;
+                    let right = self.parse_union_expr()?;
                     left = Expr::Div(Box::new(left), Box::new(right));
                 }
                 // XPath 2.0 `idiv` — integer division, truncating
@@ -747,12 +747,12 @@ impl Parser {
                     && self.peek2() != &Token::LParen =>
                 {
                     self.consume();
-                    let right = self.parse_unary_expr()?;
+                    let right = self.parse_union_expr()?;
                     left = Expr::IDiv(Box::new(left), Box::new(right));
                 }
                 tok if is_name_tok(tok, "mod") => {
                     self.consume();
-                    let right = self.parse_unary_expr()?;
+                    let right = self.parse_union_expr()?;
                     left = Expr::Mod(Box::new(left), Box::new(right));
                 }
                 _ => break,
@@ -762,10 +762,12 @@ impl Parser {
     }
 
     fn parse_unary_expr(&mut self) -> Result<Expr> {
-        // XPath 2.0 §3.4 `UnaryExpr ::= ("-" | "+")* UnionExpr` —
+        // XPath 2.0 §3.4 `UnaryExpr ::= ("-" | "+")* ValueExpr` —
         // chains of leading `+` / `-` allowed; even count is a no-op,
         // odd count of `-` negates.  Unary `+` was XPath 1.0
-        // forbidden but accepted by libxslt and by XPath 2.0.
+        // forbidden but accepted by libxslt and by XPath 2.0.  Per the
+        // grammar UnaryExpr is the operand of CastExpr, so `-7 castable
+        // as T` is `(-7) castable as T`, not `-(7 castable as T)`.
         let mut neg = false;
         loop {
             match self.peek() {
@@ -774,7 +776,7 @@ impl Parser {
                 _ => break,
             }
         }
-        let inner = self.parse_union_expr()?;
+        let inner = self.parse_path_expr()?;
         let mut expr = if neg { Expr::Neg(Box::new(inner)) } else { inner };
         // XPath 3.1 `ArrowExpr ::= UnaryExpr ('=>' ArrowFunctionSpecifier
         // ArgumentList)*` — `e => f(args)` is sugar for
@@ -901,7 +903,7 @@ impl Parser {
     }
 
     fn parse_cast_expr(&mut self) -> Result<Expr> {
-        let mut left = self.parse_path_expr()?;
+        let mut left = self.parse_unary_expr()?;
         if self.xpath_2_0
             && is_name_tok(self.peek(), "cast")
             && is_name_tok(&self.tokens.get(self.pos + 1).cloned().unwrap_or(Token::Eof), "as")
