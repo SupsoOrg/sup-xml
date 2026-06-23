@@ -1245,8 +1245,15 @@ pub fn compile(doc: &Document) -> Result<StylesheetAst, XsltError> {
         // attributes) for everything that follows.
         let ln = child.local_name();
         if ln != "param" && ln != "variable" { continue; }
+        // XSLT 3.0 §3.5 / XTSE0020 — `static` is an enumerated boolean.
+        if let Some(v) = read_attribute(child, "static") {
+            if !matches!(v.trim(), "yes" | "no" | "true" | "false" | "1" | "0") {
+                return Err(XsltError::InvalidStylesheet(format!(
+                    "xsl:{ln} static='{v}' must be a boolean (XTSE0020)")));
+            }
+        }
         let is_static = read_attribute(child, "static")
-            .map(|v| matches!(v, "yes" | "true" | "1")).unwrap_or(false);
+            .map(|v| matches!(v.trim(), "yes" | "true" | "1")).unwrap_or(false);
         if !is_static { continue; }
         let name = required_qname_attr(child, "name", "xsl:variable")?;
         // A caller-supplied value (XSLT 3.0 §3.5) overrides the
@@ -2097,6 +2104,13 @@ fn compile_function(node: &Node) -> Result<UserFunction, XsltError> {
     for attr in ["override", "override-extension-function"] {
         if let Some(v) = read_attribute(node, attr) {
             parse_bool_attr(&v, "xsl:function", attr)?;
+        }
+    }
+    // XSLT 3.0 §10.3 / XTSE0020 — new-each-time is `yes|no|maybe`.
+    if let Some(v) = read_attribute(node, "new-each-time") {
+        if !matches!(v.trim(), "yes" | "no" | "true" | "false" | "1" | "0" | "maybe") {
+            return Err(XsltError::InvalidStylesheet(format!(
+                "xsl:function new-each-time='{v}' must be 'yes', 'no', or 'maybe' (XTSE0020)")));
         }
     }
     let name = read_attribute(node, "name").ok_or_else(||
@@ -3639,6 +3653,9 @@ fn compile_template(node: &Node) -> Result<Template, XsltError> {
     let mut params = Vec::new();
     let mut body   = Body::new();
     let mut seen_non_param = false;
+    // XSLT 3.0 §6.4 — `default-mode` on xsl:template scopes the default
+    // apply-templates mode across the whole template body.
+    let _dm_guard = read_default_mode(node)?.map(DefaultModeGuard::enter);
     for child in node.children() {
         if !child.is_element() && !is_significant_text(child) { continue; }
         // xsl:context-item (XSLT 3.0 §6.3) precedes xsl:param in the
@@ -3873,6 +3890,15 @@ fn compile_key(node: &Node) -> Result<Key, XsltError> {
 /// Read a `streamable=` attribute as a boolean.  XSLT 3.0 spells the
 /// affirmative as `yes`/`true`/`1`; absence or any other value is
 /// `false` (the construct is processed in the ordinary tree-based way).
+/// A single XSLT 3.0 package version number (§3.5.2): a digit-led,
+/// dot-separated sequence of alphanumeric components, with an optional
+/// `-` release suffix.  (Range syntax is validated by the caller.)
+fn is_valid_version_number(v: &str) -> bool {
+    let mut chars = v.chars();
+    matches!(chars.next(), Some(c) if c.is_ascii_digit())
+        && v.chars().all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-')
+}
+
 fn read_streamable(node: &Node) -> bool {
     // `streamable` may be supplied via a `_streamable="{avt}"` shadow
     // attribute (XSLT 3.0 §3.9), as the accumulator/mode conformance
@@ -3938,6 +3964,30 @@ fn compile_mode(node: &Node) -> Result<ModeDecl, XsltError> {
             "xsl:mode on-no-match='{other}' is not a recognised value (XTSE0020)"))),
     };
     let on_no_match_explicit = read_attribute(node, "on-no-match").is_some();
+    // XSLT 3.0 §6.6.1 / XTSE0020 — the remaining xsl:mode attributes are
+    // enumerated; reject values outside their permitted sets.
+    if let Some(v) = read_attribute(node, "on-multiple-match") {
+        if !matches!(v.trim(), "use-last" | "fail") {
+            return Err(XsltError::InvalidStylesheet(format!(
+                "xsl:mode on-multiple-match='{v}' must be 'use-last' or 'fail' (XTSE0020)")));
+        }
+    }
+    let is_boolean = |v: &str| matches!(v.trim(), "yes" | "no" | "true" | "false" | "1" | "0");
+    for attr in ["warning-on-no-match", "warning-on-multiple-match"] {
+        if let Some(v) = read_attribute(node, attr) {
+            if !is_boolean(&v) {
+                return Err(XsltError::InvalidStylesheet(format!(
+                    "xsl:mode {attr}='{v}' must be a boolean (XTSE0020)")));
+            }
+        }
+    }
+    if let Some(v) = read_attribute(node, "typed") {
+        if !is_boolean(&v) && !matches!(v.trim(), "strict" | "lax" | "unspecified") {
+            return Err(XsltError::InvalidStylesheet(format!(
+                "xsl:mode typed='{v}' must be a boolean, 'strict', 'lax', or \
+                 'unspecified' (XTSE0020)")));
+        }
+    }
     let visibility = read_attribute(node, "visibility").map(str::to_string);
     // XSLT 3.0 §6.6.1 / XTSE0020 — the unnamed mode is never a component,
     // so it may not carry a visibility.
@@ -3959,6 +4009,19 @@ fn compile_mode(node: &Node) -> Result<ModeDecl, XsltError> {
 fn compile_use_package(node: &Node) -> Result<UsePackage, XsltError> {
     let name = require_attr(node, "name", "xsl:use-package")?.to_string();
     let version = read_attribute(node, "package-version").map(str::to_string);
+    // XSLT 3.0 §3.5.2 — a package-version requirement is a set of version
+    // ranges.  Validate the simple single-version form (a dot-separated
+    // sequence of alphanumeric components, optionally with a `-suffix`);
+    // the richer range syntax (`,`, `to`, `*`) is left unchecked.
+    if let Some(v) = &version {
+        let v = v.trim();
+        let is_range = v.contains(',') || v.contains('*')
+            || v.split_whitespace().any(|t| t == "to");
+        if !is_range && !is_valid_version_number(v) {
+            return Err(XsltError::InvalidStylesheet(format!(
+                "xsl:use-package package-version={v:?} is not a valid version (XTSE0020)")));
+        }
+    }
     let mut overrides = StylesheetAst::default();
     let mut accepts: Vec<crate::ast::ExposeDecl> = Vec::new();
     let mut pos: u32 = 0;
@@ -4255,6 +4318,15 @@ pub(crate) fn validate_package_exposes(ast: &StylesheetAst) -> Result<(), XsltEr
 fn compile_accumulator(node: &Node) -> Result<AccumulatorDecl, XsltError> {
     validate_xslt_only_attributes(node, "xsl:accumulator",
         &["name", "initial-value", "as", "streamable"])?;
+    // XSLT 3.0 §18.2 / XTSE0020 — a literal `streamable` is an enumerated
+    // boolean (a `_streamable` shadow attribute is an AVT, checked at
+    // evaluation, so it is left alone here).
+    if let Some(v) = read_attribute(node, "streamable") {
+        if !matches!(v.trim(), "yes" | "no" | "true" | "false" | "1" | "0") {
+            return Err(XsltError::InvalidStylesheet(format!(
+                "xsl:accumulator streamable='{v}' must be a boolean (XTSE0020)")));
+        }
+    }
     let name = match read_attr_with_shadow(node, "name")? {
         Some(s) => parse_qname_on(node, &s)?,
         None => return Err(XsltError::InvalidStylesheet(
@@ -4497,7 +4569,9 @@ fn compile_output(node: &Node, allow_avt: bool) -> Result<OutputSpec, XsltError>
             }
         }
     }
-    out.method                 = read_attribute(node, "method").map(str::to_string);
+    // Serialization parameters are whitespace-collapsed (XSLT 3.0 §26.1):
+    // leading/trailing whitespace around the value is not significant.
+    out.method                 = read_attribute(node, "method").map(|m| m.trim().to_string());
     // XSLT 2.0 §20 / XTSE1570 — an unprefixed method= value must be
     // one of the four built-ins; a prefixed value names an extension
     // method whose prefix must be in scope, and the QName itself
@@ -4980,7 +5054,35 @@ fn compile_instr_into_body(node: &Node, out: &mut Body) -> Result<(), XsltError>
     if out.file().is_none() {
         out.set_file(current_module_file());
     }
+    // XSLT 3.0 §6.4 — `default-mode` (`xsl:default-mode` on a literal
+    // result element) sets the default mode for `xsl:apply-templates`
+    // that omit `mode=` (or use `#default`) anywhere in this element's
+    // lexical scope.  Scope it around the element's whole compilation.
+    let _guard = read_default_mode(node)?.map(DefaultModeGuard::enter);
     compile_raw_instr_into(node, out, node_src_pos(node))
+}
+
+/// Read an element's `default-mode` directive (XSLT 3.0 §6.4): an
+/// unprefixed `default-mode` on an XSLT instruction, or `xsl:default-mode`
+/// on a literal result element.  The outer `Option` is whether the
+/// attribute is present; the inner `Option<QName>` is the mode (`None`
+/// for `#unnamed`).
+fn read_default_mode(node: &Node) -> Result<Option<Option<QName>>, XsltError> {
+    let raw = node.attributes().find_map(|a| {
+        let n = a.name();
+        if n == "default-mode" || n == "xsl:default-mode" {
+            Some(a.value().to_string())
+        } else {
+            None
+        }
+    });
+    match raw {
+        None => Ok(None),
+        Some(dm) => Ok(Some(match dm.as_str() {
+            "#unnamed" => None,
+            s          => Some(parse_qname_on(node, s)?),
+        })),
+    }
 }
 
 /// Produce the instruction(s) for `node`, pushing each onto `out` paired
@@ -6078,6 +6180,15 @@ fn compile_merge(node: &Node) -> Result<Instr, XsltError> {
         return Err(XsltError::InvalidStylesheet(
             "xsl:merge requires at least one xsl:merge-source (XTSE0010)".into()));
     }
+    // XSLT 3.0 §15.2 / XTSE2200 — every xsl:merge-source must declare the
+    // same number of xsl:merge-key children (the keys are compared
+    // position-by-position across sources).
+    let key_count = sources[0].keys.len();
+    if sources.iter().any(|s| s.keys.len() != key_count) {
+        return Err(XsltError::InvalidStylesheet(
+            "all xsl:merge-source elements must have the same number of \
+             xsl:merge-key children (XTSE2200)".into()));
+    }
     let action = action.ok_or_else(|| XsltError::InvalidStylesheet(
         "xsl:merge requires an xsl:merge-action (XTSE0010)".into()))?;
     Ok(Instr::Merge { sources, action })
@@ -6087,8 +6198,22 @@ fn compile_merge_source(node: &Node) -> Result<MergeSource, XsltError> {
     let name = read_attribute(node, "name").map(|s| s.to_string());
     let select = parse_xpath_at(node, require_attr(node, "select", "xsl:merge-source")?)
         .map_err(XsltError::from)?;
+    // XSLT 3.0 §18.3 / XTSE0020 — `streamable` is an enumerated boolean.
+    if let Some(s) = read_attribute(node, "streamable") {
+        if !matches!(s.trim(), "yes" | "no" | "true" | "false" | "1" | "0") {
+            return Err(XsltError::InvalidStylesheet(format!(
+                "xsl:merge-source streamable='{s}' must be yes/no/true/false/1/0 (XTSE0020)")));
+        }
+    }
     // `for-each-item` was renamed `for-each-source` between drafts;
-    // accept both spellings.
+    // accept either spelling, but not both on the same source (XTSE3195).
+    if read_attribute(node, "for-each-source").is_some()
+        && read_attribute(node, "for-each-item").is_some()
+    {
+        return Err(XsltError::InvalidStylesheet(
+            "xsl:merge-source cannot specify both for-each-source and \
+             for-each-item (XTSE3195)".into()));
+    }
     let for_each_source = read_attribute(node, "for-each-source")
         .or_else(|| read_attribute(node, "for-each-item"))
         .map(|s| parse_xpath_at(node, s)).transpose().map_err(XsltError::from)?;
@@ -6491,7 +6616,8 @@ fn compile_value_of(node: &Node) -> Result<Instr, XsltError> {
             return Ok(Instr::ValueOfBody {
                 body: compile_body(node)?,
                 dose: read_attribute(node, "disable-output-escaping")
-                    .map(parse_yesno).unwrap_or(false),
+                    .map(|v| parse_yesno_strict(v, "xsl:value-of", "disable-output-escaping"))
+                    .transpose()?.unwrap_or(false),
                 separator: separator_for_body,
             });
         }
@@ -6502,7 +6628,8 @@ fn compile_value_of(node: &Node) -> Result<Instr, XsltError> {
     Ok(Instr::ValueOf {
         select,
         dose: read_attribute(node, "disable-output-escaping")
-            .map(parse_yesno).unwrap_or(false),
+            .map(|v| parse_yesno_strict(v, "xsl:value-of", "disable-output-escaping"))
+            .transpose()?.unwrap_or(false),
         separator,
     })
 }
@@ -6712,7 +6839,8 @@ fn compile_text(node: &Node) -> Result<Instr, XsltError> {
         }
     }
     let dose = read_attribute(node, "disable-output-escaping")
-        .map(parse_yesno).unwrap_or(false);
+        .map(|v| parse_yesno_strict(v, "xsl:text", "disable-output-escaping"))
+        .transpose()?.unwrap_or(false);
     // XSLT 3.0 §5.4.2 — when `[xsl:]expand-text` is in scope, the
     // content of xsl:text is a text value template: `{expr}` is
     // evaluated.  expand-text declared on xsl:text itself takes

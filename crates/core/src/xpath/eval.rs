@@ -6534,8 +6534,11 @@ fn xml_node_to_json<I: DocIndexLike>(
         "number" => {
             if !elem_children.is_empty() { return Err(err("number has element content")); }
             let n = text.trim();
+            // The lexical value need only be castable to xs:double; the
+            // emitted form is the canonical xs:double serialization, so
+            // `007` → `7`, `1E6` → `1.0E6`, `23.` → `23` (F&O §17.5.5).
             match n.parse::<f64>() {
-                Ok(f) if f.is_finite() => out.push_str(n),
+                Ok(f) if f.is_finite() => out.push_str(&format_number_xpath20(f)),
                 _ => return Err(err("number is not a valid JSON number")),
             }
         }
@@ -6543,10 +6546,12 @@ fn xml_node_to_json<I: DocIndexLike>(
             if !elem_children.is_empty() { return Err(err("string has element content")); }
             out.push('"');
             if json_bool_attr(elem, "escaped", idx)?.unwrap_or(false) {
-                // Content is already JSON-escaped: validate (FOJS0007)
-                // and emit verbatim.
+                // Content is already JSON-escaped: validate (FOJS0007),
+                // then re-emit so that valid escape sequences pass through
+                // verbatim while literal characters that JSON requires
+                // escaped (a bare quote, control characters) are escaped.
                 validate_json_escapes(&text)?;
-                out.push_str(&text);
+                json_escape_preserving(&text, out);
             } else {
                 json_escape_into(&text, out);
             }
@@ -6647,19 +6652,49 @@ fn attr_value<I: DocIndexLike>(elem: NodeId, name: &str, idx: &I) -> Option<Stri
         .map(|a| idx.string_value(a))
 }
 
+/// Escape a single character into JSON string form (F&O §17.4.2): the
+/// double quote and backslash use their two-character escapes, and
+/// control characters (#x00–#x1F together with #x7F–#x9F) use the
+/// named (`\n`, …) or `\uXXXX` forms.  All other characters pass through.
+fn json_escape_char(c: char, out: &mut String) {
+    match c {
+        '"' => out.push_str("\\\""),
+        '\\' => out.push_str("\\\\"),
+        '\u{0008}' => out.push_str("\\b"),
+        '\u{000C}' => out.push_str("\\f"),
+        '\n' => out.push_str("\\n"),
+        '\r' => out.push_str("\\r"),
+        '\t' => out.push_str("\\t"),
+        c if (c as u32) < 0x20 || (0x7F..=0x9F).contains(&(c as u32)) =>
+            out.push_str(&format!("\\u{:04X}", c as u32)),
+        c => out.push(c),
+    }
+}
+
 /// Append `s` to `out` with JSON string escaping (F&O §17.4.2).
 fn json_escape_into(s: &str, out: &mut String) {
     for c in s.chars() {
-        match c {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            '\u{0008}' => out.push_str("\\b"),
-            '\u{000C}' => out.push_str("\\f"),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04X}", c as u32)),
-            c => out.push(c),
+        json_escape_char(c, out);
+    }
+}
+
+/// Re-emit a string whose content is already JSON-escaped (the
+/// `escaped="true"` case): a valid backslash escape sequence is copied
+/// verbatim, while a literal character that JSON requires escaped — a
+/// bare quote or a control character — is escaped.  Assumes `s` has
+/// already passed [`validate_json_escapes`], so every backslash begins
+/// a well-formed escape.
+fn json_escape_preserving(s: &str, out: &mut String) {
+    let chars: Vec<char> = s.chars().collect();
+    let mut i = 0;
+    while i < chars.len() {
+        if chars[i] == '\\' {
+            let len = if chars.get(i + 1) == Some(&'u') { 6 } else { 2 };
+            for &ch in &chars[i..(i + len).min(chars.len())] { out.push(ch); }
+            i += len;
+        } else {
+            json_escape_char(chars[i], out);
+            i += 1;
         }
     }
 }

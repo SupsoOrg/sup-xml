@@ -488,12 +488,21 @@ pub(crate) fn dispatch<I: DocIndexLike>(
         }
         // XSLT 3.0 §15 `xsl:merge` accessors.  The current merge group
         // and key reuse the grouping-accessor state (a merge-action and
-        // a for-each-group body are never active at the same time).  An
-        // optional source-name argument to current-merge-group() is
-        // accepted but the full group is returned (no per-source split).
+        // a for-each-group body are never active at the same time).  With
+        // no argument the whole group is returned; with a source-name the
+        // result is restricted to the items contributed by that merge-
+        // source (XTDE3490 if the name matches no declared source).
         "current-merge-group" => {
             if args.len() > 1 {
                 return Some(Err(err("current-merge-group() takes at most one argument")));
+            }
+            if let Some(name_arg) = args.first() {
+                let name = value_to_string(name_arg, idx);
+                return Some(match merge_group_for_source(&name) {
+                    Some(ns) => Ok(Value::NodeSet(ns)),
+                    None => Err(err(&format!(
+                        "current-merge-group(): no merge-source named {name:?} (XTDE3490)"))),
+                });
             }
             Ok(Value::NodeSet(current_group.map(|g| g.to_vec()).unwrap_or_default()))
         }
@@ -1719,6 +1728,52 @@ fn key_fn<I: DocIndexLike>(
     out.sort_unstable();
     out.dedup();
     Ok(Value::NodeSet(out))
+}
+
+/// The per-source breakdown of the current `xsl:merge` group, installed
+/// for the duration of a merge action so `current-merge-group(name)` can
+/// return just the named source's contribution (and reject an unknown
+/// name with XTDE3490).
+struct MergeGroupState {
+    source_names: Vec<Option<String>>,
+    by_source:    Vec<(Option<String>, Vec<NodeId>)>,
+}
+
+thread_local! {
+    static MERGE_GROUP_STATE: std::cell::RefCell<Option<MergeGroupState>>
+        = const { std::cell::RefCell::new(None) };
+}
+
+/// Nodes of the current merge group contributed by the merge-source named
+/// `name`, or `None` when no declared source has that name (XTDE3490).
+fn merge_group_for_source(name: &str) -> Option<Vec<NodeId>> {
+    MERGE_GROUP_STATE.with(|s| {
+        let s = s.borrow();
+        let st = s.as_ref()?;
+        st.source_names.iter().any(|n| n.as_deref() == Some(name)).then(|| {
+            st.by_source.iter()
+                .find(|(n, _)| n.as_deref() == Some(name))
+                .map(|(_, ns)| ns.clone())
+                .unwrap_or_default()
+        })
+    })
+}
+
+/// RAII guard installing [`MergeGroupState`] for an `xsl:merge` action body.
+pub(crate) struct MergeGroupGuard(Option<MergeGroupState>);
+impl MergeGroupGuard {
+    pub(crate) fn enter(
+        source_names: Vec<Option<String>>,
+        by_source: Vec<(Option<String>, Vec<NodeId>)>,
+    ) -> Self {
+        MergeGroupGuard(MERGE_GROUP_STATE.with(|s|
+            s.replace(Some(MergeGroupState { source_names, by_source }))))
+    }
+}
+impl Drop for MergeGroupGuard {
+    fn drop(&mut self) {
+        MERGE_GROUP_STATE.with(|s| *s.borrow_mut() = self.0.take());
+    }
 }
 
 /// Expand a `prefix:local` (or bare `local`) QName-string into

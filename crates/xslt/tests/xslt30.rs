@@ -2026,7 +2026,13 @@ fn canonicalise(s: &str) -> String {
 fn xml_structurally_equal(got: &str, want: &str) -> bool {
     let mut opts = ParseOptions::default();
     opts.namespace_aware = true;
-    let (Ok(gd), Ok(wd)) = (parse_str(got, &opts), parse_str(want, &opts))
+    // A result that is a sequence of several top-level nodes (or bare text)
+    // is not a well-formed XML document, so wrap both sides in a synthetic
+    // element before parsing — the comparison still walks the same
+    // significant children in order.
+    let parse = |s: &str| parse_str(s, &opts)
+        .or_else(|_| parse_str(&format!("<wrap>{}</wrap>", strip_xml_declaration(s)), &opts));
+    let (Ok(gd), Ok(wd)) = (parse(got), parse(want))
         else { return false };
     let gc = sup_xml_core::XPathContext::new(&gd);
     let wc = sup_xml_core::XPathContext::new(&wd);
@@ -2258,6 +2264,41 @@ fn strip_xml_tags(s: &str) -> String {
             _ if !in_tag => out.push(c),
             _ => {}
         }
+    }
+    decode_xml_entities(&out)
+}
+
+/// Decode the predefined XML entities and numeric character references
+/// left in serialized text content, so the string value of `<out>a&gt;b</out>`
+/// compares equal to the catalog's `a>b`.  One level of decoding, matching
+/// the data model: a literal `&gt;` in text serializes as `&amp;gt;`.
+fn decode_xml_entities(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let bytes = s.as_bytes();
+    let mut i = 0;
+    while i < s.len() {
+        if bytes[i] == b'&' {
+            if let Some(semi) = s[i + 1..].find(';') {
+                let ent = &s[i + 1..i + 1 + semi];
+                let decoded = match ent {
+                    "lt" => Some('<'), "gt" => Some('>'), "amp" => Some('&'),
+                    "quot" => Some('"'), "apos" => Some('\''),
+                    _ if ent.starts_with("#x") || ent.starts_with("#X") =>
+                        u32::from_str_radix(&ent[2..], 16).ok().and_then(char::from_u32),
+                    _ if ent.starts_with('#') =>
+                        ent[1..].parse::<u32>().ok().and_then(char::from_u32),
+                    _ => None,
+                };
+                if let Some(c) = decoded {
+                    out.push(c);
+                    i += semi + 2;
+                    continue;
+                }
+            }
+        }
+        let ch = s[i..].chars().next().unwrap();
+        out.push(ch);
+        i += ch.len_utf8();
     }
     out
 }
@@ -2885,11 +2926,41 @@ fn eval_param_value(select: &str) -> String {
     }
 }
 
+/// Drop a leading `<?xml … ?>` declaration (and the whitespace around it)
+/// so the remaining body can be wrapped in a synthetic element.
+fn strip_xml_declaration(s: &str) -> &str {
+    let t = s.trim_start();
+    if let Some(rest) = t.strip_prefix("<?xml") {
+        if let Some(end) = rest.find("?>") {
+            return rest[end + 2..].trim_start();
+        }
+    }
+    t
+}
+
 fn evaluate_assertion(output: &str, xpath: &str) -> Result<bool, sup_xml_core::error::XmlError> {
     use sup_xml_core::xpath::eval::{EvalCtx, StaticContext, XPathBindings, eval_expr, value_to_bool, validate_prefixes};
     let mut opts = ParseOptions::default();
     opts.namespace_aware = true;
-    let doc = parse_str(output, &opts)?;
+    // A transform whose result is character data only — e.g. a mode with
+    // `on-no-match="text-only-copy"`, or `method="text"` output — serializes
+    // to a bare string with no document element, which is not a well-formed
+    // XML document.  The result is nonetheless a document node whose string
+    // value is that text, so assertions like `normalize-space(.)` are well
+    // defined.  Re-parse such output under a synthetic wrapper element so the
+    // assertion sees the same string value (`.` on the document node).  Only
+    // applies when the de-declared body contains no markup, so structured
+    // results are never silently re-rooted.
+    let doc = match parse_str(output, &opts) {
+        Ok(d) => d,
+        Err(e) => {
+            let body = strip_xml_declaration(output);
+            if body.contains('<') {
+                return Err(e);
+            }
+            parse_str(&format!("<wrap>{body}</wrap>"), &opts)?
+        }
+    };
     let ctx = sup_xml_core::XPathContext::new(&doc);
     let mut xpath_opts = sup_xml_core::xpath::XPathOptions::default();
     xpath_opts.xpath_2_0 = true;
@@ -3088,9 +3159,11 @@ fn dump_case() {
             }
         } else if let Event::Eof = ev { break; }
     }
-    let loader = FilesystemLoader::new(vec![root.clone()]);
     for ts_path in &test_sets {
         let ts_dir = ts_path.parent().unwrap_or(&root);
+        // Match the conformance runner's loader roots so cross-directory
+        // references (`../docs/…`) and static params resolve identically.
+        let loader = FilesystemLoader::new(vec![ts_dir.to_path_buf(), root.clone()]);
         for case in &parse_test_set(ts_path) {
             if case.name != want_name { continue; }
             println!("\n=== {} ===", case.name);
@@ -3102,10 +3175,13 @@ fn dump_case() {
                 println!("--- stylesheet {sp} ---\n{xsl}");
                 let base = ts_dir.join(sp).to_string_lossy().to_string();
                 let packages = build_package_library(case, ts_dir);
-                let compiled = if packages.is_empty() {
-                    Stylesheet::compile_str_with_loader(&xsl, &loader, Some(&base))
-                } else {
+                let compiled = if !packages.is_empty() {
                     Stylesheet::compile_str_with_packages(&xsl, &loader, Some(&base), packages)
+                } else if !case.static_params.is_empty() {
+                    Stylesheet::compile_str_with_loader_and_static_params(
+                        &xsl, &loader, Some(&base), &case.static_params)
+                } else {
+                    Stylesheet::compile_str_with_loader(&xsl, &loader, Some(&base))
                 };
                 match compiled {
                     Err(e) => println!("COMPILE ERROR: {e}"),

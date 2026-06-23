@@ -4521,7 +4521,13 @@ fn eval_instr(
                 // attribute or namespace lands at this scope.
                 let prev_principal = state.builder.is_principal_document;
                 state.builder.is_principal_document = true;
+                // Each xsl:document constructs a separate document node, so
+                // its content is not adjacent (for §5.7.2 space separation)
+                // to atomic values emitted before or after it — reset the
+                // adjacency flag at both boundaries.
+                state.builder.last_was_atomic = false;
                 let r = eval_body(state, body, ctx_node, pos, size);
+                state.builder.last_was_atomic = false;
                 state.builder.is_principal_document = prev_principal;
                 r?;
             }
@@ -5270,7 +5276,7 @@ fn eval_instr(
                     None => vec![ctx_node],
                     Some(fes) => {
                         let v = state.xpath_eval(fes, ctx_node, pos, size)?;
-                        merge_materialize_nodes(state, v)
+                        merge_source_contexts(state, v)?
                     }
                 };
                 let nc = contexts.len();
@@ -5287,8 +5293,10 @@ fn eval_instr(
             let order = merge_sort_order(state, &nodes, &per_node)?;
             let sorted: Vec<(usize, NodeId)> = order.into_iter().map(|i| tagged[i]).collect();
             // Group adjacent items sharing an equal composite merge key,
-            // computed from each item's own source keys.
-            let mut groups: Vec<(Value, Vec<NodeId>)> = Vec::new();
+            // computed from each item's own source keys.  Each node keeps
+            // its source index so `current-merge-group(name)` can split the
+            // group by the merge-source that contributed it.
+            let mut groups: Vec<(Value, Vec<(usize, NodeId)>)> = Vec::new();
             let mut prev_gk: Option<String> = None;
             for (si, n) in &sorted {
                 let (si, n) = (*si, *n);
@@ -5300,12 +5308,14 @@ fn eval_instr(
                     Value::Sequence(vals)
                 };
                 if prev_gk.as_ref() == Some(&gk) {
-                    groups.last_mut().unwrap().1.push(n);
+                    groups.last_mut().unwrap().1.push((si, n));
                 } else {
-                    groups.push((key_value, vec![n]));
+                    groups.push((key_value, vec![(si, n)]));
                     prev_gk = Some(gk);
                 }
             }
+            let source_names: Vec<Option<String>> =
+                sources.iter().map(|s| s.name.clone()).collect();
             // Run the action once per group with current-merge-group()
             // / current-merge-key() in scope (reusing the grouping
             // accessor state — a merge-action and a for-each-group body
@@ -5315,7 +5325,15 @@ fn eval_instr(
             let prev_group = std::mem::take(&mut state.current_group);
             let prev_key   = state.current_grouping_key.take();
             let total = groups.len();
-            for (i, (k, ns)) in groups.iter().enumerate() {
+            for (i, (k, tagged_ns)) in groups.iter().enumerate() {
+                let ns: Vec<NodeId> = tagged_ns.iter().map(|(_, n)| *n).collect();
+                let by_source: Vec<(Option<String>, Vec<NodeId>)> = source_names.iter()
+                    .enumerate()
+                    .map(|(si, name)| (name.clone(),
+                        tagged_ns.iter().filter(|(s, _)| *s == si).map(|(_, n)| *n).collect()))
+                    .collect();
+                let _mg = crate::functions::MergeGroupGuard::enter(
+                    source_names.clone(), by_source);
                 state.current_group = ns.clone();
                 state.current_grouping_key = Some(k.clone());
                 let leader = *ns.first().unwrap_or(&ctx_node);
@@ -5558,6 +5576,14 @@ fn eval_instr(
         }
         Instr::ValueOf { select, dose, separator } => {
             let v = state.xpath_eval(select, ctx_node, pos, size)?;
+            // XSLT 3.0 §11.5 — xsl:value-of atomizes its selection, and
+            // atomizing a map or function item is a type error (FOTY0013).
+            // An array atomizes to its flattened members, so it is only an
+            // error if a member is itself a function item.
+            if value_has_function_item(&v) {
+                return Err(XsltError::dynamic("FOTY0013",
+                    "cannot atomize a map or function item (FOTY0013)"));
+            }
             let text = match separator {
                 // XSLT 2.0 path — atomise the result and join with
                 // the separator's rendered value.
@@ -5989,12 +6015,14 @@ fn eval_instr(
                 None => Vec::new(),
             };
             let apply_start = |nums: &mut [i64]| {
+                // XSLT 3.0 §12.3 — start-at pairs positionally with the
+                // numbers: the item (or level) at position `i` is offset by
+                // `start_at[i] - 1`; positions past the end of the list reuse
+                // the last value.  Holds for the level-based and `value=` forms.
                 for (i, n) in nums.iter_mut().enumerate() {
-                    // `value=` yields a flat sequence (no levels); the
-                    // single start-at integer offsets every entry.
-                    let off = if value.is_some() { start_offsets.first() }
-                              else { start_offsets.get(i) };
-                    if let Some(off) = off { *n = n.saturating_add(*off); }
+                    if let Some(off) = start_offsets.get(i).or_else(|| start_offsets.last()) {
+                        *n = n.saturating_add(*off);
+                    }
                 }
             };
             let ordinal_str = match ordinal {
@@ -9160,10 +9188,27 @@ fn copy_value_into(state: &mut EvalState, v: &Value, copy_ns: bool) -> Result<()
                 copy_value_into(state, member, copy_ns)?;
             }
         }
-        // Maps / functions have no result-tree projection.
-        Value::Map(_) | Value::Function(_) => {}
+        // XSLT 3.0 §5.7.1 / XTDE0450 — adding a function item (a map or a
+        // function; an array is flattened above) to a result tree is a
+        // dynamic error.
+        Value::Map(_) | Value::Function(_) => {
+            return Err(XsltError::dynamic("XTDE0450",
+                "cannot add a map or function item to a result tree (XTDE0450)"));
+        }
     }
     Ok(())
+}
+
+/// Whether atomizing `v` would encounter a map or function item — an
+/// array is transparent (its members atomize), so only a function item
+/// nested anywhere in the value counts (FOTY0013).
+fn value_has_function_item(v: &Value) -> bool {
+    match v {
+        Value::Map(_) | Value::Function(_) => true,
+        Value::Array(a) => a.iter().any(value_has_function_item),
+        Value::Sequence(items) => items.iter().any(value_has_function_item),
+        _ => false,
+    }
 }
 
 /// Deep-copy a source node (used by xsl:copy-of and copy from a
@@ -9771,30 +9816,68 @@ fn sort_group_indices(
         .collect())
 }
 
+/// Resolve an `xsl:merge-source/@for-each-source` value to the anchor
+/// nodes its `select` runs against (XSLT 3.0 §15.2).  A node item is an
+/// anchor directly; a string / `xs:anyURI` item is a document URI that
+/// is resolved through the pre-loaded document map or the dynamic loader
+/// (like `doc()`), not stringified into a synthetic text node.
+fn merge_source_contexts(state: &mut EvalState, v: Value) -> Result<Vec<NodeId>> {
+    let items: Vec<Value> = match v {
+        Value::Sequence(items) => items,
+        other => vec![other],
+    };
+    let mut out = Vec::with_capacity(items.len());
+    for item in items {
+        match item {
+            Value::NodeSet(ns) => out.extend(ns),
+            Value::ForeignNodeSet(_) => {}
+            atomic => {
+                let uri = value_to_string_styled(&atomic, state.idx, state.num_style());
+                let root = match state.documents.and_then(|d| d.get(&uri).copied()) {
+                    Some(id) => id,
+                    None => match state.bindings().load_dynamic_document(&uri) {
+                        Some(Ok(id)) => id,
+                        _ => return Err(XsltError::InvalidStylesheet(format!(
+                            "xsl:merge: cannot load source {uri:?} (FODC0002)"))),
+                    },
+                };
+                out.push(root);
+            }
+        }
+    }
+    Ok(out)
+}
+
 /// Realise a value as a node list for `xsl:merge`: node-sets pass
 /// through, atomic items become synthetic text nodes (matching the
 /// xsl:for-each-group treatment), foreign nodes are dropped.
 fn merge_materialize_nodes(state: &mut EvalState, v: Value) -> Vec<NodeId> {
+    let mut out = Vec::new();
+    merge_collect_nodes(state, v, &mut out);
+    out
+}
+
+fn merge_collect_nodes(state: &mut EvalState, v: Value, out: &mut Vec<NodeId>) {
     match v {
-        Value::NodeSet(ns) => ns,
+        Value::NodeSet(ns) => out.extend(ns),
+        Value::ForeignNodeSet(_) => {}
         Value::Sequence(items) => {
-            let mut out = Vec::with_capacity(items.len());
-            for item in items {
-                match item {
-                    Value::NodeSet(ns) => out.extend(ns),
-                    Value::ForeignNodeSet(_) => {}
-                    atomic => {
-                        let s = value_to_string_styled(&atomic, state.idx, state.num_style());
-                        out.extend(state.idx.allocate_rtf_text_nodes_inherent(vec![s]));
-                    }
-                }
-            }
-            out
+            for item in items { merge_collect_nodes(state, item, out); }
         }
-        Value::ForeignNodeSet(_) => Vec::new(),
+        // Arrays flatten and integer ranges expand — both are atomic
+        // sequences that must contribute one synthetic text node per item,
+        // not collapse to their first item (XSLT 3.0 §15.2).
+        Value::Array(a) => {
+            for member in a.iter() { merge_collect_nodes(state, member.clone(), out); }
+        }
+        Value::IntRange { lo, hi } => {
+            for i in lo..=hi {
+                out.extend(state.idx.allocate_rtf_text_nodes_inherent(vec![i.to_string()]));
+            }
+        }
         atomic => {
             let s = value_to_string_styled(&atomic, state.idx, state.num_style());
-            state.idx.allocate_rtf_text_nodes_inherent(vec![s])
+            out.extend(state.idx.allocate_rtf_text_nodes_inherent(vec![s]));
         }
     }
 }
