@@ -1689,10 +1689,16 @@ fn check_expectation_against(
 ) -> Result<(), FailReason> {
     use ApplyResult as A;
     match expect {
-        // <error/> — any failure stage satisfies it.
+        // <error/> — any failure stage satisfies it, including a
+        // serialization-time error (e.g. SEPM0004 / SESU0007): the apply
+        // succeeds but `to_string()` fails, which a static apply-only
+        // check would miss.
         Expectation::Error => match result {
-            A::Ok(_) => Err(FailReason::ExpectedError),
-            _        => Ok(()),
+            A::Ok(rt) => match rt.to_string() {
+                Err(_) => Ok(()),
+                Ok(_)  => Err(FailReason::ExpectedError),
+            },
+            _ => Ok(()),
         },
         Expectation::AssertXml(want) => match result {
             A::Ok(rt) => match rt.to_string() {

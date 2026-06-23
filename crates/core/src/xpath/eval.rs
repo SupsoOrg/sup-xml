@@ -11278,7 +11278,14 @@ fn node_path_string<I: DocIndexLike>(node: NodeId, idx: &I) -> String {
             XPathNodeKind::Attribute => {
                 let local = idx.local_name(cur).to_string();
                 let uri   = idx.namespace_uri(cur).to_string();
-                format!("@Q{{{uri}}}{local}")
+                // XPath F&O fn:path — a no-namespace attribute is written
+                // `@local`; only a namespaced one takes the `Q{uri}` form.
+                // (Elements always use `Q{uri}`, even in no namespace.)
+                if uri.is_empty() {
+                    format!("@{local}")
+                } else {
+                    format!("@Q{{{uri}}}{local}")
+                }
             }
             XPathNodeKind::Text | XPathNodeKind::CData => {
                 let pos = match parent {
