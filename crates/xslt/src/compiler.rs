@@ -351,6 +351,7 @@ fn strip_leading_xpath_comments_and_space(s: &str) -> &str {
 
 fn parse_xpath_at(node: &Node, src: &str) -> sup_xml_core::error::Result<Expr> {
     let mut expr = parse_xpath(src)?;
+    reject_unknown_closed_ns_functions(&expr, node)?;
     resolve_xpath_variable_prefixes(&mut expr, node);
     apply_xpath_default_namespace(&mut expr, node);
     apply_static_base_uri(&mut expr, node);
@@ -839,6 +840,141 @@ fn resolve_xpath_variable_prefixes(expr: &mut Expr, node: &Node) {
         for p in &mut s.predicates { walk(p, node); }
     }
     walk(expr, node);
+}
+
+/// The `map:`, `array:` and obsolete-draft map function namespaces are
+/// closed sets fully implemented by this processor.  XPath 3.1 §17 and
+/// the XSLT 3.0 static-error rules require XPST0017 when an expression
+/// refers to a function in one of these namespaces that does not exist —
+/// including functions that lived in earlier drafts (`map:new`,
+/// `map:for-each-entry`, `map:collation`) and any function in the
+/// superseded draft namespace `http://www.w3.org/2011/xpath-functions/map`.
+const MAP_NS_2005: &str = "http://www.w3.org/2005/xpath-functions/map";
+const ARRAY_NS_2005: &str = "http://www.w3.org/2005/xpath-functions/array";
+const MAP_NS_2011: &str = "http://www.w3.org/2011/xpath-functions/map";
+
+const MAP_FUNCTIONS: &[&str] = &[
+    "merge", "size", "keys", "contains", "get", "find",
+    "put", "entry", "remove", "for-each",
+];
+const ARRAY_FUNCTIONS: &[&str] = &[
+    "size", "get", "put", "append", "subarray", "remove", "insert-before",
+    "head", "tail", "reverse", "join", "for-each", "filter", "fold-left",
+    "fold-right", "for-each-pair", "sort", "flatten",
+];
+
+/// Collect every function-call name (lexical, prefix-qualified form) that
+/// appears anywhere in `e`.
+fn collect_function_names<'a>(e: &'a Expr, out: &mut Vec<&'a str>) {
+    use sup_xml_core::xpath::ast::{Step, LocationPath, LookupKey};
+    fn step<'a>(s: &'a Step, out: &mut Vec<&'a str>) {
+        for p in &s.predicates { collect_function_names(p, out); }
+    }
+    match e {
+        Expr::FunctionCall(name, args) => {
+            out.push(name);
+            for a in args { collect_function_names(a, out); }
+        }
+        Expr::Sequence(args) => for a in args { collect_function_names(a, out); },
+        Expr::Or(a, b) | Expr::And(a, b)
+        | Expr::Eq(a, b) | Expr::Ne(a, b)
+        | Expr::Lt(a, b) | Expr::Gt(a, b) | Expr::Le(a, b) | Expr::Ge(a, b)
+        | Expr::ValueEq(a, b) | Expr::ValueNe(a, b)
+        | Expr::ValueLt(a, b) | Expr::ValueGt(a, b)
+        | Expr::ValueLe(a, b) | Expr::ValueGe(a, b)
+        | Expr::Add(a, b) | Expr::Sub(a, b)
+        | Expr::Mul(a, b) | Expr::Div(a, b) | Expr::Mod(a, b)
+        | Expr::Union(a, b)
+        | Expr::IDiv(a, b) | Expr::Intersect(a, b) | Expr::Except(a, b)
+        | Expr::Range(a, b) | Expr::SimpleMap(a, b)
+        | Expr::NodeBefore(a, b) | Expr::NodeAfter(a, b) | Expr::NodeIs(a, b) => {
+            collect_function_names(a, out); collect_function_names(b, out);
+        }
+        Expr::Neg(a)
+        | Expr::InstanceOf(a, _) | Expr::CastAs(a, _)
+        | Expr::CastableAs(a, _) | Expr::TreatAs(a, _) => collect_function_names(a, out),
+        Expr::IfThenElse { cond, then_branch, else_branch } => {
+            collect_function_names(cond, out);
+            collect_function_names(then_branch, out);
+            collect_function_names(else_branch, out);
+        }
+        Expr::For { bindings, body } | Expr::Let { bindings, body }
+        | Expr::Quantified { bindings, test: body, .. } => {
+            for (_, be) in bindings { collect_function_names(be, out); }
+            collect_function_names(body, out);
+        }
+        Expr::FilterPath { primary, predicates, steps } => {
+            collect_function_names(primary, out);
+            for p in predicates { collect_function_names(p, out); }
+            for s in steps { step(s, out); }
+        }
+        Expr::Path(p) => match p {
+            LocationPath::Absolute(steps) | LocationPath::Relative(steps) =>
+                for s in steps { step(s, out); }
+        },
+        Expr::TryCatch { body, catches } => {
+            collect_function_names(body, out);
+            for c in catches { collect_function_names(&c.body, out); }
+        }
+        Expr::WithDefaultCollation(_, inner)
+        | Expr::BackwardsCompat(inner) => collect_function_names(inner, out),
+        Expr::MapConstructor(es) =>
+            for (k, v) in es { collect_function_names(k, out); collect_function_names(v, out); },
+        Expr::ArrayConstructor { members, .. } =>
+            for m in members { collect_function_names(m, out); },
+        Expr::Lookup(b, key) => {
+            collect_function_names(b, out);
+            if let LookupKey::Expr(ke) = key { collect_function_names(ke, out); }
+        }
+        Expr::UnaryLookup(key) =>
+            if let LookupKey::Expr(ke) = key { collect_function_names(ke, out); },
+        Expr::InlineFunction { body, .. } => collect_function_names(body, out),
+        Expr::DynamicCall { func, args } => {
+            collect_function_names(func, out);
+            for a in args { collect_function_names(a, out); }
+        }
+        Expr::NamedFunctionRef { name, .. } => out.push(name),
+        Expr::Placeholder | Expr::ContextItem => {}
+        Expr::Variable(_)
+        | Expr::Literal(_) | Expr::Integer(_) | Expr::Decimal(_) | Expr::Double(_) => {}
+    }
+}
+
+/// XPST0017 for references to functions in the closed map/array
+/// namespaces that this processor (and the spec) do not define.  The
+/// prefix is resolved against the namespaces in scope at `node`.
+fn reject_unknown_closed_ns_functions(
+    expr: &Expr, node: &Node,
+) -> sup_xml_core::error::Result<()> {
+    use sup_xml_core::error::{XmlError, ErrorDomain, ErrorLevel};
+    let lookup = |prefix: &str| -> Option<String> {
+        let mut cur = Some(node);
+        while let Some(n) = cur {
+            for (p, u) in n.ns_declarations() {
+                if p == Some(prefix) { return Some(u.to_string()); }
+            }
+            cur = n.parent.get();
+        }
+        None
+    };
+    let mut names = Vec::new();
+    collect_function_names(expr, &mut names);
+    for name in names {
+        let Some((prefix, local)) = name.split_once(':') else { continue; };
+        let Some(uri) = lookup(prefix) else { continue; };
+        let unknown = match uri.as_str() {
+            MAP_NS_2011 => true,
+            MAP_NS_2005 => !MAP_FUNCTIONS.contains(&local),
+            ARRAY_NS_2005 => !ARRAY_FUNCTIONS.contains(&local),
+            _ => false,
+        };
+        if unknown {
+            return Err(XmlError::new(ErrorDomain::XPath, ErrorLevel::Error,
+                format!("call to function {name}(), which is not defined (XPST0017)"))
+                .with_xpath_code("XPST0017"));
+        }
+    }
+    Ok(())
 }
 
 /// Wrapper around [`sup_xml_core::xpath::parse_xpath_with`] that
@@ -3798,8 +3934,8 @@ fn reject_select_with_body(
 fn split_select_and_body(node: &Node)
     -> Result<(Option<Expr>, Body), XsltError>
 {
-    let select = match read_attribute(node, "select") {
-        Some(s) => Some(parse_xpath_at(node, s).map_err(XsltError::from)?),
+    let select = match read_attr_with_shadow(node, "select")? {
+        Some(s) => Some(parse_xpath_at(node, &s).map_err(XsltError::from)?),
         None    => None,
     };
     let mut body = Body::new();
