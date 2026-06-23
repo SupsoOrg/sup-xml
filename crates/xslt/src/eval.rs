@@ -95,7 +95,11 @@ fn build_source_types(
             let Some(ty) = psvi.governing_type(n) else { continue };
             if let std::collections::hash_map::Entry::Vacant(e) = by_node.entry(id) {
                 e.insert(NodeType {
-                    name: registered_type_name(ty, schema),
+                    // `type_display_name` (not `registered_type_name`) so a
+                    // built-in-typed element (xs:anyURI, xs:boolean, …) gets
+                    // its XSD name rather than `None` — otherwise it reads as
+                    // untyped and over-matches `element(*, xs:untyped)`.
+                    name: type_display_name(ty, schema),
                     bases: type_base_chain(ty, schema),
                     type_ref: ty.clone(),
                 });
