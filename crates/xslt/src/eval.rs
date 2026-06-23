@@ -108,6 +108,33 @@ fn build_source_types(
                 for aid in inode.attr_start..inode.attr_end {
                     let alocal = idx.local_name(aid);
                     let auri   = idx.namespace_uri(aid);
+                    // The XSI instance attributes carry fixed built-in types
+                    // (XSD §2.6) and aren't declared in the element's type, so
+                    // they would otherwise stay untyped and over-match a typed
+                    // `attribute(*, T)` pattern.
+                    if auri == "http://www.w3.org/2001/XMLSchema-instance" {
+                        use sup_xml_core::xsd::types::BuiltinType;
+                        let b = match alocal {
+                            "type" => Some(BuiltinType::QName),
+                            "nil"  => Some(BuiltinType::Boolean),
+                            "schemaLocation" | "noNamespaceSchemaLocation" =>
+                                Some(BuiltinType::AnyUri),
+                            _ => None,
+                        };
+                        if let Some(b) = b {
+                            if let std::collections::hash_map::Entry::Vacant(e) = by_node.entry(aid) {
+                                e.insert(NodeType {
+                                    name: Some((sup_xml_core::xsd::QName::XSD_NS.to_string(),
+                                                b.name().to_string())),
+                                    bases: Vec::new(),
+                                    type_ref: sup_xml_core::xsd::TypeRef::Simple(
+                                        std::sync::Arc::new(
+                                            sup_xml_core::xsd::types::SimpleType::of_builtin(b))),
+                                });
+                            }
+                        }
+                        continue;
+                    }
                     let Some(au) = ct.attributes.iter().find(|au|
                         au.decl.name.local.as_ref() == alocal
                         && au.decl.name.namespace.as_deref().unwrap_or("") == auri)
