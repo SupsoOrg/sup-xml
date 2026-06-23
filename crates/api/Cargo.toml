@@ -22,7 +22,11 @@ workspace = true
 serde = ["dep:serde", "dep:simdutf8"]
 # Pull in the XSD (XML Schema 1.0) validator under `sup_xml::xsd::*`.
 # Adds `rust_decimal` and `regex` via `sup-xml-core`'s `xsd` feature.
-xsd = ["sup-xml-core/xsd"]
+# When the `xslt` feature is also on, this turns on schema-aware XSLT
+# (xsl:import-schema, typed pattern matching, cast/castable/instance-of
+# for user-defined schema types) — the `?` keeps it a no-op when the
+# XSLT engine isn't compiled in.
+xsd = ["sup-xml-core/xsd", "sup-xml-xslt?/xsd"]
 # Pull in `NetworkResolver` for HTTPS-fetched DTDs / entities.  Off
 # by default — pulls `ureq` as a transitive dep.  See
 # `sup_xml::NetworkResolver` for the security policy.
