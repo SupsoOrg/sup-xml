@@ -1845,6 +1845,70 @@ fn eval_function_body<I: DocIndexLike>(
                     }
                 }
             }
+            Instr::Evaluate { xpath, context_item, with_params, with_params_map,
+                               xpath_default_ns, .. } => {
+                // xsl:evaluate is read-only over the focus and any
+                // with-param bindings, so it works in a function body:
+                // parse the dynamic expression and evaluate it with the
+                // with-params layered over the function's bindings.
+                let xpath_str = value_to_string_with(
+                    &eval_expr(xpath, &mk_ctx(bindings, static_ctx, ctx_node, pos, size), idx)
+                        .map_err(|e| stamp_xml(e, src_pos, src_file))?,
+                    idx, bindings);
+                let opts = sup_xml_core::xpath::XPathOptions {
+                    xpath_2_0: true, libxml2_compatible: false,
+                    ..sup_xml_core::xpath::XPathOptions::default()
+                };
+                let mut expr = sup_xml_core::xpath::parse_xpath_with(&xpath_str, &opts)
+                    .map_err(|e| err(format!(
+                        "xsl:evaluate: invalid XPath {xpath_str:?}: {} (XTDE3160)", e.message)))?;
+                if let Some(uri) = xpath_default_ns {
+                    if !uri.is_empty() {
+                        crate::compiler::apply_xpath_default_namespace_uri(&mut expr, uri);
+                    }
+                }
+                let cnode = match context_item {
+                    Some(ce) => match eval_expr(ce,
+                        &mk_ctx(bindings, static_ctx, ctx_node, pos, size), idx)
+                        .map_err(|e| stamp_xml(e, src_pos, src_file))?
+                    {
+                        Value::NodeSet(ns) if ns.len() == 1 => ns[0],
+                        _ => ctx_node,
+                    },
+                    None => ctx_node,
+                };
+                let mut chain: Box<dyn XPathBindings> =
+                    Box::new(PassthroughBindings { inner: bindings });
+                for wp in with_params {
+                    let val = match &wp.select {
+                        Some(sel) => eval_expr(sel,
+                            &mk_ctx(bindings, static_ctx, ctx_node, pos, size), idx)
+                            .map_err(|e| stamp_xml(e, src_pos, src_file))?,
+                        None => Value::String(String::new()),
+                    };
+                    chain = Box::new(NamedBinding {
+                        parent_owned: chain, name: wp.name.local.clone(), value: val });
+                }
+                if let Some(mexpr) = with_params_map {
+                    if let Value::Map(entries) = eval_expr(mexpr,
+                        &mk_ctx(bindings, static_ctx, ctx_node, pos, size), idx)
+                        .map_err(|e| stamp_xml(e, src_pos, src_file))?
+                    {
+                        for (k, v) in entries.iter() {
+                            if let Value::Typed(t) = k {
+                                if t.kind == "QName" {
+                                    chain = Box::new(NamedBinding {
+                                        parent_owned: chain,
+                                        name: t.lexical.clone(), value: v.clone() });
+                                }
+                            }
+                        }
+                    }
+                }
+                let v = eval_expr(&expr, &mk_ctx(&*chain, static_ctx, cnode, 1, 1), idx)
+                    .map_err(|e| stamp_xml(e, src_pos, src_file))?;
+                out.push(v);
+            }
             other => return Err(err(format!(
                 "xsl:function body: instruction `{}` requires mutable XSLT state \
                  and isn't supported in user-function bodies yet",
@@ -2346,6 +2410,11 @@ struct EvalState<'a> {
     /// Active grouping key (`current-grouping-key()`); `None`
     /// outside a group iteration.
     current_grouping_key: Option<Value>,
+    /// True while evaluating an `xsl:for-each-group` body — distinguishes
+    /// "current group is empty" from "no current group at all".  Calling
+    /// `current-group()` / `current-grouping-key()` when this is false is
+    /// XTDE1061 (XSLT 3.0 §15.4), not an empty sequence.
+    in_grouping: bool,
     /// Precomputed `xsl:accumulator` values over the source document,
     /// keyed by accumulator expanded-name.  Filled lazily the first
     /// time `accumulator-before` / `accumulator-after` is needed.
@@ -2554,10 +2623,10 @@ impl<'a> EvalState<'a> {
             decimal_formats:   pkg_decimal_formats(self.style, self.current_package_id),
             unparsed_entities: &self.unparsed_entities,
             user_exts:            self.user_exts,
-            current_group:        if self.current_group.is_empty() {
-                                       None
-                                   } else {
+            current_group:        if self.in_grouping {
                                        Some(self.current_group.as_slice())
+                                   } else {
+                                       None
                                    },
             current_grouping_key: self.current_grouping_key.as_ref(),
             accumulators:         (!self.accumulators.is_empty()).then_some(&self.accumulators),
@@ -2950,6 +3019,7 @@ pub fn apply_stylesheet_full_with_params_and_initial(
         sequence_sinks: Vec::new(),
         template_call_depth: 0,
         current_group: Vec::new(),
+        in_grouping: false,
         regex_groups: Vec::new(),
         tunnel_pool: HashMap::new(),
         current_grouping_key: None,
@@ -4007,13 +4077,23 @@ fn result_document_output(
 ) -> crate::ast::OutputSpec {
     // A named output is package-local (XSLT 3.0 §3.5): resolve format= in
     // the executing package's outputs, falling back to the principal's.
+    // All `xsl:output` declarations that share the format's expanded name
+    // are merged (XSLT 3.0 §26.1): scalars are overlaid in declaration
+    // order and cdata-section-elements / use-character-maps accumulate —
+    // the same rule `merge_principal_output` applies to the unnamed output.
     let base = match format_name {
-        Some(name) => pkg_outputs(style, package_id).iter()
-            .chain(style.outputs.iter())
-            .find(|o| o.name.as_ref()
-                .is_some_and(|n| n.uri == name.uri && n.local == name.local))
-            .cloned()
-            .unwrap_or_else(|| merge_principal_output(style)),
+        Some(name) => {
+            let mut merged = crate::ast::OutputSpec::default();
+            let mut matched = false;
+            for o in pkg_outputs(style, package_id).iter().chain(style.outputs.iter())
+                .filter(|o| o.name.as_ref()
+                    .is_some_and(|n| n.uri == name.uri && n.local == name.local))
+            {
+                overlay_output_into(&mut merged, o);
+                matched = true;
+            }
+            if matched { merged } else { merge_principal_output(style) }
+        }
         None => merge_principal_output(style),
     };
     overlay_output(&base, inline)
@@ -4220,12 +4300,14 @@ fn on_cond_kind(n: &ResultNode) -> Option<bool> {
 /// XSLT 3.0 §11.9.1): same node kind and name as `node`, with content
 /// from `body` — only the node itself, never its descendants (that is
 /// xsl:copy-of's job).  Shared by xsl:copy with and without `select=`.
+#[allow(clippy::too_many_arguments)]
 fn copy_shallow_node<'a>(
     state:              &mut EvalState<'a>,
     node:               NodeId,
     use_attribute_sets: &[QName],
     body:               &Body,
     copy_namespaces:    bool,
+    inherit_namespaces: bool,
     pos:                usize,
     size:               usize,
 ) -> Result<()> {
@@ -4233,6 +4315,7 @@ fn copy_shallow_node<'a>(
         XPathNodeKind::Element => {
             let q = element_qname(state, node);
             state.builder.open_element(q.clone());
+            if !inherit_namespaces { state.builder.set_current_inherit_namespaces_no(); }
             // XSLT 1.0 §7.5 — the namespace nodes of the current
             // element are automatically copied.  With
             // copy-namespaces="no" (XSLT 2.0 §11.9.1) only the
@@ -4334,13 +4417,14 @@ fn eval_instr(
     size:     usize,
 ) -> Result<()> {
     match instr {
-        Instr::LiteralElement { name, attributes, namespaces, use_attribute_sets, schema_type, validate, body } => {
+        Instr::LiteralElement { name, attributes, namespaces, use_attribute_sets, schema_type, validate, inherit_namespaces, body } => {
             // Apply xsl:namespace-alias before emit (XSLT 1.0
             // §7.1.1) — rewrites the stylesheet-side URI to the
             // result-side URI for both element and attribute
             // namespaces.
             let element_name = apply_namespace_alias(state, name);
             state.builder.open_element(element_name.clone());
+            if !*inherit_namespaces { state.builder.set_current_inherit_namespaces_no(); }
             // XSLT 2.0 §11.2.1 — an `xsl:type=` on the LRE annotates the
             // constructed element with that schema type, so its typed
             // value is recoverable by `data()` / `instance of`.  Under
@@ -5005,6 +5089,10 @@ fn eval_instr(
                     "string" | "untypedAtomic" | "anyURI"
                     | "normalizedString" | "token" | "Name" | "NCName"
                     | "language" | "ID" | "IDREF" | "ENTITY" | "NMTOKEN") => {}
+                // XSLT 3.0 §15.1 relaxes the cardinality: an empty
+                // sequence is treated as the zero-length string.
+                Value::Sequence(items) if items.is_empty()
+                    && crate::functions::xslt_version_3_or_more(&state.style.version) => {}
                 Value::Sequence(items) if items.is_empty() => return Err(
                     XsltError::InvalidStylesheet(
                         "xsl:analyze-string select= must yield a single \
@@ -5015,6 +5103,8 @@ fn eval_instr(
                     "xsl:analyze-string select= must yield a single string \
                      (got {}-item sequence) (XPTY0004)", items.len()
                 ))),
+                Value::NodeSet(ns) if ns.is_empty()
+                    && crate::functions::xslt_version_3_or_more(&state.style.version) => {}
                 Value::NodeSet(ns) if ns.is_empty() => return Err(
                     XsltError::InvalidStylesheet(
                         "xsl:analyze-string select= must yield a single \
@@ -5054,18 +5144,22 @@ fn eval_instr(
                     )));
                 }
             }
-            // XSLT 2.0 §15.1 / XTDE1150 — a regex that matches the
-            // empty string would partition into infinitely many
-            // zero-length matches; reject it before pattern compile.
-            // (XSLT 3.0 relaxes this.)
-            if let Ok(probe) = sup_xml_core::regex::Pattern::compile_with(
-                &pattern, sup_xml_core::regex::Dialect::Xpath,
-            ) {
-                if probe.is_match("") {
-                    return Err(XsltError::InvalidStylesheet(format!(
-                        "xsl:analyze-string regex='{pattern}' matches the \
-                         zero-length string (XTDE1150)"
-                    )));
+            // XSLT 2.0 §15.1 / XTDE1150 — a regex that matches the empty
+            // string would partition into infinitely many zero-length
+            // matches; reject it before pattern compile.  XSLT 3.0 removed
+            // this restriction: a zero-length match advances by one
+            // position, so the partition is finite (the `find_iter` /
+            // `captures_iter` loops below already step past empty matches).
+            if !allow_q {
+                if let Ok(probe) = sup_xml_core::regex::Pattern::compile_with(
+                    &pattern, sup_xml_core::regex::Dialect::Xpath,
+                ) {
+                    if probe.is_match("") {
+                        return Err(XsltError::InvalidStylesheet(format!(
+                            "xsl:analyze-string regex='{pattern}' matches the \
+                             zero-length string (XTDE1150)"
+                        )));
+                    }
                 }
             }
             // Prefer the native XSD §F / XPath 2.0 engine when no
@@ -5150,7 +5244,14 @@ fn eval_instr(
             // `select="1,2,3"`) is a dynamic type error.
             let pattern_grouping = matches!(kind,
                 GroupingKind::StartingWith | GroupingKind::EndingWith);
-            if pattern_grouping {
+            // XSLT 2.0 §14 / XTTE1120 — group-starting-with /
+            // group-ending-with match a pattern against each item, so every
+            // item had to be a node.  XSLT 3.0 removed this restriction:
+            // atomic items are realised as synthetic text nodes (below) and
+            // matched like any other node.
+            if pattern_grouping
+                && !crate::functions::xslt_version_3_or_more(&state.style.version)
+            {
                 let all_nodes = match &select_val {
                     Value::NodeSet(_) | Value::ForeignNodeSet(_) => true,
                     Value::Sequence(items) => items.iter().all(|v| matches!(v,
@@ -5164,29 +5265,7 @@ fn eval_instr(
                          node (XTTE1120)".into()));
                 }
             }
-            let nodes = match select_val {
-                Value::NodeSet(ns) => ns,
-                Value::Sequence(items) => {
-                    let mut out: Vec<NodeId> = Vec::with_capacity(items.len());
-                    for item in items {
-                        match item {
-                            Value::NodeSet(ns) => out.extend(ns),
-                            Value::ForeignNodeSet(_) => {}
-                            atomic => {
-                                let s = value_to_string_styled(&atomic, state.idx, state.num_style());
-                                let ids = state.idx
-                                    .allocate_rtf_text_nodes_inherent(vec![s]);
-                                out.extend(ids);
-                            }
-                        }
-                    }
-                    out
-                }
-                other => return Err(XsltError::InvalidStylesheet(format!(
-                    "xsl:for-each-group select= must yield a sequence \
-                     (got {other:?})"
-                ))),
-            };
+            let nodes = atomic_select_to_nodes(state, select_val)?;
             // Materialise the group partition first, then iterate.
             // group-by:  bucket by the string-value of `key` per item.
             //            Group order = order of first appearance of each key.
@@ -5358,6 +5437,8 @@ fn eval_instr(
             let prev_current = state.xslt_current;
             let prev_group = std::mem::take(&mut state.current_group);
             let prev_key   = state.current_grouping_key.take();
+            let prev_in_grouping = state.in_grouping;
+            state.in_grouping = true;
             let total = groups.len();
             for (i, gi) in group_order.iter().enumerate() {
                 let (k, ns) = &groups[*gi];
@@ -5370,6 +5451,7 @@ fn eval_instr(
             state.xslt_current = prev_current;
             state.current_group = prev_group;
             state.current_grouping_key = prev_key;
+            state.in_grouping = prev_in_grouping;
             state.variables.leave();
         }
         Instr::OnEmpty { body } | Instr::OnNonEmpty { body } => {
@@ -5425,7 +5507,7 @@ fn eval_instr(
             eval_body(state, body, root, 1, 1)?;
             state.xslt_current = prev_current;
         }
-        Instr::Evaluate { xpath, context_item, with_params, schema_aware } => {
+        Instr::Evaluate { xpath, context_item, with_params, with_params_map, xpath_default_ns, schema_aware } => {
             // The xpath= expression yields the dynamic expression text.
             let xpath_str = value_to_string_styled(
                 &state.xpath_eval(xpath, ctx_node, pos, size)?, state.idx, state.num_style());
@@ -5433,14 +5515,29 @@ fn eval_instr(
                 xpath_2_0: true, libxml2_compatible: false,
                 ..sup_xml_core::xpath::XPathOptions::default()
             };
-            let expr = sup_xml_core::xpath::parse_xpath_with(&xpath_str, &opts)
+            let mut expr = sup_xml_core::xpath::parse_xpath_with(&xpath_str, &opts)
                 .map_err(|e| XsltError::InvalidStylesheet(format!(
                     "xsl:evaluate: invalid XPath {xpath_str:?}: {} (XTDE3160)", e.message)))?;
+            // XSLT 3.0 §18.2 — unprefixed element names in the dynamic
+            // expression resolve in the static xpath-default-namespace.
+            if let Some(uri) = xpath_default_ns {
+                if !uri.is_empty() {
+                    crate::compiler::apply_xpath_default_namespace_uri(&mut expr, uri);
+                }
+            }
             // The dynamic expression's context item (default: the
             // current node).  A node-set result focuses on its first
             // node; other values keep the current node as a fallback.
             let cnode = match context_item {
                 Some(ce) => match state.xpath_eval(ce, ctx_node, pos, size)? {
+                    // XSLT 3.0 §18.2 / XPTY0004 — context-item= must yield
+                    // at most one item.
+                    Value::NodeSet(ns) if ns.len() > 1 => return Err(XsltError::dynamic(
+                        "XPTY0004", "xsl:evaluate context-item= yielded more than \
+                         one item (XPTY0004)")),
+                    Value::Sequence(items) if items.len() > 1 => return Err(XsltError::dynamic(
+                        "XPTY0004", "xsl:evaluate context-item= yielded more than \
+                         one item (XPTY0004)")),
                     Value::NodeSet(ns) if !ns.is_empty() => ns[0],
                     _ => ctx_node,
                 },
@@ -5449,9 +5546,31 @@ fn eval_instr(
             // Bind the with-param values as variables visible to the
             // dynamic expression.
             let bound = evaluate_with_params(state, with_params, ctx_node, pos, size)?;
+            // `with-params=` supplies a map(xs:QName, item()*) whose entries
+            // bind further variables (XSLT 3.0 §18.2).
+            let map_bound: Vec<(String, Value)> = match with_params_map {
+                Some(e) => match state.xpath_eval(e, ctx_node, pos, size)? {
+                    Value::Map(entries) => entries.iter().filter_map(|(k, v)| {
+                        match k {
+                            // A QName key's lexical is the `{uri}local`
+                            // (or bare local) form used as the variable key.
+                            Value::Typed(t) if t.kind == "QName" =>
+                                Some((t.lexical.clone(), v.clone())),
+                            _ => None,
+                        }
+                    }).collect(),
+                    other => return Err(XsltError::InvalidStylesheet(format!(
+                        "xsl:evaluate with-params= must evaluate to a map \
+                         (got {other:?}) (XTTE3165)"))),
+                },
+                None => Vec::new(),
+            };
             state.variables.enter();
             for (name, value, _) in &bound {
                 state.variables.bind(qname_key(name), value.clone());
+            }
+            for (key, value) in &map_bound {
+                state.variables.bind(key.clone(), value.clone());
             }
             // XSLT 3.0 §18.2 — without schema-aware="yes" the dynamic
             // expression can't see imported schema types; suppress them
@@ -5529,6 +5648,8 @@ fn eval_instr(
             let prev_current = state.xslt_current;
             let prev_group = std::mem::take(&mut state.current_group);
             let prev_key   = state.current_grouping_key.take();
+            let prev_in_grouping = state.in_grouping;
+            state.in_grouping = true;
             let total = groups.len();
             for (i, (k, tagged_ns)) in groups.iter().enumerate() {
                 let ns: Vec<NodeId> = tagged_ns.iter().map(|(_, n)| *n).collect();
@@ -5548,6 +5669,7 @@ fn eval_instr(
             state.xslt_current = prev_current;
             state.current_group = prev_group;
             state.current_grouping_key = prev_key;
+            state.in_grouping = prev_in_grouping;
             state.variables.leave();
         }
         Instr::ForEach { select, sort, body } => {
@@ -5826,14 +5948,14 @@ fn eval_instr(
             let text = pieces.join(&sep);
             state.builder.push_text(text, *dose);
         }
-        Instr::Copy { use_attribute_sets, body, copy_namespaces, select, strip_validation } => {
+        Instr::Copy { use_attribute_sets, body, copy_namespaces, select, strip_validation, inherit_namespaces } => {
             let _strip = strip_validation.then(StripGuard::enter);
             // Without select=, copy the context node (classic xsl:copy).
             // With select= (XSLT 3.0), the expression names the item to
             // copy, which also becomes the body's context item.
             let Some(sel) = select else {
                 return copy_shallow_node(state, ctx_node,
-                    use_attribute_sets, body, *copy_namespaces, pos, size);
+                    use_attribute_sets, body, *copy_namespaces, *inherit_namespaces, pos, size);
             };
             let v = state.xpath_eval(sel, ctx_node, pos, size)?;
             let nodes = match &v {
@@ -5850,7 +5972,7 @@ fn eval_instr(
             }
             if let Some(&n) = nodes.first() {
                 copy_shallow_node(state, n,
-                    use_attribute_sets, body, *copy_namespaces, 1, 1)?;
+                    use_attribute_sets, body, *copy_namespaces, *inherit_namespaces, 1, 1)?;
             } else {
                 // No nodes: an empty sequence copies nothing; a single
                 // atomic value copies as its (string) value — the body
@@ -5918,7 +6040,7 @@ fn eval_instr(
             }
             copy_value_into(state, &v, *copy_namespaces)?;
         }
-        Instr::Element { name, namespace, body, use_attribute_sets, in_scope_namespaces, schema_type, strip_validation, validate } => {
+        Instr::Element { name, namespace, body, use_attribute_sets, in_scope_namespaces, schema_type, strip_validation, validate, inherit_namespaces } => {
             let _strip = strip_validation.then(StripGuard::enter);
             let name_str = render_avt(state, name, ctx_node, pos, size)?;
             // XSLT spec §7.1.2 / §11.7 — the element name must be a
@@ -5992,6 +6114,7 @@ fn eval_instr(
             };
             let q = QName { prefix, local, uri: resolved_uri };
             state.builder.open_element(q.clone());
+            if !*inherit_namespaces { state.builder.set_current_inherit_namespaces_no(); }
             // XSLT 2.0 §11.2.1 — `type=` on xsl:element annotates the
             // constructed element with that schema type so its typed
             // value is recoverable by `data()` / `instance of` /
@@ -6627,6 +6750,21 @@ fn body_uses_sequence_or_call(body: &[Instr]) -> bool {
     false
 }
 
+/// Whether a variable body's top level constructs a function item (an
+/// `xsl:map` / `xsl:map-entry`).  Such a value cannot live in an RTF, so
+/// it must be captured via the sequence sink (see `bind_variable`).
+fn body_constructs_function_item(body: &[Instr]) -> bool {
+    body.iter().any(|i| match i {
+        Instr::Map { .. } | Instr::MapEntry { .. } => true,
+        Instr::If { body, .. } | Instr::ForEach { body, .. }
+        | Instr::ForEachGroup { body, .. } => body_constructs_function_item(body.instrs()),
+        Instr::Choose { whens, otherwise } =>
+            whens.iter().any(|(_, b)| body_constructs_function_item(b.instrs()))
+            || otherwise.as_ref().is_some_and(|o| body_constructs_function_item(o.instrs())),
+        _ => false,
+    })
+}
+
 fn bind_variable(
     state: &mut EvalState, name: &QName,
     select: Option<&sup_xml_core::xpath::Expr>,
@@ -6644,9 +6782,15 @@ fn bind_variable(
     // the sink.  Items keep their identity (so `node is node` still
     // answers true) and their type tags (so `instance of` is
     // accurate).
+    // A body that constructs a map / array (a function item) must always
+    // be captured through the sequence sink — building it as an RTF would
+    // route the function item through the result tree (XTDE0450).  This
+    // matters for a singular `as="item()"` (or no `as=`), which
+    // `as_is_sequence_typed` doesn't classify as sequence-typed.
     let want_item_seq = as_type
         .map(as_is_sequence_typed)
-        .unwrap_or(false);
+        .unwrap_or(false)
+        || body_constructs_function_item(body);
     let mut v = if let Some(sel) = select {
         state.xpath_eval(sel, ctx_node, pos, size)?
     } else if as_type.map(as_is_document_node_sequence).unwrap_or(false) {
@@ -7685,6 +7829,7 @@ fn build_rtf_nodes_no_merge(
         sequence_sinks: std::mem::take(&mut state.sequence_sinks),
         template_call_depth: state.template_call_depth,
         current_group: std::mem::take(&mut state.current_group),
+        in_grouping: state.in_grouping,
         regex_groups: std::mem::take(&mut state.regex_groups),
         tunnel_pool: std::mem::take(&mut state.tunnel_pool),
         current_grouping_key: state.current_grouping_key.take(),
@@ -8662,18 +8807,19 @@ fn sequence_string_items<I: DocIndexLike>(v: &Value, idx: &I, style: NumStyle) -
 /// where we need the structural output rather than the
 /// stringified form.
 /// Whether a result node counts as "populated" content for
-/// `xsl:where-populated` (XSLT 3.0 §16.4.3): an element/document with
-/// no attributes and no children is empty, as is a zero-length text
-/// node; everything else (attributes, comments, PIs, non-empty text or
-/// elements) is significant.
+/// `xsl:where-populated` (XSLT 3.0 §16.4.3): a node is empty if it is a
+/// zero-length text node, a comment with no content, a processing
+/// instruction with no data, or an element/document with no attributes
+/// and no children; everything else (attributes, non-empty text /
+/// comments / PIs / elements) is significant.
 fn result_node_is_significant(n: &ResultNode) -> bool {
     match n {
         ResultNode::Text { content, .. } => !content.is_empty(),
         ResultNode::Element { attributes, children, .. } =>
             !attributes.is_empty() || !children.is_empty(),
-        ResultNode::Attribute { .. }
-        | ResultNode::Comment(_)
-        | ResultNode::ProcessingInstruction { .. } => true,
+        ResultNode::Comment(s) => !s.is_empty(),
+        ResultNode::ProcessingInstruction { data, .. } => !data.is_empty(),
+        ResultNode::Attribute { .. } => true,
     }
 }
 
@@ -8723,6 +8869,7 @@ fn build_rtf_nodes_inner(
         sequence_sinks: std::mem::take(&mut state.sequence_sinks),
         template_call_depth: state.template_call_depth,
         current_group: std::mem::take(&mut state.current_group),
+        in_grouping: state.in_grouping,
         regex_groups: std::mem::take(&mut state.regex_groups),
         tunnel_pool: std::mem::take(&mut state.tunnel_pool),
         current_grouping_key: state.current_grouping_key.take(),
@@ -9249,6 +9396,7 @@ fn stringify_into_string(
         sequence_sinks: std::mem::take(&mut state.sequence_sinks),
         template_call_depth: state.template_call_depth,
         current_group: std::mem::take(&mut state.current_group),
+        in_grouping: state.in_grouping,
         regex_groups: std::mem::take(&mut state.regex_groups),
         tunnel_pool: std::mem::take(&mut state.tunnel_pool),
         current_grouping_key: state.current_grouping_key.take(),
@@ -9943,7 +10091,7 @@ fn sort_items_for_iter(
     let key_package_id = state.current_package_id;
     let unparsed_entities = &state.unparsed_entities;
     let user_exts   = state.user_exts;
-    let current_group = if state.current_group.is_empty() { None } else { Some(state.current_group.as_slice()) };
+    let current_group = if state.in_grouping { Some(state.current_group.as_slice()) } else { None };
     let current_grouping_key = state.current_grouping_key.as_ref();
     let accumulators = (!state.accumulators.is_empty()).then_some(&state.accumulators);
     let regex_groups = if state.regex_groups.is_empty() { None } else { Some(state.regex_groups.as_slice()) };
@@ -10190,7 +10338,7 @@ fn with_sort_key_eval<R>(
     let key_package_id = state.current_package_id;
     let unparsed_entities = &state.unparsed_entities;
     let user_exts   = state.user_exts;
-    let current_group = if state.current_group.is_empty() { None } else { Some(state.current_group.as_slice()) };
+    let current_group = if state.in_grouping { Some(state.current_group.as_slice()) } else { None };
     let current_grouping_key = state.current_grouping_key.as_ref();
     let accumulators = (!state.accumulators.is_empty()).then_some(&state.accumulators);
     let regex_groups = if state.regex_groups.is_empty() { None } else { Some(state.regex_groups.as_slice()) };

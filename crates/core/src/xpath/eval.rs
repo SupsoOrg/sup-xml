@@ -6765,14 +6765,24 @@ fn eval_function<I: DocIndexLike>(name: &str, args: &[Expr], ctx: &EvalCtx<'_>, 
     // so the call_function hook is given priority — it can be used
     // to override a built-in but, more commonly, registers
     // application-specific functions in the same namespace.
-    let (call_uri, call_local) = match name.split_once(':') {
-        Some((prefix, local)) => match resolve_prefix_or_implicit(ctx.bindings, prefix) {
-            Some(uri) => (uri, local.to_string()),
-            None => return Err(xpath_err(format!(
-                "Undefined namespace prefix in function name: {prefix}"
-            ))),
-        },
-        None => (String::new(), name.to_string()),
+    let (call_uri, call_local) = if let Some(rest) = name.strip_prefix("Q{") {
+        // XPath 3.0 EQName form `Q{uri}local` — the URI is given inline,
+        // no prefix resolution needed.  Split on the first `}` so a URI
+        // containing `:` (the common case) is preserved.
+        match rest.split_once('}') {
+            Some((uri, local)) => (uri.to_string(), local.to_string()),
+            None => (String::new(), name.to_string()),
+        }
+    } else {
+        match name.split_once(':') {
+            Some((prefix, local)) => match resolve_prefix_or_implicit(ctx.bindings, prefix) {
+                Some(uri) => (uri, local.to_string()),
+                None => return Err(xpath_err(format!(
+                    "Undefined namespace prefix in function name: {prefix}"
+                ))),
+            },
+            None => (String::new(), name.to_string()),
+        }
     };
     // Eagerly evaluate the args so we can pass concrete values to the
     // bindings hook — built-in dispatch below re-evaluates lazily
@@ -9353,6 +9363,18 @@ fn eval_function<I: DocIndexLike>(name: &str, args: &[Expr], ctx: &EvalCtx<'_>, 
                 )));
             }
             Ok(v)
+        }
+        "node-name" if args.is_empty() => {
+            // XPath 3.0 added a 0-argument form that uses the context item.
+            let id = ctx.context_node;
+            let local = idx.local_name(id);
+            let uri   = idx.namespace_uri(id);
+            let lex = if uri.is_empty() { local.to_string() }
+                      else { format!("{{{uri}}}{local}") };
+            Ok(Value::Typed(Box::new(TypedAtomic {
+                kind: "QName", lexical: lex,
+                numeric: None, boolean: None, user_type: None,
+            })))
         }
         "node-name" => {
             check_args!(1);

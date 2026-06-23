@@ -135,6 +135,11 @@ pub struct ResultBuilder {
     /// applies to the top level (no element open) of those bodies;
     /// nested element content follows normal §5.7.2 rules.
     pub drop_top_level_empty_atomics: bool,
+    /// Parallel to `stack`: `true` for an open element that was
+    /// constructed with `inherit-namespaces="no"` (XSLT 3.0 §11.7.2).
+    /// Its directly-constructed child elements must not inherit its
+    /// in-scope namespaces, so each such child undeclares them.
+    inherit_no: Vec<bool>,
 }
 
 impl ResultBuilder {
@@ -152,21 +157,66 @@ impl ResultBuilder {
             && name.prefix.is_none()
             && self.inherited_default_namespace()
                 .is_some_and(|d| !d.is_empty());
+        let mut namespaces = if needs_default_undecl {
+            vec![(None, String::new())]
+        } else {
+            Vec::new()
+        };
+        // XSLT 3.0 §11.7.2 — if the parent element was built with
+        // inherit-namespaces="no", this child does not inherit the
+        // parent's in-scope namespaces; emit an undeclaration for each
+        // prefixed binding the child doesn't itself carry (an XML 1.1 /
+        // undeclare-prefixes serialization feature).
+        if self.inherit_no.last().copied() == Some(true) {
+            for (prefix, uri) in self.inscope_prefixed_namespaces() {
+                if uri.is_empty() { continue; }
+                // Keep the binding the child's own name needs.
+                if name.prefix.as_deref() == Some(prefix.as_str()) && name.uri == uri {
+                    continue;
+                }
+                if !namespaces.iter().any(|(p, _)| p.as_deref() == Some(prefix.as_str())) {
+                    namespaces.push((Some(prefix), String::new()));
+                }
+            }
+        }
         self.stack.push(ResultNode::Element {
             name,
-            namespaces: if needs_default_undecl {
-                vec![(None, String::new())]
-            } else {
-                Vec::new()
-            },
+            namespaces,
             attributes: Vec::new(),
             children:   Vec::new(),
             schema_type: None,
             attr_types: Vec::new(),
         });
+        self.inherit_no.push(false);
         // A new element body opens a fresh sequence-constructor scope
         // for atomic-separator purposes.
         self.last_was_atomic = false;
+    }
+
+    /// Mark the element currently under construction as
+    /// `inherit-namespaces="no"` (XSLT 3.0 §11.7.2) so its children do
+    /// not inherit its in-scope namespaces.  No-op when no element is open.
+    pub fn set_current_inherit_namespaces_no(&mut self) {
+        if let Some(flag) = self.inherit_no.last_mut() { *flag = true; }
+    }
+
+    /// All prefixed namespace bindings in scope on the current (top-of-
+    /// stack) element, nearest declaration winning.  The default
+    /// namespace is excluded — it's handled by `needs_default_undecl`.
+    fn inscope_prefixed_namespaces(&self) -> Vec<(String, String)> {
+        let mut seen: Vec<(String, String)> = Vec::new();
+        for n in self.stack.iter().rev() {
+            if let ResultNode::Element { namespaces, .. } = n {
+                for (p, u) in namespaces {
+                    if let Some(p) = p {
+                        if !seen.iter().any(|(sp, _)| sp == p) {
+                            seen.push((p.clone(), u.clone()));
+                        }
+                    }
+                }
+            }
+        }
+        seen
     }
 
     /// Record the schema type `(ns, local)` of the element currently
@@ -208,6 +258,7 @@ impl ResultBuilder {
     /// element is open — the evaluator must balance these calls.
     pub fn close_element(&mut self) {
         let done = self.stack.pop().expect("close_element with empty stack");
+        self.inherit_no.pop();
         self.push_node(done);
         // The closed element itself counts as a non-atomic emission
         // in the parent's sequence constructor.

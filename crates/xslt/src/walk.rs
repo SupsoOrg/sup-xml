@@ -829,10 +829,11 @@ fn walk_instr(i: &Instr, out: &mut Vec<String>) {
         Instr::CallTemplate { with_params, .. } => {
             for w in with_params { collect_with_param(w, out); }
         }
-        Instr::Evaluate { xpath, context_item, with_params, .. } => {
+        Instr::Evaluate { xpath, context_item, with_params, with_params_map, .. } => {
             walk_expr(xpath, out);
             if let Some(e) = context_item { walk_expr(e, out); }
             for w in with_params { collect_with_param(w, out); }
+            if let Some(e) = with_params_map { walk_expr(e, out); }
         }
         Instr::SourceDocument { href, body, .. } => {
             walk_avt(href, out);

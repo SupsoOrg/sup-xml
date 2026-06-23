@@ -691,6 +691,13 @@ fn xpath_default_namespace_for(node: &Node) -> Option<String> {
 /// names that already carry an explicit prefix never change.
 fn apply_xpath_default_namespace(expr: &mut Expr, node: &Node) {
     let Some(uri) = xpath_default_namespace_for(node) else { return; };
+    apply_xpath_default_namespace_uri(expr, &uri);
+}
+
+/// As [`apply_xpath_default_namespace`] but with the effective default
+/// element-namespace URI supplied directly — used for dynamically-parsed
+/// expressions (`xsl:evaluate`) where no source node is available.
+pub(crate) fn apply_xpath_default_namespace_uri(expr: &mut Expr, uri: &str) {
     use sup_xml_core::xpath::ast::{Axis, LocationPath, NodeTest, Step};
     fn rewrite_step(s: &mut Step, uri: &str) {
         let on_element_axis = matches!(s.axis,
@@ -770,7 +777,7 @@ fn apply_xpath_default_namespace(expr: &mut Expr, node: &Node) {
             Expr::Literal(_) | Expr::Integer(_) | Expr::Decimal(_) | Expr::Double(_) | Expr::Variable(_) => {}
         }
     }
-    rewrite(expr, &uri);
+    rewrite(expr, uri);
 }
 
 /// Walk an Expr tree, replacing each `Expr::Variable("prefix:local")`
@@ -1441,6 +1448,11 @@ pub fn compile(doc: &Document) -> Result<StylesheetAst, XsltError> {
         set_static_param(qname_key(&name), value);
     }
 
+    // XSLT 3.0 §6.4 — a `default-mode` on the module element scopes the
+    // default mode for every template and `xsl:apply-templates` it
+    // contains (unless overridden by a closer `default-mode`).
+    let _module_default_mode = read_default_mode(root)?.map(DefaultModeGuard::enter);
+
     let mut pos: u32 = 0;
     for child in root.children() {
         // XSLT 2.0 §3.8 — xsl:stylesheet may only contain XSLT element
@@ -2071,6 +2083,14 @@ fn compile_top_level(node: &Node, ast: &mut StylesheetAst, pos: u32) -> Result<(
                          collations (XTSE1220)", qname_key(&k.name)
                     )));
                 }
+                // XSLT 3.0 §17.1 / XTSE1220 — same-named keys must also
+                // agree on the effective value of `composite`.
+                if prior.composite != k.composite {
+                    return Err(XsltError::InvalidStylesheet(format!(
+                        "xsl:key '{}' declared with conflicting composite= \
+                         values (XTSE1220)", qname_key(&k.name)
+                    )));
+                }
             }
             ast.keys.push(k);
         }
@@ -2555,10 +2575,18 @@ fn reject_function_body_focus_use(body: &[Instr]) -> Result<(), XsltError> {
     };
     for instr in body {
         match instr {
-            Instr::Copy { .. } => return Err(XsltError::InvalidStylesheet(
+            // `xsl:copy` with no select= copies the (undefined) context
+            // item — XTTE0945 in a function body.  `xsl:copy select="$n"`
+            // (XSLT 3.0) supplies its own context item, so it is legal;
+            // only its select= must be focus-independent.
+            Instr::Copy { select: None, .. } => return Err(XsltError::InvalidStylesheet(
                 "xsl:copy inside xsl:function body is XTTE0945 — the body \
                  has no context item to copy".into()
             )),
+            Instr::Copy { select: Some(select), body, .. } => {
+                reject_focus_expr(select, "xsl:copy select=")?;
+                reject_function_body_focus_use(body)?;
+            }
             // Outer-context expressions on instructions that don't
             // change the focus — `.` / `position()` / a relative
             // path here implicitly reads the (undefined) function
@@ -4008,6 +4036,14 @@ fn compile_key(node: &Node) -> Result<Key, XsltError> {
         // URI here; codepoint stays implicit.
         effective_default_collation(node)
     };
+    let composite = match read_attribute(node, "composite").map(str::trim) {
+        None => false,
+        Some("yes" | "true" | "1") => true,
+        Some("no" | "false" | "0") => false,
+        Some(_) if in_forwards_compat_mode() => false,
+        Some(other) => return Err(XsltError::InvalidStylesheet(format!(
+            "xsl:key composite='{other}' must be a boolean (XTSE0020)"))),
+    };
     let m = require_attr(node, "match", "xsl:key")?;
     let matcher = parse_xpath_at(node, m).map_err(XsltError::from)?;
     reject_invalid_pattern_axes(&matcher, "xsl:key match=")?;
@@ -4033,6 +4069,7 @@ fn compile_key(node: &Node) -> Result<Key, XsltError> {
             use_: parse_xpath_at(node, u).map_err(XsltError::from)?,
             body: Body::new(),
             collation,
+            composite,
             package_id: 0,
         }),
         (None, true) => Ok(Key {
@@ -4041,6 +4078,7 @@ fn compile_key(node: &Node) -> Result<Key, XsltError> {
             use_: Expr::Sequence(Vec::new()),
             body: compile_body(node)?,
             collation,
+            composite,
             package_id: 0,
         }),
     }
@@ -4108,11 +4146,13 @@ fn compile_mode(node: &Node) -> Result<ModeDecl, XsltError> {
         "use-accumulators",
     ])?;
     validate_must_be_empty(node, "xsl:mode")?;
-    let name = match read_attribute(node, "name") {
+    // Enumerated / token attribute values are whitespace-collapsed before
+    // interpretation (XSLT 3.0 §3.4), so trim before matching.
+    let name = match read_attribute(node, "name").map(str::trim) {
         None | Some("#default") | Some("#unnamed") => None,
         Some(qn) => Some(parse_qname_on(node, qn)?),
     };
-    let on_no_match = match read_attribute(node, "on-no-match") {
+    let on_no_match = match read_attribute(node, "on-no-match").map(str::trim) {
         None | Some("text-only-copy") => OnNoMatch::TextOnlyCopy,
         Some("deep-copy")    => OnNoMatch::DeepCopy,
         Some("shallow-copy") => OnNoMatch::ShallowCopy,
@@ -4725,6 +4765,34 @@ fn compile_output(node: &Node, allow_avt: bool) -> Result<OutputSpec, XsltError>
                 return Err(XsltError::InvalidStylesheet(format!(
                     "xsl:output html-version='{v}' must be a number (XTSE0020)"
                 )));
+            }
+        }
+        // SESU0007 — encoding= must name an encoding the serializer can
+        // produce; an unrecognised label (e.g. "XXX-xx") is an error.
+        if let Some(v) = read_attribute(node, "encoding")
+            .filter(|v| !(allow_avt && value_is_avt(v)))
+        {
+            if !sup_xml_core::encoding::is_known_encoding(v.trim()) {
+                return Err(XsltError::InvalidStylesheet(format!(
+                    "xsl:output encoding='{v}' is not a supported encoding (SESU0007)"
+                )));
+            }
+        }
+        // SESU0013 — for the html / xhtml methods, version= names the HTML
+        // version; a value the serializer doesn't support is an error.
+        if matches!(read_attribute(node, "method").as_deref().map(str::trim),
+            Some("html") | Some("xhtml"))
+        {
+            if let Some(v) = read_attribute(node, "version")
+                .filter(|v| !(allow_avt && value_is_avt(v)))
+            {
+                if !matches!(v.trim(),
+                    "1.0" | "1.1" | "4.0" | "4.01" | "5" | "5.0") {
+                    return Err(XsltError::InvalidStylesheet(format!(
+                        "xsl:output version='{v}' is not a supported HTML \
+                         version (SESU0013)"
+                    )));
+                }
             }
         }
     }
@@ -5486,11 +5554,13 @@ fn compile_raw_instr_into(
         "perform-sort"   => compile_perform_sort(node)?,
         "document"       => Instr::Document { body: compile_body(node)? },
         "namespace"      => compile_namespace_instr(node)?,
-        "try"            => compile_try(node)?,
         // XSLT 3.0 instructions — only recognised when the stylesheet
         // declares a version greater than 2.0.  In a 2.0 stylesheet
         // they are unknown elements and (outside forwards-compat) a
         // static error, which is what the W3C suite expects.
+        // `xsl:try` / `xsl:catch` were introduced in XSLT 3.0 (XSLT 2.0
+        // has no try/catch), so they are gated here too.
+        "try"            if is_xslt_3_0_compile() => compile_try(node)?,
         "iterate"        if is_xslt_3_0_compile() => compile_iterate(node)?,
         "next-iteration" if is_xslt_3_0_compile() => compile_next_iteration(node)?,
         "break"          if is_xslt_3_0_compile() => compile_break(node)?,
@@ -6286,7 +6356,11 @@ fn compile_evaluate(node: &Node) -> Result<Instr, XsltError> {
     let schema_aware = read_attribute(node, "schema-aware")
         .map(|s| s.trim() == "yes" || s.trim() == "1" || s.trim() == "true")
         .unwrap_or(false);
-    Ok(Instr::Evaluate { xpath, context_item, with_params, schema_aware })
+    let with_params_map = read_attribute(node, "with-params")
+        .map(|s| parse_xpath_at(node, s)).transpose().map_err(XsltError::from)?;
+    let xpath_default_ns = xpath_default_namespace_for(node);
+    Ok(Instr::Evaluate { xpath, context_item, with_params, with_params_map,
+        xpath_default_ns, schema_aware })
 }
 
 /// XSLT 3.0 §15 `xsl:merge` — one or more `xsl:merge-source` children
@@ -6407,6 +6481,11 @@ fn compile_analyze_string(node: &Node) -> Result<Instr, XsltError> {
                   .unwrap_or_default();
     let mut matching:     Option<Body> = None;
     let mut non_matching: Option<Body> = None;
+    // XSLT 2.0 §15.1 content model: (xsl:matching-substring?,
+    // xsl:non-matching-substring?, xsl:fallback*) — the children must
+    // appear in that order (XTSE0010).
+    let mut seen_non_matching = false;
+    let mut seen_fallback = false;
     for child in node.children() {
         if !child.is_element() { continue; }
         if !is_xslt_element(child) {
@@ -6422,6 +6501,11 @@ fn compile_analyze_string(node: &Node) -> Result<Instr, XsltError> {
                         "xsl:analyze-string can have at most one \
                          xsl:matching-substring (XTSE0010)".into()));
                 }
+                if seen_non_matching || seen_fallback {
+                    return Err(XsltError::InvalidStylesheet(
+                        "xsl:matching-substring must precede \
+                         xsl:non-matching-substring and xsl:fallback (XTSE0010)".into()));
+                }
                 matching = Some(compile_body(child)?);
             }
             "non-matching-substring" => {
@@ -6430,9 +6514,15 @@ fn compile_analyze_string(node: &Node) -> Result<Instr, XsltError> {
                         "xsl:analyze-string can have at most one \
                          xsl:non-matching-substring (XTSE0010)".into()));
                 }
+                if seen_fallback {
+                    return Err(XsltError::InvalidStylesheet(
+                        "xsl:non-matching-substring must precede \
+                         xsl:fallback (XTSE0010)".into()));
+                }
+                seen_non_matching = true;
                 non_matching = Some(compile_body(child)?);
             }
-            "fallback" => {}
+            "fallback" => { seen_fallback = true; }
             other => return Err(XsltError::InvalidStylesheet(format!(
                 "unexpected child of xsl:analyze-string: xsl:{other}"
             ))),
@@ -6818,6 +6908,7 @@ fn compile_copy(node: &Node) -> Result<Instr, XsltError> {
         copy_namespaces,
         select,
         strip_validation: read_attribute(node, "validation").as_deref() == Some("strip"),
+        inherit_namespaces: read_inherit_namespaces(node, "inherit-namespaces")?,
     })
 }
 
@@ -6912,7 +7003,26 @@ fn compile_element(node: &Node) -> Result<Instr, XsltError> {
             None => matches!(
                 effective_default_validation(node).as_deref(), Some("strict") | Some("lax")),
         },
+        inherit_namespaces: read_inherit_namespaces(node, "inherit-namespaces")?,
     })
+}
+
+/// Parse the `[xsl:]inherit-namespaces` attribute (XSLT 3.0 §11.7.2).
+/// Default `true`; a value outside the boolean lexical space is
+/// XTSE0020 (skipped in forwards-compatible mode).
+fn read_inherit_namespaces(node: &Node, attr: &str) -> Result<bool, XsltError> {
+    match read_attribute(node, attr) {
+        None => Ok(true),
+        Some(v) => match v.trim() {
+            "yes" | "true" | "1" => Ok(true),
+            "no" | "false" | "0" => Ok(false),
+            other if in_forwards_compat_mode() => {
+                let _ = other; Ok(true)
+            }
+            other => Err(XsltError::InvalidStylesheet(format!(
+                "{attr}='{other}' must be a boolean (XTSE0020)"))),
+        },
+    }
 }
 
 /// True when `node` has sequence-constructor content: any element child
@@ -7138,6 +7248,7 @@ fn compile_literal_element(node: &Node) -> Result<Instr, XsltError> {
     // global element declaration.  `strip`/`preserve` don't.
     let mut validate = matches!(
         effective_default_validation(node).as_deref(), Some("strict") | Some("lax"));
+    let mut inherit_namespaces = true;
     for attr in node.attributes() {
         // Skip namespace declarations — they're collected separately
         // below into `namespaces`, not emitted as attribute templates.
@@ -7175,6 +7286,16 @@ fn compile_literal_element(node: &Node) -> Result<Instr, XsltError> {
             }
             if aname.local == "validation" {
                 validate = matches!(attr.value().trim(), "strict" | "lax");
+            }
+            if aname.local == "inherit-namespaces" {
+                inherit_namespaces = match attr.value().trim() {
+                    "yes" | "true" | "1" => true,
+                    "no" | "false" | "0" => false,
+                    other if in_forwards_compat_mode() => { let _ = other; true }
+                    other => return Err(XsltError::InvalidStylesheet(format!(
+                        "literal result element: xsl:inherit-namespaces='{other}' \
+                         must be a boolean (XTSE0020)"))),
+                };
             }
             continue;
         }
@@ -7276,6 +7397,7 @@ fn compile_literal_element(node: &Node) -> Result<Instr, XsltError> {
         use_attribute_sets,
         schema_type,
         validate,
+        inherit_namespaces,
         body: compile_body(node)?,
     })
 }
@@ -8605,8 +8727,12 @@ fn parse_qname_on(context_node: &Node, s: &str) -> Result<QName, XsltError> {
 fn reject_invalid_pattern_axes(expr: &Expr, who: &str) -> Result<(), XsltError> {
     use sup_xml_core::xpath::ast::{Axis, LocationPath};
     fn walk_step(s: &sup_xml_core::xpath::ast::Step, who: &str) -> Result<(), XsltError> {
+        // XSLT 3.0 §5.5.3 ForwardAxisP — the forward axes child,
+        // descendant, attribute, self, descendant-or-self and namespace
+        // are all permitted in a pattern step; reverse axes are not.
         let ok = matches!(s.axis,
-            Axis::Child | Axis::Attribute | Axis::DescendantOrSelf | Axis::Self_);
+            Axis::Child | Axis::Attribute | Axis::Descendant
+            | Axis::DescendantOrSelf | Axis::Self_ | Axis::Namespace);
         if !ok {
             return Err(XsltError::InvalidStylesheet(format!(
                 "{who} pattern axis '{:?}' not permitted in a pattern (XTSE0340)",
@@ -8685,10 +8811,9 @@ fn reject_invalid_pattern_key_calls(expr: &Expr, who: &str) -> Result<(), XsltEr
                     // XSLT 2.0 §5.5.3 — `id()` in a pattern must take
                     // exactly one argument (a string literal or a
                     // variable reference).  The 2-argument form
-                    // `id($ids, $doc)` is XSLT 2.1+ / XPath 2.0
-                    // (selecting a different document) and isn't
-                    // permitted at the head of an XSLT 2.0 pattern.
-                    if args.len() != 1 {
+                    // `id($ids, $doc)` (selecting a different document)
+                    // is permitted at the head of an XSLT 3.0 pattern.
+                    if args.len() != 1 && !is_xslt_3_0_compile() {
                         return Err(XsltError::InvalidStylesheet(format!(
                             "{who} pattern call id(): must have exactly one \
                              argument — the 2-arg form is not permitted in \

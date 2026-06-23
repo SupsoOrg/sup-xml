@@ -55,6 +55,27 @@ impl ResultTree {
     pub fn to_string(&self) -> Result<String, XsltError> {
         let method = effective_method(self);
         let html_family = matches!(method, "html" | "xhtml");
+        // Serialization spec [err:SEPM0004]: specifying doctype-system, or
+        // standalone with a value other than omit, is an error when the
+        // result has text-node children or more than one element child of
+        // the document node.  Enforced for the XML-family methods (the
+        // html/text methods don't write an XML declaration or DOCTYPE from
+        // these parameters in the same way).
+        if matches!(method, "xml" | "xhtml")
+            && (self.output.doctype_system.is_some()
+                || matches!(self.output.standalone, Some(Standalone::Yes | Standalone::No)))
+        {
+            let elements = self.children.iter()
+                .filter(|n| matches!(n, ResultNode::Element { .. })).count();
+            let has_text = self.children.iter().any(|n| matches!(n,
+                ResultNode::Text { content, .. } if !content.trim().is_empty()));
+            if elements > 1 || has_text {
+                return Err(XsltError::InvalidStylesheet(
+                    "serialization: doctype-system / standalone is incompatible \
+                     with multiple element children or text at the document \
+                     node (SEPM0004)".into()));
+            }
+        }
         let indent = self.output.indent.unwrap_or(html_family);
         let escape_uri = html_family
             && self.output.escape_uri_attributes.unwrap_or(true);
@@ -247,7 +268,12 @@ fn serialize_xml_node(
                     // don't emit a redundant decl.
                     Some(p) if p == "xml"
                         && uri == "http://www.w3.org/XML/1998/namespace" => {}
-                    Some(p) => { let _ = write!(out, r#" xmlns:{p}="{}""#, escape_attr(uri, xml_11, enc_cap)); }
+                    // A prefixed undeclaration (`xmlns:p=""`) is only legal
+                    // in XML 1.1; drop it under 1.0 (the prefix simply
+                    // stays in scope, the best a 1.0 serializer can do).
+                    Some(p) if !uri.is_empty() || xml_11 => {
+                        let _ = write!(out, r#" xmlns:{p}="{}""#, escape_attr(uri, xml_11, enc_cap)); }
+                    Some(_) => {}
                     None => {
                         // Suppress a default-namespace declaration that
                         // would have no observable effect — same URI as

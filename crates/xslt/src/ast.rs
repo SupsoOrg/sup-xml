@@ -351,6 +351,10 @@ pub enum Instr {
         /// the constructed element against an imported schema, taking the
         /// governing type of the matching global element declaration.
         validate:    bool,
+        /// `xsl:inherit-namespaces` on the LRE (XSLT 3.0 §11.7.2); default
+        /// `true`.  When `false`, child elements don't inherit this
+        /// element's in-scope namespaces.
+        inherit_namespaces: bool,
         body:       Body,
     },
     /// Literal text node — verbatim character content with no
@@ -466,6 +470,10 @@ pub enum Instr {
         /// `validation="strip"` (XSLT 2.0 §19.2) — the shallow copy and
         /// its body are emitted without schema type annotations.
         strip_validation:   bool,
+        /// `inherit-namespaces` (XSLT 3.0 §11.7.2); default `true`.  When
+        /// `false`, elements constructed in the copy's body don't inherit
+        /// the copied element's namespaces.
+        inherit_namespaces: bool,
     },
     CopyOf {
         select: Expr,
@@ -504,6 +512,10 @@ pub enum Instr {
         /// constructed element against an imported schema, taking the
         /// governing type of the matching global element declaration.
         validate: bool,
+        /// `inherit-namespaces` (XSLT 3.0 §11.7.2); default `true`.  When
+        /// `false`, the namespaces of this element are not inherited by
+        /// the elements constructed within its sequence constructor.
+        inherit_namespaces: bool,
     },
     Attribute {
         name:      Avt,
@@ -693,6 +705,15 @@ pub enum Instr {
         xpath:        Expr,
         context_item: Option<Expr>,
         with_params:  Vec<WithParam>,
+        /// `with-params="map(xs:QName, item()*)"` (XSLT 3.0 §18.2) — an
+        /// expression yielding a map whose entries bind variables visible
+        /// to the dynamic expression.  Applied on top of any child
+        /// `xsl:with-param` elements.
+        with_params_map: Option<Expr>,
+        /// Effective `xpath-default-namespace` at the `xsl:evaluate`
+        /// source location (XSLT 3.0 §18.2): the dynamic expression's
+        /// unprefixed element names resolve in this namespace.
+        xpath_default_ns: Option<String>,
         /// `schema-aware="yes"` (XSLT 3.0 §18.2) — only then may the
         /// dynamically-evaluated expression reference imported schema
         /// types.  Default `false`: schema types are not in scope, so a
@@ -1079,6 +1100,10 @@ pub struct Key {
     /// non-codepoint URI changes how key('name', 'value') matches
     /// against the indexed `use=` results.
     pub collation: Option<String>,
+    /// `composite="yes"` (XSLT 3.0 §17.1): the `use=` sequence is treated
+    /// as a single composite key value rather than one key per item.  All
+    /// same-named `xsl:key` declarations must agree on this (XTSE1220).
+    pub composite: bool,
     /// The package this key was declared in (XSLT 3.0 §3.5 — keys are
     /// package-local).  `0` = principal package; used packages get a
     /// nonzero id so `key('k', …)` resolves the executing package's

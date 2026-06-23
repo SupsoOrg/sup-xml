@@ -478,13 +478,26 @@ pub(crate) fn dispatch<I: DocIndexLike>(
             if !args.is_empty() {
                 return Some(Err(err("current-group() takes no arguments")));
             }
-            Ok(Value::NodeSet(current_group.map(|g| g.to_vec()).unwrap_or_default()))
+            // XSLT 3.0 §15.4 / XTDE1061 — calling current-group() when
+            // there is no current group (outside any xsl:for-each-group
+            // body) is a dynamic error, not an empty sequence.
+            match current_group {
+                Some(g) => Ok(Value::NodeSet(g.to_vec())),
+                None => return Some(Err(err(
+                    "current-group() called outside xsl:for-each-group (XTDE1061)"))),
+            }
         }
         "current-grouping-key" => {
             if !args.is_empty() {
                 return Some(Err(err("current-grouping-key() takes no arguments")));
             }
-            Ok(current_grouping_key.cloned().unwrap_or(Value::String(String::new())))
+            // XSLT 3.0 §15.4 / XTDE1071 — likewise an error when there is
+            // no current grouping key.
+            match current_grouping_key {
+                Some(k) => Ok(k.clone()),
+                None => return Some(Err(err(
+                    "current-grouping-key() called outside xsl:for-each-group (XTDE1071)"))),
+            }
         }
         // XSLT 3.0 §15 `xsl:merge` accessors.  The current merge group
         // and key reuse the grouping-accessor state (a merge-action and
@@ -999,39 +1012,50 @@ fn system_property_fn<I: DocIndexLike>(
     // we normalise to the XSLT namespace URI and dispatch on
     // the local name.
     let raw = value_to_string(&args[0], idx);
-    // XSLT 2.0 §16.6.5 — the argument must be a valid lexical QName.
-    if !is_lexical_qname(&raw) {
-        return Err(err(format!(
-            "system-property(): '{raw}' is not a valid QName (XTDE1390)"
-        )));
-    }
-    let (prefix, local) = match raw.split_once(':') {
-        Some((p, l)) => (Some(p), l),
-        None         => (None, raw.as_str()),
-    };
     let xslt_uri = "http://www.w3.org/1999/XSL/Transform";
-    let uri: Option<String> = match prefix {
-        Some(p) => Some(namespaces.resolve(p).or_else(|| match p {
-            // `xsl` and `xslt` are the conventional XSLT-namespace
-            // prefixes; honour them even when no in-scope binding
-            // exists so callers without a fully-populated namespace
-            // context (use-when static evaluation, unit tests) can
-            // still query system-property without a workaround.
-            "xsl" | "xslt" => Some(xslt_uri.to_string()),
-            _ => None,
-        }).ok_or_else(|| err(format!(
-            // XSLT 2.0 §16.6.5 / XTDE1390 — a prefix on the argument
-            // QName that's not in scope is a dynamic error.
-            "system-property('{raw}'): prefix '{p}' is not declared \
-             in the in-scope namespaces (XTDE1390)"
-        )))?),
-        None    => None,
+    // The argument is an EQName: either the XPath 3.0 `Q{uri}local` form
+    // or a lexical QName whose prefix resolves against the in-scope
+    // namespaces (XSLT 2.0 §16.6.5 / XSLT 3.0 §18.6).
+    let (uri, local): (Option<String>, String) = if let Some(rest) = raw.strip_prefix("Q{") {
+        match rest.split_once('}') {
+            Some((u, l)) if !l.is_empty() => (Some(u.to_string()), l.to_string()),
+            _ => return Err(err(format!(
+                "system-property(): '{raw}' is not a valid EQName (XTDE1390)"))),
+        }
+    } else {
+        if !is_lexical_qname(&raw) {
+            return Err(err(format!(
+                "system-property(): '{raw}' is not a valid QName (XTDE1390)"
+            )));
+        }
+        let (prefix, local) = match raw.split_once(':') {
+            Some((p, l)) => (Some(p), l),
+            None         => (None, raw.as_str()),
+        };
+        let uri: Option<String> = match prefix {
+            Some(p) => Some(namespaces.resolve(p).or_else(|| match p {
+                // `xsl` and `xslt` are the conventional XSLT-namespace
+                // prefixes; honour them even when no in-scope binding
+                // exists so callers without a fully-populated namespace
+                // context (use-when static evaluation, unit tests) can
+                // still query system-property without a workaround.
+                "xsl" | "xslt" => Some(xslt_uri.to_string()),
+                _ => None,
+            }).ok_or_else(|| err(format!(
+                // XSLT 2.0 §16.6.5 / XTDE1390 — a prefix on the argument
+                // QName that's not in scope is a dynamic error.
+                "system-property('{raw}'): prefix '{p}' is not declared \
+                 in the in-scope namespaces (XTDE1390)"
+            )))?),
+            None    => None,
+        };
+        (uri, local.to_string())
     };
     let in_xslt = uri.as_deref() == Some(xslt_uri);
     if !in_xslt {
         return Ok(Value::String(String::new()));
     }
-    Ok(Value::String(match local {
+    Ok(Value::String(match local.as_str() {
         // XSLT 1.0 §15 / XSLT 2.0 §16.6.5 — `xsl:version` is the
         // version of XSLT the *processor* implements, not the
         // stylesheet's declared version.  Report "2.0" when the

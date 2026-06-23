@@ -236,6 +236,30 @@ pub fn encoding_from_name(name: &str) -> Encoding {
     }
 }
 
+/// True when `name` is an encoding label this library recognizes —
+/// either one it transcodes natively, a generic Unicode label, or (with
+/// the `full-encodings` feature) any label the `encoding_rs` registry
+/// knows.  Used to enforce the Serialization spec's SESU0007 ("the
+/// requested output encoding is not supported"); an unrecognized label
+/// such as `"XXX-xx"` returns `false`.
+pub fn is_known_encoding(name: &str) -> bool {
+    let lower = name.trim().to_ascii_lowercase();
+    // Generic Unicode labels (no explicit endianness) carry no fixed
+    // `Encoding` variant but are valid output encodings.
+    if matches!(lower.as_str(),
+        "utf-16" | "utf16" | "utf-32" | "utf32" | "ucs-2" | "ucs2" | "ucs-4" | "ucs4")
+    {
+        return true;
+    }
+    if !matches!(encoding_from_name(&lower), Encoding::Other(_)) {
+        return true;
+    }
+    #[cfg(feature = "full-encodings")]
+    { encoding_rs::Encoding::for_label(lower.as_bytes()).is_some() }
+    #[cfg(not(feature = "full-encodings"))]
+    { false }
+}
+
 /// Return the encoding name as written in the document's `<?xml ...
 /// encoding="X"?>` declaration, if present.  Works on the raw bytes
 /// before any transcoding, so it reports the name a consumer-supplied

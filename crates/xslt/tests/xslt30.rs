@@ -869,15 +869,26 @@ fn parse_test_set(path: &Path) -> Vec<TestCase> {
                     }
                     "assert-string-value" => {
                         if capturing == Some("assert-string-value") {
-                            commit_expectation(&mut cur_case.expects, &mut combinator_stack,
-                                Expectation::AssertStringValue(std::mem::take(&mut text_buf)));
+                            let e = Expectation::AssertStringValue(std::mem::take(&mut text_buf));
+                            match &cur_rd_uri {
+                                // Inside <assert-result-document>: target the
+                                // secondary document at that uri (same routing
+                                // as the assert-xml arm above).
+                                Some(uri) => cur_case.result_doc_asserts.push((uri.clone(), e)),
+                                None => commit_expectation(&mut cur_case.expects,
+                                    &mut combinator_stack, e),
+                            }
                         }
                         capturing = None;
                     }
                     "assert" => {
                         if capturing == Some("assert") {
-                            commit_expectation(&mut cur_case.expects, &mut combinator_stack,
-                                Expectation::Assert(std::mem::take(&mut text_buf)));
+                            let e = Expectation::Assert(std::mem::take(&mut text_buf));
+                            match &cur_rd_uri {
+                                Some(uri) => cur_case.result_doc_asserts.push((uri.clone(), e)),
+                                None => commit_expectation(&mut cur_case.expects,
+                                    &mut combinator_stack, e),
+                            }
                         }
                         capturing = None;
                     }
@@ -1572,7 +1583,8 @@ fn run_case_detailed(case: &TestCase, ts_dir: &Path) -> Option<Result<(), FailRe
     // assertions) used to skip in the 1.0 runner — we keep that
     // policy so XPath 2.0-only assertion syntax stays out of the
     // 1.0 baseline; the 3.0/2.0 runners pick them up.
-    if matches!(case.expects, Expectation::Unsupported)
+    if (matches!(case.expects, Expectation::Unsupported)
+            && case.result_doc_asserts.is_empty())
         || (expectation_is_pure_assert(&case.expects) && !capability)
     {
         return None;
@@ -1642,7 +1654,15 @@ fn run_case_detailed(case: &TestCase, ts_dir: &Path) -> Option<Result<(), FailRe
 /// only when the primary output matches and each asserted secondary
 /// document was produced and matches.
 fn check_case_result(case: &TestCase, result: &ApplyResult) -> Result<(), FailReason> {
-    check_expectation_against(&case.expects, result)?;
+    // A case whose only assertions target secondary result-documents has
+    // no primary expectation (it defaults to Unsupported); in that case
+    // the primary tree is legitimately empty, so check only the
+    // secondary-document assertions below.
+    if !(matches!(case.expects, Expectation::Unsupported)
+        && !case.result_doc_asserts.is_empty())
+    {
+        check_expectation_against(&case.expects, result)?;
+    }
     if let ApplyResult::Ok(rt) = result {
         for (uri, exp) in &case.result_doc_asserts {
             // The href is stored as written; match the catalog uri
