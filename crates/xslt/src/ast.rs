@@ -347,6 +347,10 @@ pub enum Instr {
         /// the ordinary untyped LRE.  Annotates the constructed element
         /// so its typed value is recoverable.
         schema_type: Option<(String, String)>,
+        /// `[xsl:]validation="strict"|"lax"` (XSLT 2.0 §19.2): validate
+        /// the constructed element against an imported schema, taking the
+        /// governing type of the matching global element declaration.
+        validate:    bool,
         body:       Body,
     },
     /// Literal text node — verbatim character content with no
@@ -496,6 +500,10 @@ pub enum Instr {
         /// `validation="strip"` (XSLT 2.0 §19.2) — the constructed element
         /// and its body are emitted without schema type annotations.
         strip_validation: bool,
+        /// `validation="strict"|"lax"` (XSLT 2.0 §19.2): validate the
+        /// constructed element against an imported schema, taking the
+        /// governing type of the matching global element declaration.
+        validate: bool,
     },
     Attribute {
         name:      Avt,

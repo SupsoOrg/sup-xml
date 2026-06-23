@@ -808,6 +808,13 @@ pub trait XPathBindings {
     fn node_derives_from(&self, _node_id: NodeId, _turi: &str, _tlocal: &str) -> Option<bool> {
         None
     }
+    /// Whether schema-aware type information is available — true when an
+    /// `xsl:import-schema` made governing types queryable.  When false the
+    /// engine has no type annotations, so a typed `element(*, T)` kind test
+    /// falls back to a fully lenient name match (an undecidable node is
+    /// treated as a match); when true, a user-type target requires a
+    /// definite match (an untyped node is not an instance of a user type).
+    fn schema_aware(&self) -> bool { false }
     /// Schema-aware atomization (XPath 2.0 §2.5.2): the typed value of
     /// source node `node_id`, whose string value is `lexical`, when the
     /// node carries a simple-typed schema annotation.  Returns the typed
@@ -3290,10 +3297,21 @@ fn node_matches<I: DocIndexLike>(
                 },
                 None => (String::new(), type_name.clone()),
             };
-            // Narrow on a definite type mismatch (the node is annotated and
-            // neither it nor its base chain reach the target); an
-            // un-annotated node stays a lenient name match.
-            !matches!(node_type_match(bindings, node, is_attr, &turi, &tlocal), Some(false))
+            // A typed `element(*, T)` / `attribute(*, T)` step or pattern.
+            // For a USER-defined target type the node must be definitely T
+            // (or derive from T): an un-annotated node has type
+            // xs:untyped / xs:untypedAtomic and is never an instance of a
+            // user type.  For an XSD built-in target we stay lenient on an
+            // undecidable node (None), since source typing is sometimes
+            // incomplete and a name-match shouldn't be lost.
+            const XSD: &str = "http://www.w3.org/2001/XMLSchema";
+            match node_type_match(bindings, node, is_attr, &turi, &tlocal) {
+                Some(b) => b,
+                // Undecidable: lenient unless schema typing is active and
+                // the target is a user type (then the node, being untyped,
+                // is definitely not an instance).
+                None    => !bindings.schema_aware() || turi == XSD,
+            }
         }
     }
 }

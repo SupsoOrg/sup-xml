@@ -637,6 +637,29 @@ fn effective_default_collation(node: &Node) -> Option<String> {
     None
 }
 
+/// XSLT 2.0 §19.2 / 3.0 §3.6 — the effective `default-validation` in
+/// scope at `node`: the value of the nearest-ancestor `[xsl:]default-
+/// validation` attribute (`default-validation` on an XSLT element,
+/// `xsl:default-validation` on a literal result element).  `None` when
+/// none is declared (the implicit default is `strip`).
+fn effective_default_validation(node: &Node) -> Option<String> {
+    let mut cur = Some(node);
+    while let Some(n) = cur {
+        if n.is_element() {
+            let v = if is_xslt_element(n) {
+                read_attribute(n, "default-validation")
+            } else {
+                read_xsl_attribute(n, "default-validation")
+            };
+            if let Some(raw) = v {
+                return Some(raw.trim().to_string());
+            }
+        }
+        cur = n.parent.get();
+    }
+    None
+}
+
 /// for the first XSLT element with the attribute set (or any LRE
 /// with `xsl:xpath-default-namespace`), and return the URI.  An
 /// empty value (explicitly cleared by a child element) shadows any
@@ -6884,6 +6907,11 @@ fn compile_element(node: &Node) -> Result<Instr, XsltError> {
         schema_type: read_attribute(node, "type")
             .and_then(|v| resolve_type_qname(node, v)),
         strip_validation: read_attribute(node, "validation").as_deref() == Some("strip"),
+        validate: match read_attribute(node, "validation").map(|s| s.trim().to_string()) {
+            Some(v) => matches!(v.as_str(), "strict" | "lax"),
+            None => matches!(
+                effective_default_validation(node).as_deref(), Some("strict") | Some("lax")),
+        },
     })
 }
 
@@ -7104,6 +7132,12 @@ fn compile_literal_element(node: &Node) -> Result<Instr, XsltError> {
     let mut attributes = Vec::new();
     let mut use_attribute_sets: Vec<QName> = Vec::new();
     let mut schema_type: Option<(String, String)> = None;
+    // XSLT 2.0 §19.2 — `[xsl:]validation="strict"|"lax"` (or an in-scope
+    // `default-validation`) validates the constructed element against an
+    // imported schema, assigning it the governing type of its matching
+    // global element declaration.  `strip`/`preserve` don't.
+    let mut validate = matches!(
+        effective_default_validation(node).as_deref(), Some("strict") | Some("lax"));
     for attr in node.attributes() {
         // Skip namespace declarations — they're collected separately
         // below into `namespaces`, not emitted as attribute templates.
@@ -7138,6 +7172,9 @@ fn compile_literal_element(node: &Node) -> Result<Instr, XsltError> {
             }
             if aname.local == "type" {
                 schema_type = resolve_type_qname(node, attr.value());
+            }
+            if aname.local == "validation" {
+                validate = matches!(attr.value().trim(), "strict" | "lax");
             }
             continue;
         }
@@ -7238,6 +7275,7 @@ fn compile_literal_element(node: &Node) -> Result<Instr, XsltError> {
         namespaces,
         use_attribute_sets,
         schema_type,
+        validate,
         body: compile_body(node)?,
     })
 }

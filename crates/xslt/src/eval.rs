@@ -190,6 +190,29 @@ fn type_display_name(
     })
 }
 
+/// XSLT 2.0 §19.2 — the governing type assigned to an element constructed
+/// under `validation="strict"|"lax"`: the type of its matching global
+/// element declaration in an imported schema.  Lightweight validation by
+/// declaration (no content-model checking), which is enough to make the
+/// constructed node discriminate against `element(*, T)` kind tests.
+#[cfg(feature = "xsd")]
+pub(crate) fn validated_element_type(
+    style: &StylesheetAst, name: &QName,
+) -> Option<(String, String)> {
+    let qn = sup_xml_core::xsd::QName::new(
+        (!name.uri.is_empty()).then_some(name.uri.as_str()), &name.local);
+    style.schemas.iter().find_map(|schema| {
+        let decl = schema.element(&qn)?;
+        let tref = resolve_unresolved_type(decl.type_def.clone(), schema);
+        type_display_name(&tref, schema)
+    })
+}
+
+#[cfg(not(feature = "xsd"))]
+pub(crate) fn validated_element_type(
+    _style: &StylesheetAst, _name: &QName,
+) -> Option<(String, String)> { None }
+
 /// The named types `tref` derives from (XSD §3.4.6), nearest base first.
 /// Walks the complex-type derivation chain and the simple-type
 /// `base_name` chain (the latter via the schema registry), skipping the
@@ -248,9 +271,18 @@ fn registered_type_name(
 ) -> Option<(String, String)> {
     use sup_xml_core::xsd::TypeRef;
     schema.types().find_map(|(qn, registered)| {
+        // Prefer Arc identity, but fall back to a name match: the schema
+        // compiler re-Arcs list/union types (and collapses some local
+        // simple types) during member resolution, so a node's resolved
+        // `type_def` may no longer be pointer-equal to the registry entry
+        // even though it is the same named type.
         let same = match (ty, registered) {
-            (TypeRef::Simple(a),  TypeRef::Simple(b))  => std::sync::Arc::ptr_eq(a, b),
-            (TypeRef::Complex(a), TypeRef::Complex(b)) => std::sync::Arc::ptr_eq(a, b),
+            (TypeRef::Simple(a),  TypeRef::Simple(b))  =>
+                std::sync::Arc::ptr_eq(a, b)
+                || (a.name.is_some() && a.name == b.name),
+            (TypeRef::Complex(a), TypeRef::Complex(b)) =>
+                std::sync::Arc::ptr_eq(a, b)
+                || (a.name.is_some() && a.name == b.name),
             _ => false,
         };
         same.then(|| (
@@ -793,6 +825,10 @@ impl<'a, I: DocIndexLike> XPathBindings for XsltBindings<'a, I> {
         use sup_xml_core::xsd::QName as XQName;
         let qn = XQName::new((!ns.is_empty()).then_some(ns), local);
         self.style.schemas.iter().any(|s| s.type_def(&qn).is_some())
+    }
+    #[cfg(feature = "xsd")]
+    fn schema_aware(&self) -> bool {
+        !schema_suppressed() && !self.style.schemas.is_empty()
     }
     #[cfg(feature = "xsd")]
     fn node_schema_type(&self, node_id: NodeId) -> Option<(String, String)> {
@@ -4253,7 +4289,7 @@ fn eval_instr(
     size:     usize,
 ) -> Result<()> {
     match instr {
-        Instr::LiteralElement { name, attributes, namespaces, use_attribute_sets, schema_type, body } => {
+        Instr::LiteralElement { name, attributes, namespaces, use_attribute_sets, schema_type, validate, body } => {
             // Apply xsl:namespace-alias before emit (XSLT 1.0
             // §7.1.1) — rewrites the stylesheet-side URI to the
             // result-side URI for both element and attribute
@@ -4262,9 +4298,14 @@ fn eval_instr(
             state.builder.open_element(element_name.clone());
             // XSLT 2.0 §11.2.1 — an `xsl:type=` on the LRE annotates the
             // constructed element with that schema type, so its typed
-            // value is recoverable by `data()` / `instance of`.  A
-            // `validation="strip"` scope discards type annotations.
-            if let Some(t) = schema_type {
+            // value is recoverable by `data()` / `instance of`.  Under
+            // `validation="strict"|"lax"` the type instead comes from the
+            // element's matching global declaration in an imported schema.
+            // A `validation="strip"` scope discards type annotations.
+            let type_anno = schema_type.clone().or_else(|| if *validate {
+                validated_element_type(state.style, &element_name)
+            } else { None });
+            if let Some(t) = &type_anno {
                 if !validation_strips_types() {
                     state.builder.set_current_element_type(t.clone());
                 }
@@ -5832,7 +5873,7 @@ fn eval_instr(
             }
             copy_value_into(state, &v, *copy_namespaces)?;
         }
-        Instr::Element { name, namespace, body, use_attribute_sets, in_scope_namespaces, schema_type, strip_validation } => {
+        Instr::Element { name, namespace, body, use_attribute_sets, in_scope_namespaces, schema_type, strip_validation, validate } => {
             let _strip = strip_validation.then(StripGuard::enter);
             let name_str = render_avt(state, name, ctx_node, pos, size)?;
             // XSLT spec §7.1.2 / §11.7 — the element name must be a
@@ -5910,7 +5951,12 @@ fn eval_instr(
             // constructed element with that schema type so its typed
             // value is recoverable by `data()` / `instance of` /
             // `element(*, T)` kind tests (mirrors the LRE `xsl:type=` arm).
-            if let Some(t) = schema_type {
+            // Under `validation="strict"|"lax"` the type instead comes from
+            // the element's matching global schema declaration.
+            let type_anno = schema_type.clone().or_else(|| if *validate {
+                validated_element_type(state.style, &q)
+            } else { None });
+            if let Some(t) = &type_anno {
                 if !validation_strips_types() {
                     state.builder.set_current_element_type(t.clone());
                 }
