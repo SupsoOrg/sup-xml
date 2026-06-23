@@ -1846,6 +1846,7 @@ impl<'s, 'x, E: XsdEventSource<'x>> Validator<'s, 'x, E> {
             if let Some(b) = BuiltinType::from_name(&qn.local) {
                 return Some(TypeRef::Simple(Arc::new(SimpleType {
                     name: Some(qn.local.clone()),
+                    base_name: None,
                     builtin: b,
                     facets: super::facets::FacetSet::default(),
                     whitespace: b.default_whitespace(),
@@ -4610,6 +4611,7 @@ mod tests {
         list_facets.push(Facet::Length(3));
         let three_ints = SimpleType {
             name: Some("ThreeInts".into()),
+            base_name: None,
             builtin: BuiltinType::String,
             facets: list_facets,
             whitespace: super::super::whitespace::WhitespaceMode::Collapse,

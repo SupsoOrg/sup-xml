@@ -799,6 +799,15 @@ pub trait XPathBindings {
     fn node_schema_type(&self, _node_id: NodeId) -> Option<(String, String)> {
         None
     }
+    /// Whether the schema type governing source node `node_id` is, or
+    /// derives (by restriction/extension) from, the named type
+    /// `(turi, tlocal)` — `element(N, T)` / `schema-element` type
+    /// substitutability.  `Some(true)` when the chain reaches the target,
+    /// `None` when it can't be decided (no annotation, or an un-walkable
+    /// simple type), so the caller falls back to a lenient name match.
+    fn node_derives_from(&self, _node_id: NodeId, _turi: &str, _tlocal: &str) -> Option<bool> {
+        None
+    }
     /// Schema-aware atomization (XPath 2.0 §2.5.2): the typed value of
     /// source node `node_id`, whose string value is `lexical`, when the
     /// node carries a simple-typed schema annotation.  Returns the typed
@@ -3269,8 +3278,23 @@ fn node_matches<I: DocIndexLike>(
         // it here requires accurate source/constructed-node typing the
         // validator doesn't yet supply uniformly; until it does, matching
         // stays name-based (the type narrows nothing).
-        NodeTest::SchemaType { inner, .. } =>
-            node_matches(node, inner, axis, idx, bindings, libxml2_compatible),
+        NodeTest::SchemaType { inner, type_name } => {
+            if !node_matches(node, inner, axis, idx, bindings, libxml2_compatible) {
+                return false;
+            }
+            let is_attr = matches!(idx.kind(node), XPathNodeKind::Attribute);
+            let (turi, tlocal) = match type_name.split_once(':') {
+                Some((p, l)) => match resolve_prefix_or_implicit(bindings, p) {
+                    Some(uri) => (uri, l.to_string()),
+                    None      => return true,
+                },
+                None => (String::new(), type_name.clone()),
+            };
+            // Narrow on a definite type mismatch (the node is annotated and
+            // neither it nor its base chain reach the target); an
+            // un-annotated node stays a lenient name match.
+            !matches!(node_type_match(bindings, node, is_attr, &turi, &tlocal), Some(false))
+        }
     }
 }
 
@@ -9477,7 +9501,12 @@ fn node_type_match(
     match bindings.node_schema_type(id) {
         Some((nuri, nlocal)) => Some(
             (nuri == turi && nlocal == tlocal)
-            || (turi == XSD && nuri == XSD && xsd_is_subtype_of(&nlocal, tlocal))),
+            || (turi == XSD && nuri == XSD && xsd_is_subtype_of(&nlocal, tlocal))
+            // User-defined type substitutability — accept when the
+            // derivation chain reaches the target; never weakens an
+            // existing exclusion (the instance-of path wants a definite
+            // `Some(false)` for a non-match).
+            || bindings.node_derives_from(id, turi, tlocal) == Some(true)),
         // An un-validated node has the default annotation: xs:untyped for
         // an element, xs:untypedAtomic for an attribute (XDM §2.4).  Those
         // forms (and their bases) match; any other specific type is

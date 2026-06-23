@@ -820,6 +820,7 @@ impl<'a, 'b, R: SchemaResolver> Parser<'a, 'b, R> {
         // User-defined type — placeholder, patched in the post-pass.
         TypeRef::Simple(Arc::new(SimpleType {
             name:       Some(Arc::from(format!("UNRESOLVED:{type_qn}"))),
+            base_name:  None,
             builtin:    BuiltinType::String,
             facets:     FacetSet::default(),
             whitespace: WhitespaceMode::Preserve,
@@ -839,6 +840,7 @@ impl<'a, 'b, R: SchemaResolver> Parser<'a, 'b, R> {
         }
         Arc::new(SimpleType {
             name:       Some(Arc::from(format!("UNRESOLVED:{type_qn}"))),
+            base_name:  None,
             builtin:    BuiltinType::String,
             facets:     FacetSet::default(),
             whitespace: WhitespaceMode::Preserve,
@@ -2333,6 +2335,7 @@ impl<'a, 'b, R: SchemaResolver> Parser<'a, 'b, R> {
         let mut whitespace = WhitespaceMode::Preserve;
         let mut variety: super::types::Variety = super::types::Variety::Atomic;
         let mut assertions: Vec<super::schema::Assertion> = Vec::new();
+        let mut base_name: Option<QName> = None;
         let mut seen_anno = false;
         let mut seen_other = false;
         let mut saw_derivation = false;
@@ -2362,6 +2365,9 @@ impl<'a, 'b, R: SchemaResolver> Parser<'a, 'b, R> {
                                 let (b, f, ws, v, a) = self.parse_simple_restriction(&child_attrs)?;
                                 builtin = b; facets = f; whitespace = ws; variety = v;
                                 assertions = a;
+                                // `parse_simple_restriction` records the resolved
+                                // `base=` so type-substitutability can walk it.
+                                base_name = self.last_simple_restriction_base.clone();
                             }
                             "list" => {
                                 saw_derivation = true;
@@ -2405,7 +2411,7 @@ impl<'a, 'b, R: SchemaResolver> Parser<'a, 'b, R> {
         }
 
         Ok(SimpleType {
-            name, builtin, facets, whitespace, variety, final_,
+            name, base_name, builtin, facets, whitespace, variety, final_,
             assertions,
         })
     }

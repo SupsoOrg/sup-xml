@@ -419,6 +419,13 @@ pub struct SimpleType {
     pub whitespace: WhitespaceMode,
     /// Optional name, for diagnostics.  None for anonymous local types.
     pub name:    Option<Arc<str>>,
+    /// Expanded name of the immediate base type this simple type was
+    /// derived from by `<xs:restriction base="…">`, when that base is a
+    /// named type.  Lets type-substitutability (`element(*, T)` /
+    /// `schema-attribute`) walk the derivation chain even though the
+    /// parser otherwise collapses restrictions down to their built-in.
+    /// `None` for built-ins, list/union types, and anonymous bases.
+    pub base_name: Option<super::schema::QName>,
     /// Atomic, list-of-T, or union-of-Ts.  Most simple types are
     /// [`Variety::Atomic`]; list/union widen the value space.
     pub variety: Variety,
@@ -455,6 +462,7 @@ impl SimpleType {
             facets:     FacetSet::default(),
             whitespace: b.default_whitespace(),
             name:       None,
+            base_name:  None,
             variety:    Variety::Atomic,
             final_:     super::schema::BlockSet::default(),
             assertions: Vec::new(),

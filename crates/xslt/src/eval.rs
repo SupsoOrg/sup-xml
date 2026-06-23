@@ -50,6 +50,11 @@ pub(crate) struct NodeType {
     /// named global type; `None` for anonymous (inline) types, which
     /// have no name to report through `node_schema_type`.
     pub name: Option<(String, String)>,
+    /// Expanded names of the named types this node's type derives from,
+    /// nearest base first (XSD §3.4.6).  Drives `element(*, T)` /
+    /// `schema-attribute` type substitutability without a schema lookup
+    /// at match time.
+    pub bases: Vec<(String, String)>,
 }
 
 #[cfg(feature = "xsd")]
@@ -91,6 +96,7 @@ fn build_source_types(
             if let std::collections::hash_map::Entry::Vacant(e) = by_node.entry(id) {
                 e.insert(NodeType {
                     name: registered_type_name(ty, schema),
+                    bases: type_base_chain(ty, schema),
                     type_ref: ty.clone(),
                 });
             }
@@ -106,11 +112,20 @@ fn build_source_types(
                         au.decl.name.local.as_ref() == alocal
                         && au.decl.name.namespace.as_deref().unwrap_or("") == auri)
                     else { continue };
+                    // A ref-form attribute use carries a placeholder
+                    // type_def (xs:string); the real type lives on the
+                    // referenced global declaration — mirror the validator
+                    // (`validate_attrs_against_type`) and prefer it so the
+                    // governing type (and its name) is recovered.
+                    let decl_type = schema.attribute(&au.decl.name)
+                        .map(|d| d.type_def.clone())
+                        .unwrap_or_else(|| au.decl.type_def.clone());
                     let tref = resolve_unresolved_type(
-                        sup_xml_core::xsd::TypeRef::Simple(au.decl.type_def.clone()), schema);
+                        sup_xml_core::xsd::TypeRef::Simple(decl_type), schema);
                     if let std::collections::hash_map::Entry::Vacant(e) = by_node.entry(aid) {
                         e.insert(NodeType {
-                            name: registered_type_name(&tref, schema),
+                            name: type_display_name(&tref, schema),
+                            bases: type_base_chain(&tref, schema),
                             type_ref: tref,
                         });
                     }
@@ -129,6 +144,57 @@ fn build_source_types(
 /// the parser's encoding) and swap in the registered named type so the
 /// attribute carries its actual governing type; non-placeholder types
 /// pass through unchanged.
+#[cfg(feature = "xsd")]
+/// The expanded name to report for a node's governing type: a registered
+/// global type's name, or — for a bare atomic built-in (no user name,
+/// not a restriction) — its XSD name, so built-in-typed nodes can be
+/// discriminated against user types (`element(*, T)`).
+#[cfg(feature = "xsd")]
+fn type_display_name(
+    tref: &sup_xml_core::xsd::TypeRef, schema: &sup_xml_core::xsd::Schema,
+) -> Option<(String, String)> {
+    use sup_xml_core::xsd::{types::Variety, QName, TypeRef};
+    registered_type_name(tref, schema).or_else(|| match tref {
+        TypeRef::Simple(st)
+            if st.name.is_none() && st.base_name.is_none()
+                && matches!(st.variety, Variety::Atomic) =>
+            Some((QName::XSD_NS.to_string(), st.builtin.name().to_string())),
+        _ => None,
+    })
+}
+
+/// The named types `tref` derives from (XSD §3.4.6), nearest base first.
+/// Walks the complex-type derivation chain and the simple-type
+/// `base_name` chain (the latter via the schema registry), skipping the
+/// type's own name and unresolved/anonymous links.
+#[cfg(feature = "xsd")]
+fn type_base_chain(
+    tref: &sup_xml_core::xsd::TypeRef, schema: &sup_xml_core::xsd::Schema,
+) -> Vec<(String, String)> {
+    use sup_xml_core::xsd::TypeRef;
+    let mut out = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    // Step to the immediate base of the current type, recording it.
+    let mut cur = Some(tref.clone());
+    while let Some(t) = cur.take() {
+        let base_qn = match &t {
+            TypeRef::Complex(ct) => ct.derivation.as_ref().and_then(|d| match &d.base {
+                TypeRef::Complex(b) => b.name.clone(),
+                TypeRef::Simple(b)  => b.name.as_deref()
+                    .filter(|n| !n.starts_with("UNRESOLVED:"))
+                    .map(|n| sup_xml_core::xsd::QName::new(None, n)),
+            }),
+            TypeRef::Simple(st) => st.base_name.clone(),
+        };
+        let Some(qn) = base_qn else { break };
+        let key = (qn.namespace.as_deref().unwrap_or("").to_string(), qn.local.to_string());
+        if !seen.insert(key.clone()) { break; }
+        out.push(key);
+        cur = schema.type_def(&qn).cloned();
+    }
+    out
+}
+
 #[cfg(feature = "xsd")]
 fn resolve_unresolved_type(
     tref: sup_xml_core::xsd::TypeRef, schema: &sup_xml_core::xsd::Schema,
@@ -710,6 +776,20 @@ impl<'a, I: DocIndexLike> XPathBindings for XsltBindings<'a, I> {
             return Some(t);
         }
         self.source_types?.by_node.get(&node_id)?.name.clone()
+    }
+    #[cfg(feature = "xsd")]
+    fn node_derives_from(&self, node_id: NodeId, turi: &str, tlocal: &str) -> Option<bool> {
+        // XSD §3.4.6 type substitutability: a node typed `D` satisfies
+        // `element(*, T)` when `T` is `D` or one of its (precomputed) base
+        // types.  A typed node with a known name is decidable either way;
+        // an un-annotated node stays `None` (lenient name match).
+        let nt = self.source_types?.by_node.get(&node_id)?;
+        if nt.name.is_none() && nt.bases.is_empty() {
+            return None;
+        }
+        let hit = nt.name.iter().chain(nt.bases.iter())
+            .any(|(nuri, nlocal)| nuri == turi && nlocal == tlocal);
+        Some(hit)
     }
     #[cfg(feature = "xsd")]
     fn node_typed_value(&self, node_id: NodeId, lexical: &str) -> Option<Value> {
