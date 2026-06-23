@@ -810,18 +810,59 @@ impl<'a, I: DocIndexLike> XPathBindings for XsltBindings<'a, I> {
         // target union.  Anything else falls through to the ordinary
         // sequence-type check, so this can fix but never regress.
         let (vns, vlocal) = value_type?;
+        if vns == target_ns && vlocal == target_local { return Some(true); }
         let qn = XQName::new((!target_ns.is_empty()).then_some(target_ns), target_local);
         for schema in &self.style.schemas {
             let Some(TypeRef::Simple(target_st)) = schema.type_def(&qn) else { continue };
-            if vns == target_ns && vlocal == target_local { return Some(true); }
             if let Variety::Union { members } = &target_st.variety {
                 let m = members.iter().any(|m| m.name.as_deref()
                     .map_or(false, |n| simple_type_name_is(n, vns, vlocal)));
                 if m { return Some(true); }
             }
-            return None;
+        }
+        // §3.4.6 type substitutability: a value whose declared type is
+        // derived (by restriction) from the target IS an instance of the
+        // target — walk the value type's named-base chain.
+        let vqn = XQName::new((!vns.is_empty()).then_some(vns), vlocal);
+        for schema in &self.style.schemas {
+            if let Some(vtref) = schema.type_def(&vqn) {
+                if type_base_chain(vtref, schema).iter()
+                    .any(|(bn, bl)| bn == target_ns && bl == target_local)
+                {
+                    return Some(true);
+                }
+            }
         }
         None
+    }
+    #[cfg(feature = "xsd")]
+    fn cast_to_user_type(&self, ns_uri: &str, local: &str, value: &str)
+        -> Option<std::result::Result<Value, sup_xml_core::error::XmlError>>
+    {
+        use sup_xml_core::xsd::{QName as XQName, TypeRef};
+        if schema_suppressed() { return None; }
+        let qn = XQName::new((!ns_uri.is_empty()).then_some(ns_uri), local);
+        let st = self.style.schemas.iter().find_map(|s| match s.type_def(&qn) {
+            Some(TypeRef::Simple(st)) => Some(st.clone()),
+            _ => None,
+        })?;
+        // `cast as` validates the lexical against the type and tags the
+        // result with it (so `instance of my:type` is then true); an
+        // invalid value is a dynamic error (FORG0001).
+        Some(match st.validate(value) {
+            Ok(xv) => {
+                let mut v = xsd_value_to_xpath(xv, value, Some((ns_uri, local)));
+                if let Value::Typed(t) = &mut v {
+                    t.kind = st.name.as_deref()
+                        .and_then(sup_xml_core::xpath::eval::atomic_kind_static)
+                        .unwrap_or_else(|| st.builtin.name());
+                }
+                Ok(v)
+            }
+            Err(e) => Err(sup_xml_core::xpath::eval::xpath_err(
+                format!("cast as {local} failed: {}", e.message))
+                .with_xpath_code("FORG0001")),
+        })
     }
     #[cfg(feature = "xsd")]
     fn schema_type_exists(&self, ns: &str, local: &str) -> bool {

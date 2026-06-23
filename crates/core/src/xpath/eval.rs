@@ -1633,6 +1633,21 @@ pub fn eval_expr<I: DocIndexLike>(expr: &Expr, ctx: &EvalCtx<'_>, idx: &I) -> Re
                 }
             }
             let v = eval_expr(inner, ctx, idx)?;
+            // Schema-aware: `cast as my:userType` validates against the
+            // imported simple type and tags the result with that type, so
+            // a following `instance of my:userType` recognises it.
+            if let crate::xpath::ast::ItemType::Atomic(name) = &st.item {
+                if let Some((prefix, local)) = name.split_once(':') {
+                    if sequence_len(&v) == 1 {
+                        if let Some(uri) = resolve_prefix_or_implicit(ctx.bindings, prefix) {
+                            let s = value_to_string(&v, idx);
+                            if let Some(r) = ctx.bindings.cast_to_user_type(&uri, local, &s) {
+                                return r;
+                            }
+                        }
+                    }
+                }
+            }
             cast_value_to_atomic(&v, st, idx)
         }
         Expr::TreatAs(inner, st) => {
