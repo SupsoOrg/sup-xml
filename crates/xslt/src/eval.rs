@@ -5297,9 +5297,15 @@ fn eval_instr(
             // (XSLT 3.0 §16.4.3): suppress an empty wrapper such as an
             // element with no attributes/children, or a zero-length
             // text node.
+            // XSLT 3.0 §16.4.3 — omit *each* node that would otherwise be
+            // empty (an element/document with no attributes and no
+            // children, or a zero-length text node) individually, keeping
+            // the populated ones, rather than suppressing the whole result.
             let nodes = build_rtf_nodes_populated(state, body, ctx_node, pos, size)?;
-            if nodes.iter().any(result_node_is_significant) {
-                for n in nodes { state.builder.push_built_node(n); }
+            for n in nodes {
+                if result_node_is_significant(&n) {
+                    state.builder.push_built_node(n);
+                }
             }
         }
         Instr::Fork { body } => {
