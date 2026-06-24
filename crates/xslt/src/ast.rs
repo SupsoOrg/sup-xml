@@ -1069,6 +1069,11 @@ pub struct OutputSpec {
     /// (text content and attribute values) is normalized to that form;
     /// `none` (the default) leaves it unchanged.
     pub normalization_form:     Option<String>,
+    /// XSLT 3.0 §27.1: `item-separator` — the string inserted between
+    /// adjacent items of the sequence being serialized when no result
+    /// tree is built (`build-tree="no"`).  `None` leaves the default
+    /// (a single space between adjacent atomic values, per §5.7.2).
+    pub item_separator:         Option<String>,
 }
 
 /// `xsl:output standalone="yes|no|omit"` (XSLT 2.0 §20).  Both

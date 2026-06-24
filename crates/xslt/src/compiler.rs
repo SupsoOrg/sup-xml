@@ -4891,6 +4891,10 @@ fn compile_output(node: &Node, allow_avt: bool) -> Result<OutputSpec, XsltError>
             }
             out.normalization_form = Some(v.to_string());
         }
+        // XSLT 3.0 §27.1 — `item-separator` for build-tree="no" output.
+        if let Some(v) = read_attribute(node, "item-separator") {
+            out.item_separator = Some(v.to_string());
+        }
         // The omit-xml-declaration / standalone / undeclare-prefixes
         // consistency rules below govern the XML serialization method
         // (and XHTML); for the html / text methods these parameters are

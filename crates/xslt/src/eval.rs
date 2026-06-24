@@ -3082,6 +3082,9 @@ pub fn apply_stylesheet_full_with_params_and_initial(
         builder:    {
             let mut b = ResultBuilder::new();
             b.is_principal_document = true;
+            // XSLT 3.0 §27.1 — a configured item-separator replaces the
+            // §5.7.2 space between top-level atomic values (build-tree="no").
+            b.item_separator = merge_principal_output(style).item_separator;
             b
         },
         principal_buf: None,
@@ -4134,6 +4137,7 @@ fn overlay_output_into(base: &mut crate::ast::OutputSpec, ov: &crate::ast::Outpu
     if ov.html_version.is_some() { base.html_version = ov.html_version; }
     if ov.version.is_some() { base.version = ov.version.clone(); }
     if ov.normalization_form.is_some() { base.normalization_form = ov.normalization_form.clone(); }
+    if ov.item_separator.is_some() { base.item_separator = ov.item_separator.clone(); }
     // cdata-section-elements accumulate across xsl:output and
     // xsl:result-document (XSLT 2.0 §20) — union, don't replace.
     base.cdata_section_elements.extend(ov.cdata_section_elements.iter().cloned());

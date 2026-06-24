@@ -141,6 +141,11 @@ pub struct ResultBuilder {
     /// applies to the top level (no element open) of those bodies;
     /// nested element content follows normal §5.7.2 rules.
     pub drop_top_level_empty_atomics: bool,
+    /// XSLT 3.0 §27.1 `item-separator`: when set, replaces the default
+    /// single-space §5.7.2 separator between adjacent atomic values at the
+    /// *top level* of the result (the `build-tree="no"` sequence).  Nested
+    /// element content keeps the §5.7.2 space.
+    pub item_separator: Option<String>,
     /// Parallel to `stack`: `true` for an open element that was
     /// constructed with `inherit-namespaces="no"` (XSLT 3.0 §11.7.2).
     /// Its directly-constructed child elements must not inherit its
@@ -589,7 +594,14 @@ impl ResultBuilder {
         // trailing empty value contributes a trailing space.  `push_text`
         // clears `last_was_atomic`, so it is restored below.
         if self.last_was_atomic {
-            self.push_text(format!(" {content}"), false);
+            // The §5.7.2 separator is a single space, unless an
+            // item-separator is configured and this run is at the top
+            // level (no element open) — the build-tree="no" sequence.
+            let sep = match &self.item_separator {
+                Some(s) if self.stack.is_empty() => s.as_str(),
+                _ => " ",
+            };
+            self.push_text(format!("{sep}{content}"), false);
         } else {
             self.push_text(content, false);
         }
