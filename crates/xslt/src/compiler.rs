@@ -533,6 +533,19 @@ fn rewrite_base_uri_calls(expr: &mut Expr, base: &str) {
                 // Fall through to recurse into the (newly appended)
                 // arg in case it itself uses static-base-uri (rare).
             }
+            // fn:doc / fn:document with a single string-literal URI —
+            // resolve it against the call site's xml:base so a relative
+            // URI loads relative to the element's base (XPath 2.0 §15.5),
+            // not the stylesheet module's base.
+            if matches!(local, "doc" | "document") && args.len() == 1 {
+                if let Expr::Literal(s) = &args[0] {
+                    if !s.is_empty() {
+                        let resolved =
+                            sup_xml_core::xpath::eval::resolve_uri_against(base, s);
+                        args[0] = Expr::Literal(resolved);
+                    }
+                }
+            }
             for a in args { rewrite_base_uri_calls(a, base); }
         }
         Expr::Or(a, b) | Expr::And(a, b)
