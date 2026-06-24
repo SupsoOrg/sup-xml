@@ -1650,14 +1650,17 @@ pub fn eval_expr<I: DocIndexLike>(expr: &Expr, ctx: &EvalCtx<'_>, idx: &I) -> Re
             // and xs:anyAtomicType are XPST0080 (anyAtomicType) or
             // XPST0051 (the non-atomic schema types).
             if let crate::xpath::ast::ItemType::Atomic(name) = &st.item {
-                match name.as_str() {
+                // The name may be prefixed (`xs:anyType`) or in Clark form
+                // (`{uri}anyType`); match on the local part.
+                let local = name.rsplit(['}', ':']).next().unwrap_or(name);
+                match local {
                     "anyType" | "anySimpleType" | "untyped" =>
                         return Err(xpath_err(format!(
-                            "cast as: target type xs:{name} is not an atomic \
+                            "cast as: target type {name} is not an atomic \
                              type (XPST0051)"))),
                     "anyAtomicType" | "NOTATION" =>
                         return Err(xpath_err(format!(
-                            "cast as: xs:{name} is not a permitted target \
+                            "cast as: {name} is not a permitted target \
                              type (XPST0080)"))),
                     _ => {}
                 }
