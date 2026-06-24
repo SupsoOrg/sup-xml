@@ -8668,6 +8668,20 @@ fn parse_name_test_token(context_node: &Node, tok: &str) -> Result<QName, XsltEr
             uri:    String::new(),
         });
     }
+    // XPath 3.0 URIQualifiedName wildcard `Q{uri}*` — any local name in
+    // `uri`.  Encoded like `prefix:*` (local "*" with the resolved URI)
+    // so the name-test matcher treats it as a namespaced wildcard.
+    if let Some(rest) = tok.strip_prefix("Q{") {
+        if let Some((uri, local)) = rest.split_once('}') {
+            if local == "*" {
+                return Ok(QName {
+                    prefix: Some("*".into()),
+                    local:  "*".into(),
+                    uri:    uri.to_string(),
+                });
+            }
+        }
+    }
     parse_qname_on(context_node, tok)
 }
 

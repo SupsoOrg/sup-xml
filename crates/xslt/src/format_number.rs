@@ -385,9 +385,12 @@ fn format_subpicture(abs: f64, p: &SubPicture, df: &DecimalFormat) -> String {
     let factor = 10f64.powi(p.max_fraction as i32);
     let rounded = (scaled * factor).round() / factor;
 
-    // Split int / frac as strings to preserve trailing zeros.
-    let mut int_part: u64 = rounded.trunc() as u64;
-    let frac_value = rounded - int_part as f64;
+    // Split int / frac as strings to preserve trailing zeros.  The
+    // integer part is taken straight from the f64 (see int_digits below)
+    // rather than through u64, which saturates at u64::MAX for values
+    // >= 2^64.
+    let int_trunc = rounded.trunc();
+    let frac_value = rounded - int_trunc;
     let frac_str = if p.max_fraction == 0 {
         String::new()
     } else {
@@ -410,16 +413,17 @@ fn format_subpicture(abs: f64, p: &SubPicture, df: &DecimalFormat) -> String {
         s
     };
 
-    // Build integer string with grouping.
-    let mut int_digits: Vec<char> = if int_part == 0 {
+    // Build integer string with grouping.  Render the digit run from the
+    // f64's shortest round-trip form (Rust's default float Display — no
+    // scientific notation, no spurious low-order digits), so large
+    // magnitudes keep their `1000…000` form instead of collapsing to
+    // u64::MAX (the old `as u64` cast) or exposing binary noise (`{:.0}`).
+    let int_string = format!("{int_trunc}");
+    let int_string = int_string.split('.').next().unwrap_or("0");
+    let mut int_digits: Vec<char> = if int_string == "0" {
         vec![df.zero_digit]
     } else {
-        let mut v = Vec::new();
-        while int_part > 0 {
-            v.push(char::from_digit((int_part % 10) as u32, 10).unwrap());
-            int_part /= 10;
-        }
-        v.reverse();
+        let mut v: Vec<char> = int_string.chars().filter(|c| c.is_ascii_digit()).collect();
         // Map ASCII digits to df.zero_digit-based digits if non-ASCII.
         if df.zero_digit != '0' {
             let zero_code = df.zero_digit as u32;
