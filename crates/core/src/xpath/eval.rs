@@ -9740,11 +9740,13 @@ fn instance_of_typed_node_test<I: DocIndexLike>(
                         Some(false) => definite_fail = true,
                         // Undecidable: when the source's type annotations
                         // were stripped every node is xs:untyped, so a
-                        // user-defined type target is definitely not
-                        // satisfied; otherwise (typing merely incomplete)
-                        // stay lenient and defer to the name match.
-                        None if turi != XSD && bindings.source_annotations_stripped()
-                            => definite_fail = true,
+                        // specific type target (xs:anyURI, my:T, …) is
+                        // definitely not satisfied — node_type_match already
+                        // returned Some(true) for the xs:untyped/anyType
+                        // targets an untyped node does match.  Otherwise
+                        // (typing merely incomplete) stay lenient.
+                        None if bindings.source_annotations_stripped()
+                            => { let _ = XSD; definite_fail = true; },
                         None        => undecidable = true,
                     }
                 }
