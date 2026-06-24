@@ -13,6 +13,7 @@ pub mod xinclude;
 pub mod charsets;
 pub mod encoding;
 pub mod entity_resolver;
+mod escape;
 pub mod error;
 pub mod options;
 pub mod output;
