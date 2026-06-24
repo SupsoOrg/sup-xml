@@ -1452,6 +1452,12 @@ fn has_exponent_literal(s: &str) -> bool {
 /// from the file's real package name (which is what `xsl:use-package`
 /// resolves against), so the library is keyed by both.
 fn package_internal_name(text: &str) -> Option<String> {
+    package_root_attr(text, "name")
+}
+
+/// Read an attribute off the `xsl:package` root element (e.g. `name` or
+/// `package-version`).
+fn package_root_attr(text: &str, attr: &str) -> Option<String> {
     let mut reader = XmlReader::from_str(text);
     while let Ok(ev) = reader.next() {
         match ev {
@@ -1460,7 +1466,7 @@ fn package_internal_name(text: &str) -> Option<String> {
                 let local = n.rsplit(':').next().unwrap_or(&n).to_string();
                 if local == "package" {
                     for a in tag.attrs().flatten() {
-                        if a.name() == "name" { return Some(a.value().to_string()); }
+                        if a.name() == attr { return Some(a.value().to_string()); }
                     }
                     return None;
                 }
@@ -1482,11 +1488,24 @@ fn build_package_library(
         let path = ts_dir.join(file);
         if let Ok(text) = std::fs::read_to_string(&path) {
             let base = Some(path.to_string_lossy().to_string());
+            // Register each package under a version-qualified key so
+            // several versions of one name coexist, letting
+            // `xsl:use-package package-version="…"` select among them.
+            // Keep a bare-name entry too as the version-agnostic default.
+            // A package with no package-version defaults to "1" (§3.5).
+            let version = package_root_attr(&text, "package-version")
+                .or_else(|| Some("1".to_string()));
             if let Some(internal) = package_internal_name(&text) {
-                packages.insert(internal, (text.clone(), base.clone()));
+                packages.insert(
+                    Stylesheet::package_library_key(&internal, version.as_deref()),
+                    (text.clone(), base.clone()));
+                packages.entry(internal).or_insert_with(|| (text.clone(), base.clone()));
             }
             if !name.is_empty() {
-                packages.insert(name.clone(), (text, base));
+                packages.insert(
+                    Stylesheet::package_library_key(&name, version.as_deref()),
+                    (text.clone(), base.clone()));
+                packages.entry(name.clone()).or_insert((text, base));
             }
         }
     }

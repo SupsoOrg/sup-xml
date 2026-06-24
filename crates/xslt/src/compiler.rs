@@ -186,8 +186,140 @@ fn body_of_one(node: &Node, instr: Instr) -> Body {
     body
 }
 
-fn get_package_source(name: &str) -> Option<(String, Option<String>)> {
-    PACKAGE_SOURCES.with(|m| m.borrow().get(name).cloned())
+/// Separator embedded in a `PACKAGE_SOURCES` key between a package name
+/// and a specific declared version, so several versions of one package
+/// can coexist in the flat map without changing the public API type.
+/// A name → single-source entry (no version suffix) is the legacy form.
+pub(crate) const PKG_VER_SEP: char = '\u{1}';
+
+/// Resolve `xsl:use-package`'s package name + optional `package-version`
+/// requirement (XSLT 3.0 §3.5.2) to a source.  Among the registered
+/// versions of `name`, pick the highest one satisfying `requirement`
+/// (or the highest available when no requirement is stated).
+fn get_package_source(name: &str, requirement: Option<&str>)
+    -> Option<(String, Option<String>)>
+{
+    PACKAGE_SOURCES.with(|m| {
+        let m = m.borrow();
+        // Legacy: a bare `name` entry with no version suffix.
+        let prefix = format!("{name}{PKG_VER_SEP}");
+        let mut best: Option<(&str, &(String, Option<String>))> = None;
+        for (k, v) in m.iter() {
+            let ver = if k == name {
+                ""
+            } else if let Some(rest) = k.strip_prefix(&prefix) {
+                rest
+            } else {
+                continue;
+            };
+            if let Some(req) = requirement {
+                if !pkg_version_satisfies(ver, req) { continue; }
+            }
+            best = match best {
+                None => Some((ver, v)),
+                // A real (non-empty) version always beats the bare-name
+                // fallback (version ""); otherwise the higher version wins.
+                Some((bv, _)) if !bv.is_empty() && ver.is_empty() => best,
+                Some((bv, _)) if bv.is_empty() && !ver.is_empty() => Some((ver, v)),
+                Some((bv, _)) if cmp_pkg_version(bv, ver).is_ge() => best,
+                _ => Some((ver, v)),
+            };
+        }
+        best.map(|(_, v)| v.clone())
+    })
+}
+
+/// Compare two package versions (XSLT 3.0 §3.5.2.2): release components
+/// numerically (shorter padded with zeros), and a version carrying a
+/// pre-release suffix (`-…`) sorts *below* the same release without one.
+fn cmp_pkg_version(a: &str, b: &str) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+    let split = |s: &str| -> (Vec<String>, Option<Vec<String>>) {
+        match s.split_once('-') {
+            Some((rel, pre)) => (
+                rel.split('.').map(str::to_string).collect(),
+                Some(pre.split('.').map(str::to_string).collect()),
+            ),
+            None => (s.split('.').map(str::to_string).collect(), None),
+        }
+    };
+    let cmp_components = |x: &[String], y: &[String]| -> Ordering {
+        for i in 0..x.len().max(y.len()) {
+            let xi = x.get(i).map(String::as_str).unwrap_or("0");
+            let yi = y.get(i).map(String::as_str).unwrap_or("0");
+            let ord = match (xi.parse::<i128>(), yi.parse::<i128>()) {
+                (Ok(a), Ok(b)) => a.cmp(&b),
+                // Numeric identifiers rank below alphanumeric ones.
+                (Ok(_), Err(_)) => Ordering::Less,
+                (Err(_), Ok(_)) => Ordering::Greater,
+                (Err(_), Err(_)) => xi.cmp(yi),
+            };
+            if ord != Ordering::Equal { return ord; }
+        }
+        Ordering::Equal
+    };
+    let (ar, ap) = split(a);
+    let (br, bp) = split(b);
+    match cmp_components(&ar, &br) {
+        Ordering::Equal => match (ap, bp) {
+            (None, None) => Ordering::Equal,
+            (None, Some(_)) => Ordering::Greater, // release > pre-release
+            (Some(_), None) => Ordering::Less,
+            (Some(x), Some(y)) => cmp_components(&x, &y),
+        },
+        ord => ord,
+    }
+}
+
+/// Whether a declared version satisfies a `package-version` requirement
+/// (XSLT 3.0 §3.5.2.2): a comma-separated list of matches, each a single
+/// version-template (with `*` wildcards), an open range `A+` / `to B`, or
+/// a closed range `A to B`.  Any one match satisfying makes the whole
+/// requirement satisfied.
+fn pkg_version_satisfies(declared: &str, requirement: &str) -> bool {
+    requirement.split(',').map(str::trim).any(|m| {
+        if let Some(b) = m.strip_prefix("to ") {
+            cmp_pkg_version(declared, b.trim()).is_le()
+        } else if let Some(a) = m.strip_suffix('+') {
+            cmp_pkg_version(declared, a.trim()).is_ge()
+        } else if let Some((a, b)) = m.split_once(" to ") {
+            cmp_pkg_version(declared, a.trim()).is_ge()
+                && cmp_pkg_version(declared, b.trim()).is_le()
+        } else {
+            pkg_version_template_matches(declared, m)
+        }
+    })
+}
+
+/// Match a declared version against a single version-template
+/// (XSLT 3.0 §3.5.2.2).  Release components must agree where the template
+/// isn't `*`; a template with fewer components leaves the rest open
+/// (`2.0` matches `2.0.0`).  A template without a pre-release part matches
+/// regardless of the declared pre-release; a template *with* one requires
+/// the declared pre-release to agree (so `2.0.0-alpha` is exact).
+fn pkg_version_template_matches(declared: &str, template: &str) -> bool {
+    fn split(s: &str) -> (Vec<&str>, Option<Vec<&str>>) {
+        match s.split_once('-') {
+            Some((rel, pre)) => (rel.split('.').collect(), Some(pre.split('.').collect())),
+            None => (s.split('.').collect(), None),
+        }
+    }
+    let (drel, dpre) = split(declared);
+    let (trel, tpre) = split(template);
+    for (i, tc) in trel.iter().enumerate() {
+        if *tc == "*" { continue; }
+        // A declared version with fewer components is zero-padded, so the
+        // default version "1" satisfies the template "1.0.0".
+        if drel.get(i).copied().unwrap_or("0") != *tc { return false; }
+    }
+    match tpre {
+        None => true,
+        Some(tp) => match dpre {
+            None => false,
+            Some(dp) => tp.iter().enumerate().all(|(i, tc)|
+                *tc == "*" || dp.get(i) == Some(tc)),
+        },
+    }
 }
 
 /// Compile `text` with a package library available for
@@ -3161,7 +3293,7 @@ fn compile_with_imports_inner(
     // at a lower precedence (like an import).
     for up in &local.use_packages {
         merge_package_components(&mut acc, &up.overrides, this_precedence);
-        match get_package_source(&up.name) {
+        match get_package_source(&up.name, up.version.as_deref()) {
             Some((src, pkg_base)) => {
                 let before_fns = acc.functions.len();
                 let before_vars = acc.global_variables.len();

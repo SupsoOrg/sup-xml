@@ -163,6 +163,18 @@ impl Stylesheet {
         Self::finalize(ast)
     }
 
+    /// Build the key under which a specific declared version of a package
+    /// is stored in the `compile_str_with_packages` library, so several
+    /// versions of one package name can coexist and `xsl:use-package
+    /// package-version="…"` (XSLT 3.0 §3.5.2) can select among them.
+    /// Pass `None` for the legacy single-version (version-agnostic) form.
+    pub fn package_library_key(name: &str, version: Option<&str>) -> String {
+        match version {
+            Some(v) => format!("{name}{}{v}", compiler::PKG_VER_SEP),
+            None    => name.to_string(),
+        }
+    }
+
     /// Shared post-compilation cleanup + validation for the
     /// `compile_str_with_*` entry points.
     fn finalize(mut ast: ast::StylesheetAst) -> Result<Self, XsltError> {
