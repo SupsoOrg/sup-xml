@@ -2367,9 +2367,16 @@ fn compile_top_level(node: &Node, ast: &mut StylesheetAst, pos: u32) -> Result<(
         // tests like error-0010c (apply-imports), error-0010au
         // (xsl:text), error-0010al (xsl:value-of), etc.
         name if INSTRUCTION_NAMES_TOP_LEVEL_FORBIDDEN.contains(&name) => {
-            return Err(XsltError::InvalidStylesheet(format!(
-                "xsl:{name} is not allowed at top level (XTSE0010)"
-            )));
+            // In forwards-compatible mode (the stylesheet root or this
+            // element declares a higher version) a known instruction in
+            // the wrong context is ignored rather than XTSE0010.
+            let self_fc = read_attribute(node, "version")
+                .is_some_and(enables_forwards_compat);
+            if !enables_forwards_compat(ast.version.as_str()) && !self_fc {
+                return Err(XsltError::InvalidStylesheet(format!(
+                    "xsl:{name} is not allowed at top level (XTSE0010)"
+                )));
+            }
         }
         // `xsl:stylesheet` / `xsl:transform` may only appear as the
         // root of a stylesheet, never as a nested top-level element
@@ -2398,8 +2405,14 @@ fn compile_top_level(node: &Node, ast: &mut StylesheetAst, pos: u32) -> Result<(
         // versions, where unknown 3.0+ elements are permissible).
         other => {
             let v = ast.version.as_str();
-            let in_forwards_compat = enables_forwards_compat(v);
-            if !in_forwards_compat {
+            // XSLT 3.0 §3.7/§3.9 — an unrecognized XSLT top-level element is
+            // ignored (not XTSE0010) when forwards-compatible processing is
+            // in effect, which a `version` attribute on the element itself
+            // (effective version > ours) opens just as the stylesheet-root
+            // version does.
+            let self_fc = read_attribute(node, "version")
+                .is_some_and(enables_forwards_compat);
+            if !enables_forwards_compat(v) && !self_fc {
                 return Err(XsltError::InvalidStylesheet(format!(
                     "unknown XSLT top-level element xsl:{other} \
                      (XTSE0010 — declared version {v} is not in \
