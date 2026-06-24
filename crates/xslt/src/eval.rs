@@ -4488,14 +4488,28 @@ fn eval_instr(
         }
         Instr::ApplyTemplates { select, mode, sort, with_params, mode_current } => {
             let nodes = if let Some(sel) = select {
+                // XSLT 2.0 §5.5 / XTTE0520 — the `select` of
+                // xsl:apply-templates must select nodes; an atomic item
+                // (e.g. `select="3"` or `concat(...)`) is a type error.
                 match state.xpath_eval(sel, ctx_node, pos, size)? {
                     Value::NodeSet(ns) => ns,
-                    Value::String(s) if s.is_empty() => Vec::new(),
-                    // XPath 2.0 atomic sequence — surface each item
-                    // (including integer ranges like `1 to 10`) as a
-                    // synthetic text node so the template dispatch sees a
-                    // flat node sequence.  Real nodes pass through.
-                    other => atomic_select_to_nodes(state, other)?,
+                    Value::ForeignNodeSet(_) => Vec::new(),
+                    Value::Sequence(items) => {
+                        let mut out: Vec<NodeId> = Vec::new();
+                        for it in items {
+                            match it {
+                                Value::NodeSet(ns) => out.extend(ns),
+                                Value::ForeignNodeSet(_) => {}
+                                _ => return Err(XsltError::dynamic("XTTE0520",
+                                    "xsl:apply-templates select= must select \
+                                     nodes, not atomic values (XTTE0520)")),
+                            }
+                        }
+                        out
+                    }
+                    _ => return Err(XsltError::dynamic("XTTE0520",
+                        "xsl:apply-templates select= must select nodes, not \
+                         atomic values (XTTE0520)")),
                 }
             } else {
                 // XSLT 2.0 §6.2 / XTTE0510 — `xsl:apply-templates` with
