@@ -1009,7 +1009,12 @@ impl<'a, I: DocIndexLike> XPathBindings for XsltBindings<'a, I> {
                             b.xslt_context_node = node;
                             let ctx = EvalCtx { context_node: node, pos: 1, size: 1,
                                                 bindings: &b, static_ctx: &sc };
-                            eval_expr(expr, &ctx, self.idx)
+                            // The key's match/use focus is the indexed node —
+                            // clear any enclosing atomic context item (e.g. a
+                            // lazy build triggered from inside an atomic
+                            // xsl:for-each) so `.` is the node, not that atomic.
+                            sup_xml_core::xpath::eval::with_atomic_context_item(
+                                None, || eval_expr(expr, &ctx, self.idx))
                         });
                         if let Err(e) = built {
                             return Some(Err(e));
