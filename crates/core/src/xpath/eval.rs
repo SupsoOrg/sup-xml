@@ -11265,6 +11265,14 @@ fn node_path_string<I: DocIndexLike>(node: NodeId, idx: &I) -> String {
     let mut cur = node;
     loop {
         let parent = idx.parent(cur);
+        // A tree whose root is not a document node: the root node itself
+        // is written as the fn:path placeholder `Q{…fn…}root()`, which
+        // stands in for the root's own step (it is not appended to it).
+        if parent.is_none() && !matches!(idx.kind(cur), XPathNodeKind::Document) {
+            segments.push(
+                "Q{http://www.w3.org/2005/xpath-functions}root()".to_string());
+            return segments.into_iter().rev().collect::<Vec<_>>().join("/");
+        }
         let segment = match idx.kind(cur) {
             XPathNodeKind::Element => {
                 let local = idx.local_name(cur).to_string();
@@ -11319,13 +11327,9 @@ fn node_path_string<I: DocIndexLike>(node: NodeId, idx: &I) -> String {
         match parent {
             Some(p) if matches!(idx.kind(p), XPathNodeKind::Document) => break,
             Some(p) => { cur = p; }
-            None    => {
-                // Orphan subtree — anchor at the spec's `Q{}root()`
-                // placeholder so the path is syntactically still
-                // an absolute XPath.
-                segments.push("Q{}root()".to_string());
-                return segments.into_iter().rev().collect::<Vec<_>>().join("/");
-            }
+            // A node with no parent is handled by the root() check at the
+            // top of the loop, so this arm is unreachable.
+            None    => break,
         }
     }
     // Prepend "" so the join produces a leading "/".

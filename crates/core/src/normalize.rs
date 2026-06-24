@@ -59,3 +59,11 @@ pub fn normalize(s: &str, form: NormForm) -> String {
 pub fn nfc(s: &str) -> String {
     s.nfc().collect()
 }
+
+/// True when `c` is a Unicode combining mark (nonzero canonical
+/// combining class / general category Mark).  Used by the serializer's
+/// `normalization-form="fully-normalized"` rule: a serialized result
+/// that begins with a combining mark is a serialization error (SERE0008).
+pub fn is_combining_mark(c: char) -> bool {
+    unicode_normalization::char::is_combining_mark(c)
+}

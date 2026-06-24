@@ -109,6 +109,14 @@ impl ResultTree {
             None => children,
         };
 
+        // Serialization-spec content constraints that the chosen method
+        // can't represent (all dynamic serialization errors):
+        //   * fully-normalized + a leading combining mark → SERE0008
+        //   * html method + a C1 control char (#x7F–#x9F) in text/attr
+        //     content → SERE0014
+        //   * html method + ">" inside a processing instruction → SERE0015
+        check_serialization_constraints(children, method, &self.output)?;
+
         let mut out = match method {
             "html"  => serialize_html(children, &self.output, &self.character_map, indent, escape_uri),
             // `method="json"` (XSLT 3.0 §26.2): the JSON string is built
@@ -138,6 +146,88 @@ impl ResultTree {
         w.write_all(s.as_bytes())
             .map_err(|e| XsltError::InvalidStylesheet(format!("write failed: {e}")))
     }
+}
+
+/// Enforce the Serialization-spec content constraints a chosen method
+/// cannot represent (all dynamic serialization errors).
+fn check_serialization_constraints(
+    children: &[ResultNode],
+    method: &str,
+    output: &OutputSpec,
+) -> Result<(), XsltError> {
+    // SERE0008 — a result that begins with a combining mark cannot be
+    // represented under normalization-form="fully-normalized".
+    if output.normalization_form.as_deref()
+        .is_some_and(|f| f.trim().eq_ignore_ascii_case("fully-normalized"))
+    {
+        if let Some(c) = first_character_data_char(children) {
+            if sup_xml_core::normalize::is_combining_mark(c) {
+                return Err(XsltError::InvalidStylesheet(
+                    "serialization: result begins with a combining character under \
+                     normalization-form='fully-normalized' (SERE0008)".into()));
+            }
+        }
+    }
+    // SERE0014 / SERE0015 apply to the html output method, but only for
+    // HTML versions before 5.0 — HTML5 permits C1 control characters and
+    // `>` in a processing instruction (output-0195b).
+    let html5 = output.version.as_deref().is_some_and(|v|
+            matches!(v.trim(), "5" | "5.0"))
+        || output.html_version.is_some_and(|v| v >= 5.0);
+    if method == "html" && !html5 {
+        html_content_error(children)?;
+    }
+    Ok(())
+}
+
+/// First character of character data in document order, or `None` when
+/// the result has no text content.
+fn first_character_data_char(nodes: &[ResultNode]) -> Option<char> {
+    for n in nodes {
+        match n {
+            ResultNode::Text { content, .. } =>
+                if let Some(c) = content.chars().next() { return Some(c); },
+            ResultNode::Element { children, .. } =>
+                if let Some(c) = first_character_data_char(children) { return Some(c); },
+            _ => {}
+        }
+    }
+    None
+}
+
+/// html-method content errors: a #x7F–#x9F control character in text or
+/// attribute content (SERE0014), or a `>` inside a processing
+/// instruction (SERE0015).
+fn html_content_error(nodes: &[ResultNode]) -> Result<(), XsltError> {
+    let is_c1 = |c: char| matches!(c as u32, 0x7F..=0x9F);
+    for n in nodes {
+        match n {
+            ResultNode::Text { content, .. } => {
+                if content.chars().any(is_c1) {
+                    return Err(XsltError::InvalidStylesheet(
+                        "serialization: the html output method cannot represent a \
+                         #x7F–#x9F control character in content (SERE0014)".into()));
+                }
+            }
+            ResultNode::Element { attributes, children, .. } => {
+                if attributes.iter().any(|(_, v)| v.chars().any(is_c1)) {
+                    return Err(XsltError::InvalidStylesheet(
+                        "serialization: the html output method cannot represent a \
+                         #x7F–#x9F control character in content (SERE0014)".into()));
+                }
+                html_content_error(children)?;
+            }
+            ResultNode::ProcessingInstruction { data, .. } => {
+                if data.contains('>') {
+                    return Err(XsltError::InvalidStylesheet(
+                        "serialization: the html output method cannot represent '>' \
+                         inside a processing instruction (SERE0015)".into()));
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(())
 }
 
 // ── XML serialiser ────────────────────────────────────────────────
