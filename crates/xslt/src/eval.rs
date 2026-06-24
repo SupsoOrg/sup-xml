@@ -4613,30 +4613,60 @@ fn eval_instr(
             state.builder.push_text(text.clone(), *dose);
         }
         Instr::ApplyTemplates { select, mode, sort, with_params, mode_current } => {
+            // Atomic items selected by apply-templates (XSLT 3.0 §6.3 — a
+            // sequence of atomic values is permitted; each is matched by a
+            // template like a node).  Each atomic becomes a synthetic text
+            // node for the NodeId-based dispatch, with its typed value
+            // tracked in parallel and bound as the atomic context item so
+            // a pattern like `match=".[. instance of xs:integer]"` sees the
+            // real type.
+            let mut node_vals: Vec<Option<Value>> = Vec::new();
             let nodes = if let Some(sel) = select {
-                // XSLT 2.0 §5.5 / XTTE0520 — the `select` of
-                // xsl:apply-templates must select nodes; an atomic item
-                // (e.g. `select="3"` or `concat(...)`) is a type error.
-                match state.xpath_eval(sel, ctx_node, pos, size)? {
-                    Value::NodeSet(ns) => ns,
+                // Flatten the selected sequence into a per-item list of
+                // typed atomic values (`None` for real nodes), then realise
+                // the atomics as synthetic text nodes preserving order.
+                let v = state.xpath_eval(sel, ctx_node, pos, size)?;
+                let items: Vec<Value> = match v {
+                    Value::NodeSet(ns) => ns.into_iter().map(|id| Value::NodeSet(vec![id])).collect(),
                     Value::ForeignNodeSet(_) => Vec::new(),
-                    Value::Sequence(items) => {
-                        let mut out: Vec<NodeId> = Vec::new();
-                        for it in items {
-                            match it {
-                                Value::NodeSet(ns) => out.extend(ns),
-                                Value::ForeignNodeSet(_) => {}
-                                _ => return Err(XsltError::dynamic("XTTE0520",
-                                    "xsl:apply-templates select= must select \
-                                     nodes, not atomic values (XTTE0520)")),
-                            }
+                    Value::Sequence(items) => items,
+                    Value::IntRange { lo, hi } =>
+                        (lo..=hi).map(|i| Value::Number(Numeric::Integer(i))).collect(),
+                    a @ (Value::String(_) | Value::Number(_) | Value::Boolean(_) | Value::Typed(_)) => vec![a],
+                    other => return Err(XsltError::dynamic("XTTE0520", &format!(
+                        "xsl:apply-templates select= must select nodes or atomic \
+                         values, not {other:?} (XTTE0520)"))),
+                };
+                // XSLT 2.0 §5.5 / XTTE0520 — apply-templates over an atomic
+                // value is a type error in 1.0/2.0; XSLT 3.0 §6.3 permits it
+                // (each atomic is matched like a node).  Function items (maps
+                // / arrays) are never allowed.
+                let is_30 = xslt_version_3_or_more(&state.style.version);
+                let atomic_err = || XsltError::dynamic("XTTE0520",
+                    "xsl:apply-templates select= must select nodes, not atomic \
+                     values (XTTE0520)");
+                let mut out: Vec<NodeId> = Vec::with_capacity(items.len());
+                for it in items {
+                    match it {
+                        Value::NodeSet(ns) => { for id in ns { out.push(id); node_vals.push(None); } }
+                        Value::ForeignNodeSet(_) => {}
+                        Value::Function(_) | Value::Map(_) | Value::Array(_) =>
+                            return Err(XsltError::dynamic("XTTE0520",
+                                "xsl:apply-templates select= must not select a \
+                                 function item (XTTE0520)")),
+                        _ if !is_30 => return Err(atomic_err()),
+                        Value::IntRange { lo, hi } => for i in lo..=hi {
+                            out.extend(state.idx.allocate_rtf_text_nodes_inherent(vec![i.to_string()]));
+                            node_vals.push(Some(Value::Number(Numeric::Integer(i))));
+                        },
+                        atomic => {
+                            let s = value_to_string_styled(&atomic, state.idx, state.num_style());
+                            out.extend(state.idx.allocate_rtf_text_nodes_inherent(vec![s]));
+                            node_vals.push(Some(atomic));
                         }
-                        out
                     }
-                    _ => return Err(XsltError::dynamic("XTTE0520",
-                        "xsl:apply-templates select= must select nodes, not \
-                         atomic values (XTTE0520)")),
                 }
+                out
             } else {
                 // XSLT 2.0 §6.2 / XTTE0510 — `xsl:apply-templates` with
                 // no `select=` defaults to the children of the context
@@ -4665,6 +4695,9 @@ fn eval_instr(
             // Accumulators apply to whatever document these nodes live
             // in (e.g. one loaded via doc()), computed on first use.
             ensure_accumulators_for(state, &nodes)?;
+            // The typed-value tracking aligns with `nodes` only while order
+            // is preserved (no sort) and every item was accounted for.
+            let typed_focus = node_vals.len() == nodes.len() && sort.is_empty();
             // Apply xsl:sort directives before iterating.
             let nodes = sort_nodes_for_iter(state, &nodes, sort, ctx_node, pos, size)?;
             // Snapshot only when there are tunnel params in scope —
@@ -4691,7 +4724,13 @@ fn eval_instr(
             let total = nodes.len();
             let r = (|| -> Result<()> {
                 for (i, child) in nodes.iter().enumerate() {
-                    apply_one_to_node_with_args(state, *child, effective_mode, i + 1, total, &args)?;
+                    // An atomic item is its own typed focus for pattern
+                    // matching + template execution (so `match=".[. instance
+                    // of xs:integer]"` works); a real node clears any
+                    // enclosing atomic context (the node is the focus).
+                    let atomic_ctx = if typed_focus { node_vals[i].clone() } else { None };
+                    sup_xml_core::xpath::eval::with_atomic_context_item(atomic_ctx, ||
+                        apply_one_to_node_with_args(state, *child, effective_mode, i + 1, total, &args))?;
                 }
                 Ok(())
             })();
@@ -5876,60 +5915,74 @@ fn eval_instr(
             // nodes but flag for XTTE0510 / XTTE0990 detection.
             let select_is_atomic = !matches!(&v,
                 Value::NodeSet(_) | Value::ForeignNodeSet(_));
+            // Each atomic item is presented as a synthetic text node (so
+            // `xsl:copy` / value-of keep their existing behaviour), but its
+            // *typed* value is tracked in parallel and bound as the atomic
+            // context item below — so `.` in `instance of` / a predicate /
+            // an `xsl:map-entry key="."` sees the real type (e.g. integer),
+            // not an untyped string.  Real nodes carry `None`.  The synthetic
+            // node's string is computed EXACTLY as before (no behaviour change
+            // for the untyped path).
+            let mut node_vals: Vec<Option<Value>> = Vec::new();
             let nodes = match v {
-                Value::NodeSet(ns) => ns,
-                Value::String(s) => {
-                    state.idx.allocate_rtf_text_nodes_inherent(vec![s])
+                Value::NodeSet(ns) => { node_vals.resize(ns.len(), None); ns }
+                Value::String(ref s) => {
+                    let id = state.idx.allocate_rtf_text_nodes_inherent(vec![s.clone()]);
+                    node_vals.push(Some(v)); id
                 }
                 Value::Number(n) => {
-                    state.idx.allocate_rtf_text_nodes_inherent(
-                        vec![value_to_string_styled(&Value::Number(n), state.idx, state.num_style())])
+                    let id = state.idx.allocate_rtf_text_nodes_inherent(
+                        vec![value_to_string_styled(&Value::Number(n), state.idx, state.num_style())]);
+                    node_vals.push(Some(Value::Number(n))); id
                 }
                 Value::Boolean(b) => {
-                    state.idx.allocate_rtf_text_nodes_inherent(
-                        vec![if b { "true".into() } else { "false".into() }])
+                    let id = state.idx.allocate_rtf_text_nodes_inherent(
+                        vec![if b { "true".into() } else { "false".into() }]);
+                    node_vals.push(Some(Value::Boolean(b))); id
                 }
                 Value::Typed(t) => {
-                    state.idx.allocate_rtf_text_nodes_inherent(vec![t.lexical])
+                    let id = state.idx.allocate_rtf_text_nodes_inherent(vec![t.lexical.clone()]);
+                    node_vals.push(Some(Value::Typed(t))); id
                 }
                 Value::Sequence(items) => {
-                    // Heterogeneous atomic/typed sequence — synthesise a
-                    // text node per item so iteration sees each one
-                    // separately.  Pre-existing nodes flow through their
-                    // own ids; everything else stringifies.  Inline
-                    // IntRange fragments expand here too so a
-                    // `(scalar, 1 to N, scalar)` literal iterates per
-                    // codepoint.
                     let mut out: Vec<NodeId> = Vec::with_capacity(items.len());
                     for item in items {
                         match item {
-                            Value::NodeSet(ns) => out.extend(ns),
+                            Value::NodeSet(ns) => {
+                                for id in ns { out.push(id); node_vals.push(None); }
+                            }
                             Value::ForeignNodeSet(_) => {}
                             Value::IntRange { lo, hi } => {
-                                let strings: Vec<String> = (lo..=hi).map(|i| i.to_string()).collect();
-                                let ids = state.idx.allocate_rtf_text_nodes_inherent(strings);
-                                out.extend(ids);
+                                for i in lo..=hi {
+                                    out.extend(state.idx.allocate_rtf_text_nodes_inherent(vec![i.to_string()]));
+                                    node_vals.push(Some(Value::Number(Numeric::Integer(i))));
+                                }
                             }
                             atomic => {
                                 let s = value_to_string_styled(&atomic, state.idx, state.num_style());
-                                let ids = state.idx.allocate_rtf_text_nodes_inherent(vec![s]);
-                                out.extend(ids);
+                                out.extend(state.idx.allocate_rtf_text_nodes_inherent(vec![s]));
+                                node_vals.push(Some(atomic));
                             }
                         }
                     }
                     out
                 }
-                // Lazy `m to n` from XPath 2.0 — materialise each
-                // integer as a synthetic text node so the iteration
-                // loop below sees one context node per value.
                 Value::IntRange { lo, hi } => {
-                    let strings: Vec<String> = (lo..=hi).map(|i| i.to_string()).collect();
-                    state.idx.allocate_rtf_text_nodes_inherent(strings)
+                    let mut out = Vec::new();
+                    for i in lo..=hi {
+                        out.extend(state.idx.allocate_rtf_text_nodes_inherent(vec![i.to_string()]));
+                        node_vals.push(Some(Value::Number(Numeric::Integer(i))));
+                    }
+                    out
                 }
                 other => return Err(XsltError::InvalidStylesheet(format!(
                     "xsl:for-each select= must yield a sequence (got {other:?})"
                 ))),
             };
+            // The parallel typed values align with `nodes` only while order
+            // is preserved; a sort reorders the synthetic nodes, so fall back
+            // to the untyped focus there.
+            let typed_focus = node_vals.len() == nodes.len() && sort.is_empty();
             let nodes = sort_nodes_for_iter(state, &nodes, sort, ctx_node, pos, size)?;
             // for-each opens a fresh scope per XSLT 1.0 §11 and
             // updates `current()` to each iterated node.
@@ -5943,11 +5996,11 @@ fn eval_instr(
             let _atomic_guard = select_is_atomic.then(AtomicForEachGuard::enter);
             for (i, child) in nodes.iter().enumerate() {
                 state.xslt_current = *child;
-                // Clear any enclosing atomic context item: a node-focused
-                // for-each makes `.` the node, even when nested inside an
-                // atomic / function-item iteration that set one.
+                // Bind `.` to this item's typed atomic value (atomics) or
+                // clear it (real nodes — `.` is the node).
+                let atomic_ctx = if typed_focus { node_vals[i].clone() } else { None };
                 sup_xml_core::xpath::eval::with_atomic_context_item(
-                    None, || eval_body(state, body, *child, i + 1, total))?;
+                    atomic_ctx, || eval_body(state, body, *child, i + 1, total))?;
             }
             state.xslt_current = prev_current;
             state.apply_imports_ctx = prev_apply_imports;

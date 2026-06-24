@@ -39,6 +39,27 @@ use crate::ast::{QName, StylesheetAst, Template};
 
 type Result<T> = std::result::Result<T, XmlError>;
 
+/// XSLT 3.0 §5.5.3 — a *dynamic type error* raised while evaluating a
+/// pattern's predicate (e.g. a general comparison between an xs:integer
+/// and an xs:string when matching an atomic-valued item) means the node
+/// does not match the pattern; the error is not propagated.  Static or
+/// structural errors (an undeclared function, a malformed pattern) DO
+/// propagate so they surface as the spec requires.
+fn pattern_error_is_no_match(e: &XmlError) -> bool {
+    matches!(e.xpath_code.as_deref(),
+        Some("XPTY0004") | Some("FORG0001") | Some("FORG0006")
+        | Some("FOCA0002") | Some("FORG0008") | Some("FOAR0001"))
+}
+
+/// Match `pat` against `node`, recovering a dynamic type error as a
+/// non-match (see [`pattern_error_is_no_match`]).
+fn matches_for_selection<I: DocIndexLike>(
+    pat: &Expr, node: NodeId, idx: &I, bindings: &dyn XPathBindings,
+) -> Result<bool> {
+    matches(pat, node, idx, bindings)
+        .or_else(|e| if pattern_error_is_no_match(&e) { Ok(false) } else { Err(e) })
+}
+
 // ── match-ness check ──────────────────────────────────────────────
 
 /// Does `pattern` match `node`?  Walks the ancestor-or-self chain
@@ -368,7 +389,7 @@ pub fn select_template_next<'a, I: DocIndexLike>(
             if i == current_index && (!multi || Some(b) == cur_branch) {
                 continue;
             }
-            if !matches(branch_pat, node, idx, bindings)? { continue; }
+            if !matches_for_selection(branch_pat, node, idx, bindings)? { continue; }
             let priority = match t.priority {
                 Some(p) => p,
                 None => default_priority(branch_pat),
@@ -445,7 +466,7 @@ fn select_template_inner<'a, I: DocIndexLike>(
         let branches = pattern_branches(pat);
         let multi = branches.len() > 1;
         for (b, branch_pat) in branches.iter().enumerate() {
-            if !matches(branch_pat, node, idx, bindings)? { continue; }
+            if !matches_for_selection(branch_pat, node, idx, bindings)? { continue; }
             let priority = match t.priority {
                 Some(p) => p,
                 None => default_priority(branch_pat),
