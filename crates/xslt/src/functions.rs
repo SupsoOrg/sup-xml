@@ -1715,14 +1715,14 @@ fn key_fn<I: DocIndexLike>(
     // context's document is used.  XTDE1270 fires when the
     // determined root is not a document node (key indexing is only
     // defined under a document, not an unattached RTF element).
-    let doc_root = if let Some(scope) = args.get(2) {
-        let scope_nodes: Vec<NodeId> = match scope {
-            Value::NodeSet(ns) => ns.clone(),
-            Value::Sequence(items) => items.iter().flat_map(|it| {
-                if let Value::NodeSet(ns) = it { ns.clone() } else { Vec::new() }
-            }).collect(),
-            _ => Vec::new(),
-        };
+    let scope_nodes: Vec<NodeId> = match args.get(2) {
+        Some(Value::NodeSet(ns)) => ns.clone(),
+        Some(Value::Sequence(items)) => items.iter().flat_map(|it| {
+            if let Value::NodeSet(ns) = it { ns.clone() } else { Vec::new() }
+        }).collect(),
+        _ => Vec::new(),
+    };
+    let doc_root = if args.len() > 2 {
         if scope_nodes.is_empty() {
             return Ok(Value::NodeSet(Vec::new()));
         }
@@ -1751,6 +1751,19 @@ fn key_fn<I: DocIndexLike>(
     let mut out: Vec<NodeId> = Vec::new();
     for v in lookup_values {
         out.extend(keys.lookup(&expanded, doc_root, &v));
+    }
+    // XSLT 2.0 §16.4 — the 3-argument form restricts the result to nodes
+    // within the subtree rooted at the supplied node ($top): a result
+    // node qualifies only if $top is itself or one of its ancestors.
+    if args.len() > 2 {
+        out.retain(|&n| scope_nodes.iter().any(|&top| {
+            let mut cur = Some(n);
+            while let Some(c) = cur {
+                if c == top { return true; }
+                cur = idx.parent(c);
+            }
+            false
+        }));
     }
     out.sort_unstable();
     out.dedup();
