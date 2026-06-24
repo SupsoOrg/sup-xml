@@ -122,20 +122,30 @@ impl XmlBuf {
         // Fast path: every byte that needs escaping is ASCII and never occurs
         // inside a multibyte UTF-8 sequence, so we can scan raw bytes and
         // bulk-copy each clean run verbatim (multibyte content included)
-        // instead of decoding and re-encoding character by character.
+        // instead of decoding and re-encoding character by character.  The
+        // replacement is emitted via a string *literal* in each match arm so
+        // its length is known at the call site — a runtime-selected `&str`
+        // would force a general variable-length copy and lose the win on
+        // escape-dense content.
         let bytes = s.as_bytes();
         let mut run_start = 0;
+        macro_rules! emit {
+            ($i:expr, $rep:literal) => {{
+                if $i > run_start {
+                    self.inner.extend_from_slice(&bytes[run_start..$i]);
+                }
+                self.push_str($rep);
+                run_start = $i + 1;
+            }};
+        }
         for (i, &b) in bytes.iter().enumerate() {
-            let rep: &str = match b {
-                b'&'  => "&amp;",
-                b'<'  => "&lt;",
-                b'>'  => "&gt;",
-                b'\r' => "&#xD;",
-                _     => continue,
-            };
-            self.inner.extend_from_slice(&bytes[run_start..i]);
-            self.inner.extend_from_slice(rep.as_bytes());
-            run_start = i + 1;
+            match b {
+                b'&'  => emit!(i, "&amp;"),
+                b'<'  => emit!(i, "&lt;"),
+                b'>'  => emit!(i, "&gt;"),
+                b'\r' => emit!(i, "&#xD;"),
+                _     => {}
+            }
         }
         self.inner.extend_from_slice(&bytes[run_start..]);
     }
@@ -170,19 +180,25 @@ impl XmlBuf {
         // escapes `"` instead of `>` and additionally char-refs tab / LF.
         let bytes = s.as_bytes();
         let mut run_start = 0;
+        macro_rules! emit {
+            ($i:expr, $rep:literal) => {{
+                if $i > run_start {
+                    self.inner.extend_from_slice(&bytes[run_start..$i]);
+                }
+                self.push_str($rep);
+                run_start = $i + 1;
+            }};
+        }
         for (i, &b) in bytes.iter().enumerate() {
-            let rep: &str = match b {
-                b'&'  => "&amp;",
-                b'<'  => "&lt;",
-                b'"'  => "&quot;",
-                b'\t' => "&#x9;",
-                b'\n' => "&#xA;",
-                b'\r' => "&#xD;",
-                _     => continue,
-            };
-            self.inner.extend_from_slice(&bytes[run_start..i]);
-            self.inner.extend_from_slice(rep.as_bytes());
-            run_start = i + 1;
+            match b {
+                b'&'  => emit!(i, "&amp;"),
+                b'<'  => emit!(i, "&lt;"),
+                b'"'  => emit!(i, "&quot;"),
+                b'\t' => emit!(i, "&#x9;"),
+                b'\n' => emit!(i, "&#xA;"),
+                b'\r' => emit!(i, "&#xD;"),
+                _     => {}
+            }
         }
         self.inner.extend_from_slice(&bytes[run_start..]);
     }
