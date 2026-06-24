@@ -4893,6 +4893,13 @@ fn numeric_kind_of(v: &Value) -> Option<&'static str> {
         Value::Typed(t) if t.kind == "untypedAtomic" => Some("double"),
         Value::Typed(t) if t.numeric.is_some() => Some(t.kind),
         Value::IntRange { .. } => Some("integer"),
+        // A node operand atomizes to its typed value; without schema
+        // typing that is xs:untypedAtomic, which §6.2 casts to xs:double.
+        // The result must therefore promote as double — otherwise
+        // `@value * 2` on an untyped "0.01" truncates to xs:integer 0.
+        // (Empty node-sets are handled by the empty-arithmetic
+        // short-circuit before promotion is consulted.)
+        Value::NodeSet(_) | Value::ForeignNodeSet(_) => Some("double"),
         _ => None,
     }
 }

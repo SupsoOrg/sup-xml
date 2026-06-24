@@ -685,7 +685,22 @@ impl<'a, I: DocIndexLike> XPathBindings for XsltBindings<'a, I> {
             Ok(d)  => d,
             Err(_) => return None, // surface as "URI not pre-loaded"
         };
-        let id = match self.idx.graft_dynamic_document(&doc) {
+        // XSLT 3.0 §4.4 — `xsl:strip-space` applies to every source
+        // document, including those read via `document()` / `doc()` /
+        // `xsl:source-document`, not just the principal input.  Strip
+        // whitespace-only text at graft time using the stylesheet's
+        // rules (a no-op when no strip-space declarations exist).
+        let style = self.style;
+        let id = if style.whitespace_rules.is_empty() {
+            self.idx.graft_dynamic_document(&doc)
+        } else {
+            let strip = |local: &str, uri: &str, content: &str| {
+                crate::whitespace::is_xslt_whitespace_only(content)
+                    && crate::whitespace::strips_whitespace_under(style, local, uri)
+            };
+            self.idx.graft_dynamic_document_stripping(&doc, &strip)
+        };
+        let id = match id {
             Some(id) => id,
             None    => return None,
         };

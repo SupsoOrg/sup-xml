@@ -51,6 +51,20 @@ pub trait DocIndexLike {
         None
     }
 
+    /// Like [`graft_dynamic_document`](Self::graft_dynamic_document) but
+    /// drops whitespace-only text node children whose parent element
+    /// satisfies `strip_text` (`(parent_local, parent_uri, content) ->
+    /// strip?`) — applies `xsl:strip-space` to an externally-loaded
+    /// source document at graft time (XSLT 3.0 §4.4).  The default impl
+    /// ignores the predicate and falls back to the unstripped graft.
+    fn graft_dynamic_document_stripping(
+        &self,
+        doc: &sup_xml_tree::dom::Document,
+        _strip_text: &dyn Fn(&str, &str, &str) -> bool,
+    ) -> Option<NodeId> {
+        self.graft_dynamic_document(doc)
+    }
+
     /// Graft a `fn:parse-xml-fragment` parse — a synthetic single-element
     /// wrapper whose children are the fragment's top-level nodes — into a
     /// fresh document node, returning its id.  Mirrors

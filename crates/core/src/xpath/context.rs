@@ -546,6 +546,19 @@ impl<'doc> DocIndex<'doc> {
         &self,
         doc: &sup_xml_tree::dom::Document,
     ) -> NodeId {
+        self.graft_dynamic_document_stripping(doc, None)
+    }
+
+    /// Graft a document, optionally dropping whitespace-only text node
+    /// children whose parent element satisfies `strip_text`
+    /// (`(parent_local, parent_uri, content) -> strip?`).  This applies
+    /// `xsl:strip-space` to externally-loaded source documents at graft
+    /// time, since the grafted nodes have no index ids to post-process.
+    pub fn graft_dynamic_document_stripping(
+        &self,
+        doc: &sup_xml_tree::dom::Document,
+        strip_text: Option<&dyn Fn(&str, &str, &str) -> bool>,
+    ) -> NodeId {
         let mut builder = self.start_rtf();
         let root = builder.add_document();
         // Walk the document's top-level chain.  `first_sibling`
@@ -553,7 +566,7 @@ impl<'doc> DocIndex<'doc> {
         // chain ends when `next_sibling` is `None`.
         let mut cur = Some(doc.first_sibling());
         while let Some(n) = cur {
-            graft_node(&mut builder, root, n);
+            graft_node(&mut builder, root, n, strip_text);
             cur = n.next_sibling.get();
         }
         self.finish_rtf(builder)
@@ -575,10 +588,10 @@ impl<'doc> DocIndex<'doc> {
         while let Some(n) = cur {
             if matches!(n.kind, sup_xml_tree::dom::NodeKind::Element) {
                 for child in n.children() {
-                    graft_node(&mut builder, root, child);
+                    graft_node(&mut builder, root, child, None);
                 }
             } else {
-                graft_node(&mut builder, root, n);
+                graft_node(&mut builder, root, n, None);
             }
             cur = n.next_sibling.get();
         }
@@ -593,6 +606,7 @@ fn graft_node(
     builder: &mut super::rtf::RtfBuilder,
     parent:  NodeId,
     node:    &sup_xml_tree::dom::Node<'_>,
+    strip_text: Option<&dyn Fn(&str, &str, &str) -> bool>,
 ) {
     use sup_xml_tree::dom::NodeKind;
     match node.kind {
@@ -613,8 +627,19 @@ fn graft_node(
                     builder.add_attribute(elem, an, auri, aprefix, a.value());
                 }
             }
+            // `xsl:strip-space`: drop whitespace-only text children of
+            // this element when the stylesheet's rules say so.  The
+            // local name excludes any prefix.
+            let local = prefix.map_or(name, |p| &name[p.len() + 1..]);
             for child in node.children() {
-                graft_node(builder, elem, child);
+                if let Some(pred) = strip_text {
+                    if matches!(child.kind, NodeKind::Text | NodeKind::CData)
+                        && pred(local, uri, child.content())
+                    {
+                        continue;
+                    }
+                }
+                graft_node(builder, elem, child, strip_text);
             }
         }
         NodeKind::Text | NodeKind::CData => {
@@ -656,6 +681,14 @@ impl<'doc> DocIndexLike for DocIndex<'doc> {
         doc: &sup_xml_tree::dom::Document,
     ) -> Option<NodeId> {
         Some(DocIndex::graft_dynamic_document(self, doc))
+    }
+
+    fn graft_dynamic_document_stripping(
+        &self,
+        doc: &sup_xml_tree::dom::Document,
+        strip_text: &dyn Fn(&str, &str, &str) -> bool,
+    ) -> Option<NodeId> {
+        Some(DocIndex::graft_dynamic_document_stripping(self, doc, Some(strip_text)))
     }
     fn graft_dynamic_fragment(
         &self,

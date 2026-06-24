@@ -50,7 +50,21 @@ pub fn should_strip<I: DocIndexLike>(
     }
     let parent_local = idx.local_name(parent);
     let parent_uri   = idx.namespace_uri(parent);
+    strips_whitespace_under(style, parent_local, parent_uri)
+}
 
+/// Rule-only variant of [`should_strip`] for callers that already hold
+/// the parent element's expanded name and have confirmed the text is
+/// whitespace-only.  Used when grafting an externally-loaded document
+/// (`document()` / `doc()` / `xsl:source-document`): the spec applies
+/// `xsl:strip-space` to every source document, not just the principal
+/// one (XSLT 3.0 §4.4), but the grafted nodes don't have index ids when
+/// the strip decision must be made.
+pub fn strips_whitespace_under(
+    style: &StylesheetAst,
+    parent_local: &str,
+    parent_uri:   &str,
+) -> bool {
     // XSLT 1.0 §3.4 conflict resolution, in order:
     //   1. Higher import precedence wins.
     //   2. Higher pattern specificity wins (`*` < `prefix:*` <
