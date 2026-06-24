@@ -896,6 +896,9 @@ impl<'a, I: DocIndexLike> XPathBindings for XsltBindings<'a, I> {
     fn schema_aware(&self) -> bool {
         !schema_suppressed() && !self.style.schemas.is_empty()
     }
+    fn source_annotations_stripped(&self) -> bool {
+        self.style.input_type_annotations.iter().any(|v| v == "strip")
+    }
     #[cfg(feature = "xsd")]
     fn node_schema_type(&self, node_id: NodeId) -> Option<(String, String)> {
         // Constructed (RTF) nodes carry their `type=`/`xsl:type` annotation

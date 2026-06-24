@@ -817,6 +817,11 @@ pub trait XPathBindings {
     fn node_substitutes_for(&self, _node_id: NodeId, _huri: &str, _hlocal: &str) -> Option<bool> {
         None
     }
+    /// Whether the source tree's type annotations were stripped
+    /// (`[xsl:]input-type-annotations="strip"`, XSLT 2.0 §3.4) — every
+    /// source node is then `xs:untyped`/`xs:untypedAtomic`, so a typed
+    /// `element(*, my:T)` test against it is definitely false.
+    fn source_annotations_stripped(&self) -> bool { false }
     /// Whether schema-aware type information is available — true when an
     /// `xsl:import-schema` made governing types queryable.  When false the
     /// engine has no type annotations, so a typed `element(*, T)` kind test
@@ -9729,9 +9734,17 @@ fn instance_of_typed_node_test<I: DocIndexLike>(
                 if idx.kind(id) != want || !name_matches(id) {
                     definite_fail = true;
                 } else if let Some((turi, tlocal)) = &typed {
+                    const XSD: &str = "http://www.w3.org/2001/XMLSchema";
                     match node_type_match(bindings, id, is_attr, turi, tlocal) {
                         Some(true)  => {}
                         Some(false) => definite_fail = true,
+                        // Undecidable: when the source's type annotations
+                        // were stripped every node is xs:untyped, so a
+                        // user-defined type target is definitely not
+                        // satisfied; otherwise (typing merely incomplete)
+                        // stay lenient and defer to the name match.
+                        None if turi != XSD && bindings.source_annotations_stripped()
+                            => definite_fail = true,
                         None        => undecidable = true,
                     }
                 }
