@@ -8,6 +8,8 @@
 #   cd crates/core && cargo +nightly fuzz run fuzz_xsd_compile
 #   cd crates/core && cargo +nightly fuzz run fuzz_xsd_validate
 #   cd crates/core && cargo +nightly fuzz run fuzz_parse_xpath
+#   cd crates/core && cargo +nightly fuzz run fuzz_parse_html
+#   cd crates/core && cargo +nightly fuzz run fuzz_html_roundtrip
 #
 # Seed corpora live in `corpus/<target_name>/` and are used as starting
 # inputs.  The CI/release workflow can run each target for a bounded
@@ -27,7 +29,7 @@ libfuzzer-sys = "0.4"
 
 [dependencies.sup-xml-core]
 path = ".."
-features = ["xsd"]
+features = ["xsd", "html"]
 
 [dependencies.sup-xml-tree]
 path = "../../tree"
@@ -60,6 +62,20 @@ bench            = false
 [[bin]]
 name             = "fuzz_xpath_eval"
 path             = "fuzz_targets/fuzz_xpath_eval.rs"
+test             = false
+doc              = false
+bench            = false
+
+[[bin]]
+name             = "fuzz_parse_html"
+path             = "fuzz_targets/fuzz_parse_html.rs"
+test             = false
+doc              = false
+bench            = false
+
+[[bin]]
+name             = "fuzz_html_roundtrip"
+path             = "fuzz_targets/fuzz_html_roundtrip.rs"
 test             = false
 doc              = false
 bench            = false
