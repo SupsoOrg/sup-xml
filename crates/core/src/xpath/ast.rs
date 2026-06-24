@@ -360,6 +360,8 @@ pub enum ItemType {
     Comment,
     PI(Option<String>),
     Document,
+    /// `namespace-node()` — matches a namespace node (XPath 2.0 §2.5.4).
+    NamespaceNode,
     /// Function test (XPath 3.1 §2.5.4.3).  `None` is `function(*)` (any
     /// function item); `Some` carries a specific `function(T1, …, Tn) as R`
     /// signature, matched by function subtyping.

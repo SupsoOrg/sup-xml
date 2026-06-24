@@ -9785,6 +9785,11 @@ fn value_matches_sequence_type<I: DocIndexLike>(
                 matches!(idx.kind(id), crate::xpath::XPathNodeKind::Document)),
             _ => false,
         },
+        ItemType::NamespaceNode => match v {
+            Value::NodeSet(ns) => !ns.is_empty() && ns.iter().all(|&id|
+                matches!(idx.kind(id), crate::xpath::XPathNodeKind::Namespace)),
+            _ => false,
+        },
         // `function(*)` matches any function item; a specific
         // `function(T1, …, Tn) as R` applies function subtyping against
         // the item's own declared signature when known (named user

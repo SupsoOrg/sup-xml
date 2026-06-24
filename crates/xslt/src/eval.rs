@@ -7203,6 +7203,7 @@ fn node_matches_kind_test<I: sup_xml_core::xpath::DocIndexLike>(
         ItemType::PI(name) => matches!(k, K::PI)
             && name.as_ref().map_or(true, |n| idx.local_name(id) == n),
         ItemType::Document => matches!(k, K::Document),
+        ItemType::NamespaceNode => matches!(k, K::Namespace),
         // Atomic kind tests on a node: false — the caller handles
         // atomization separately (this function is only consulted
         // for kind tests).
@@ -7291,7 +7292,8 @@ fn result_node_matches_item(
         // level, and atomic/function/empty-sequence types aren't enforced
         // here.
         ItemType::Document | ItemType::Atomic(_) | ItemType::Function(_)
-        | ItemType::Map | ItemType::Array | ItemType::EmptySequence => false,
+        | ItemType::Map | ItemType::Array | ItemType::EmptySequence
+        | ItemType::NamespaceNode => false,
     }
 }
 

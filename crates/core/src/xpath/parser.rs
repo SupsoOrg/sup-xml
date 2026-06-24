@@ -1016,6 +1016,7 @@ impl Parser {
                     "node"                   => Some(ItemType::AnyNode),
                     "text"                   => Some(ItemType::Text),
                     "comment"                => Some(ItemType::Comment),
+                    "namespace-node"         => Some(ItemType::NamespaceNode),
                     "document-node"          => Some(ItemType::Document),
                     "processing-instruction" => Some(ItemType::PI(None)),
                     "element"                => Some(ItemType::Element(None, None)),
