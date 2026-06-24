@@ -7312,6 +7312,12 @@ pub(crate) fn coerce_to_user_schema_type<I: sup_xml_core::xpath::DocIndexLike>(
     None
 }
 
+/// True for the built-in numeric XSD types (xs:integer / decimal /
+/// float / double).
+fn is_numeric_type(kind: &str) -> bool {
+    matches!(kind, "integer" | "decimal" | "float" | "double")
+}
+
 pub(crate) fn coerce_to_atomic_sequence<I: sup_xml_core::xpath::DocIndexLike>(
     v: Value,
     st: &sup_xml_core::xpath::ast::SequenceType,
@@ -7506,6 +7512,22 @@ pub(crate) fn coerce_to_atomic_sequence<I: sup_xml_core::xpath::DocIndexLike>(
             if sup_xml_core::xpath::eval::xsd_is_subtype_of(t.kind, target_name) {
                 return Ok(v);
             }
+        }
+    }
+    // XSLT 2.0 §10 / XTTE0570 — xs:boolean and the numeric types never
+    // implicitly convert to one another in as= type checking (the cast
+    // would otherwise succeed leniently, e.g. true() -> 1).  Reject that
+    // categorical mismatch proactively.  untypedAtomic / string sources
+    // still cast freely.
+    if let ItemType::Atomic(target) = &st.item {
+        let src_bool = matches!(&v, Value::Boolean(_))
+            || matches!(&v, Value::Typed(t) if t.kind == "boolean");
+        let src_num = matches!(&v, Value::Number(_))
+            || matches!(&v, Value::Typed(t) if is_numeric_type(t.kind));
+        if (src_bool && is_numeric_type(target)) || (src_num && target == "boolean") {
+            return Err(XsltError::InvalidStylesheet(format!(
+                "a value of type xs:{} cannot be supplied where '{target}' is \
+                 required (XTTE0570)", if src_bool { "boolean" } else { "numeric" })));
         }
     }
     let original = v.clone();
