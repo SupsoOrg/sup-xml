@@ -2073,29 +2073,25 @@ pub fn eval_expr<I: DocIndexLike>(expr: &Expr, ctx: &EvalCtx<'_>, idx: &I) -> Re
                 }
                 return Ok(Value::NodeSet(nodes));
             }
-            // Mixed nodes + atomics on a legacy NodeSet route: flatten to
-            // synthetic text nodes, but preserve the *sequence order* —
-            // each member contributes its string item(s) where it appears,
-            // so `(a/b, 101, 102)` is `b-values, 101, 102`, not atomics
-            // first.
-            let mut atoms: Vec<String> = Vec::new();
+            // Mixed nodes + atomics: keep a flat `Value::Sequence` that
+            // preserves each item's identity.  Each node becomes its own
+            // single-node item so positional operations (subsequence,
+            // indexing) count correctly, while real nodes stay nodes —
+            // flattening them to synthetic text would lose the
+            // node-vs-atomic distinction XSLT 2.0 §5.7.2 relies on (e.g.
+            // `xsl:copy` of `(a/text(), 101, 102)` concatenates the
+            // copied text nodes but space-separates the atomic values).
+            let mut flat: Vec<Value> = Vec::with_capacity(evaluated.len());
             for v in evaluated {
                 match v {
-                    Value::NodeSet(ns)       => for n in ns { atoms.push(idx.string_value(n)); },
-                    Value::ForeignNodeSet(_) => {}
-                    Value::String(s)         => atoms.push(s),
-                    Value::Number(n)         => atoms.push(value_to_string(&Value::Number(n), idx)),
-                    Value::Boolean(b)        => atoms.push((if b { "true" } else { "false" }).to_string()),
-                    Value::Typed(t)          => atoms.push(t.lexical),
-                    Value::Sequence(_)       => unreachable!(), // flattened above
-                    Value::IntRange { .. }   => unreachable!(), // routed to Sequence above
-                    Value::Map(_) | Value::Array(_) | Value::Function(_) => {}
+                    Value::NodeSet(ns) =>
+                        flat.extend(ns.into_iter().map(|id| Value::NodeSet(vec![id]))),
+                    Value::ForeignNodeSet(fns) =>
+                        flat.extend(fns.into_iter().map(|n| Value::ForeignNodeSet(vec![n]))),
+                    other => flat.push(other),
                 }
             }
-            match idx.allocate_rtf_text_nodes(atoms.clone()) {
-                Some(ids) => Ok(Value::NodeSet(ids)),
-                None      => Ok(Value::String(atoms.join(""))),
-            }
+            Ok(Value::Sequence(flat))
         }
         Expr::Quantified { kind, bindings, test } => {
             // XPath 2.0 § 3.9 — `some $v in seq satisfies test` is
@@ -5915,6 +5911,26 @@ fn collect_node_ids(v: &Value) -> Vec<NodeId> {
     }
 }
 
+/// Whitespace-tokenise the first argument of `fn:id` / `fn:idref`
+/// (XPath 2.0 §15.5.2-3): the string value of every item — across a
+/// node-set, a mixed `(string, node, …)` sequence, or a single atomic —
+/// is split on whitespace and the candidate IDs accumulated in order.
+fn tokenize_id_arg<I: DocIndexLike>(v: &Value, idx: &I) -> Vec<String> {
+    fn push<I: DocIndexLike>(v: &Value, idx: &I, out: &mut Vec<String>) {
+        match v {
+            Value::NodeSet(ns) => for &n in ns {
+                out.extend(idx.string_value(n).split_whitespace().map(str::to_string));
+            },
+            Value::Sequence(items) => for it in items { push(it, idx, out); },
+            other => out.extend(
+                value_to_string(other, idx).split_whitespace().map(str::to_string)),
+        }
+    }
+    let mut out = Vec::new();
+    push(v, idx, &mut out);
+    out
+}
+
 /// Serialize a node (and descendants) to XML markup — the public entry
 /// behind `fn:serialize()`'s xml method, also used by the XSLT layer's
 /// `fn:transform` to bridge an in-index node back to parseable text.
@@ -7033,23 +7049,7 @@ fn eval_function<I: DocIndexLike>(name: &str, args: &[Expr], ctx: &EvalCtx<'_>, 
             } else {
                 doc_root_of(ctx.context_node, idx)
             };
-            let tokens: Vec<String> = match &v {
-                Value::NodeSet(ns) => {
-                    let mut out: Vec<String> = Vec::new();
-                    for &n in ns {
-                        out.extend(
-                            idx.string_value(n)
-                                .split_whitespace()
-                                .map(str::to_string),
-                        );
-                    }
-                    out
-                }
-                _ => value_to_string(&v, idx)
-                    .split_whitespace()
-                    .map(str::to_string)
-                    .collect(),
-            };
+            let tokens = tokenize_id_arg(&v, idx);
             let mut hits: Vec<NodeId> = Vec::new();
             for node in descendants(search_root, idx, true) {
                 if !matches!(idx.kind(node), XPathNodeKind::Element) { continue; }
@@ -7088,14 +7088,7 @@ fn eval_function<I: DocIndexLike>(name: &str, args: &[Expr], ctx: &EvalCtx<'_>, 
             } else {
                 doc_root_of(ctx.context_node, idx)
             };
-            let tokens: Vec<String> = match &v {
-                Value::NodeSet(ns) => ns.iter()
-                    .flat_map(|&n| idx.string_value(n)
-                        .split_whitespace().map(str::to_string).collect::<Vec<_>>())
-                    .collect(),
-                _ => value_to_string(&v, idx)
-                    .split_whitespace().map(str::to_string).collect(),
-            };
+            let tokens = tokenize_id_arg(&v, idx);
             let mut hits: Vec<NodeId> = Vec::new();
             for node in descendants(search_root, idx, true) {
                 if !matches!(idx.kind(node), XPathNodeKind::Element) { continue; }
