@@ -3853,10 +3853,15 @@ fn compile_template(node: &Node) -> Result<Template, XsltError> {
         let mut seen_other = false;
         let mut seen_ci = false;
         for child in node.children() {
-            // Significant text before xsl:context-item also makes it
+            // Non-whitespace text before xsl:context-item makes it
             // misplaced — it must be the very first child (XTSE0010).
+            // Whitespace-only text never counts, even under
+            // xml:space="preserve" (that governs output, not the
+            // stylesheet's structural rules).
             if !child.is_element() {
-                if is_significant_text(child) { seen_other = true; }
+                if !crate::whitespace::is_xslt_whitespace_only(&child.content()) {
+                    seen_other = true;
+                }
                 continue;
             }
             if is_xslt_element(child) && child.local_name() == "context-item" {
@@ -4043,7 +4048,19 @@ fn compile_template(node: &Node) -> Result<Template, XsltError> {
     // apply-templates mode across the whole template body.
     let _dm_guard = read_default_mode(node)?.map(DefaultModeGuard::enter);
     for child in node.children() {
-        if !child.is_element() && !is_significant_text(child) { continue; }
+        if !child.is_element() {
+            // Whitespace-only text among the leading declarations
+            // (xsl:context-item / xsl:param) doesn't begin the body, even
+            // under xml:space="preserve" (which governs the body output,
+            // not the declaration content model) — so it must not close
+            // the param run.
+            if !seen_non_param
+                && crate::whitespace::is_xslt_whitespace_only(&child.content())
+            {
+                continue;
+            }
+            if !is_significant_text(child) { continue; }
+        }
         // xsl:context-item (XSLT 3.0 §6.3) precedes xsl:param in the
         // content model and is handled above; it is a declaration, not
         // a body instruction, so skip it without closing the param run.
