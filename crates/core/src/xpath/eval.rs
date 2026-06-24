@@ -9601,10 +9601,10 @@ fn resolve_kind_test_namespaces(
         Some(format!("{{{uri}}}{local}"))
     };
     let item = match &st.item {
-        ItemType::Element(name @ Some(_), ty) =>
-            ItemType::Element(resolve(name).or_else(|| name.clone()), ty.clone()),
-        ItemType::Attribute(name @ Some(_), ty) =>
-            ItemType::Attribute(resolve(name).or_else(|| name.clone()), ty.clone()),
+        ItemType::Element(name @ Some(_), ty, se) =>
+            ItemType::Element(resolve(name).or_else(|| name.clone()), ty.clone(), *se),
+        ItemType::Attribute(name @ Some(_), ty, se) =>
+            ItemType::Attribute(resolve(name).or_else(|| name.clone()), ty.clone(), *se),
         other => other.clone(),
     };
     crate::xpath::ast::SequenceType { item, occurrence: st.occurrence }
@@ -9681,16 +9681,35 @@ fn instance_of_typed_node_test<I: DocIndexLike>(
 ) -> Option<bool> {
     use crate::xpath::ast::{ItemType, Occurrence};
     use crate::xpath::XPathNodeKind as K;
-    let (want, name, ty) = match &st.item {
-        ItemType::Element(name, Some(ty))   => (K::Element,   name, ty),
-        ItemType::Attribute(name, Some(ty)) => (K::Attribute, name, ty),
+    let (want, name, ty, schema_element) = match &st.item {
+        ItemType::Element(name, ty, se)   => (K::Element,   name, ty, *se),
+        ItemType::Attribute(name, ty, se) => (K::Attribute, name, ty, *se),
         _ => return None,
     };
-    let (turi, tlocal) = match ty.split_once(':') {
-        Some((p, l)) => (resolve_prefix_or_implicit(bindings, p)?, l.to_string()),
-        None         => (String::new(), ty.clone()),
+    // Only the typed `element(N, T)` and schema-aware `schema-element(N)`
+    // forms need the schema-aware path; a plain `element(N)` is decided by
+    // the type-agnostic matcher.
+    if ty.is_none() && !schema_element { return None; }
+    let typed = match ty {
+        Some(ty) => Some(match ty.split_once(':') {
+            Some((p, l)) => (resolve_prefix_or_implicit(bindings, p)?, l.to_string()),
+            None         => (String::new(), ty.clone()),
+        }),
+        None => None,
     };
     let is_attr = want == K::Attribute;
+    // For `schema-element(N)` the node also matches when its element name
+    // substitutes for N (the head); `name` is pre-resolved to `{uri}local`.
+    let head = if schema_element {
+        name.as_deref().map(|n| n.strip_prefix('{').and_then(|r| r.split_once('}'))
+            .map_or((String::new(), n.to_string()),
+                    |(u, l)| (u.to_string(), l.to_string())))
+    } else { None };
+    let name_matches = |id: NodeId| -> bool {
+        kind_test_name_matches(name.as_deref(), id, idx)
+            || (want == K::Element && head.as_ref().is_some_and(|(hu, hl)|
+                bindings.node_substitutes_for(id, hu, hl) == Some(true)))
+    };
     let items: Vec<Value> = iter_items(v).collect();
     let card_ok = match items.len() {
         0 => matches!(st.occurrence, Occurrence::Optional | Occurrence::ZeroOrMore),
@@ -9707,10 +9726,10 @@ fn instance_of_typed_node_test<I: DocIndexLike>(
         match it {
             Value::NodeSet(ns) if ns.len() == 1 => {
                 let id = ns[0];
-                if idx.kind(id) != want || !kind_test_name_matches(name.as_deref(), id, idx) {
+                if idx.kind(id) != want || !name_matches(id) {
                     definite_fail = true;
-                } else {
-                    match node_type_match(bindings, id, is_attr, &turi, &tlocal) {
+                } else if let Some((turi, tlocal)) = &typed {
+                    match node_type_match(bindings, id, is_attr, turi, tlocal) {
                         Some(true)  => {}
                         Some(false) => definite_fail = true,
                         None        => undecidable = true,
@@ -9806,16 +9825,21 @@ fn value_matches_sequence_type<I: DocIndexLike>(
         // `instance of` evaluator, which has the schema-aware bindings;
         // here (typed `as=`/`treat as` sites without bindings) only the
         // node kind and name are matched.
-        ItemType::Element(name, _ty) => match v {
+        // For `schema-element(N)` the name test is substitution-group
+        // aware, which needs the schema-aware bindings this binding-free
+        // matcher (typed `as=` / `treat as` coercion) doesn't have — so
+        // stay lenient on the name (match any element of the kind) and let
+        // the `instance of` evaluator apply the precise membership test.
+        ItemType::Element(name, _ty, se) => match v {
             Value::NodeSet(ns) => ns.iter().all(|&id|
                 matches!(idx.kind(id), crate::xpath::XPathNodeKind::Element)
-                && kind_test_name_matches(name.as_deref(), id, idx)),
+                && (*se || kind_test_name_matches(name.as_deref(), id, idx))),
             _ => false,
         },
-        ItemType::Attribute(name, _ty) => match v {
+        ItemType::Attribute(name, _ty, se) => match v {
             Value::NodeSet(ns) => ns.iter().all(|&id|
                 matches!(idx.kind(id), crate::xpath::XPathNodeKind::Attribute)
-                && kind_test_name_matches(name.as_deref(), id, idx)),
+                && (*se || kind_test_name_matches(name.as_deref(), id, idx))),
             _ => false,
         },
         ItemType::Text => match v {
@@ -9908,9 +9932,9 @@ fn item_type_subtype_of(a: &ItemType, b: &ItemType) -> bool {
         (ItemType::Element(..) | ItemType::Attribute(..) | ItemType::Text
             | ItemType::Comment | ItemType::PI(_) | ItemType::Document,
          ItemType::AnyNode) => true,
-        (ItemType::Element(x, _), ItemType::Element(y, yt)) =>
+        (ItemType::Element(x, _, _), ItemType::Element(y, yt, _)) =>
             yt.is_none() && (y.is_none() || x == y),
-        (ItemType::Attribute(x, _), ItemType::Attribute(y, yt)) =>
+        (ItemType::Attribute(x, _, _), ItemType::Attribute(y, yt, _)) =>
             yt.is_none() && (y.is_none() || x == y),
         (ItemType::PI(x), ItemType::PI(y)) => y.is_none() || x == y,
         (ItemType::Text, ItemType::Text)

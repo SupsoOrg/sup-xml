@@ -358,9 +358,12 @@ pub enum ItemType {
     /// (the lexical `prefix:local`, resolved against the in-scope schema
     /// at match time); `None` when no type is given.  A node matches the
     /// typed form only when its post-schema-validation governing type is
-    /// `T` or derived from it.
-    Element(Option<String>, Option<String>),
-    Attribute(Option<String>, Option<String>),
+    /// `T` or derived from it.  The third field is true for the
+    /// `schema-element(N)` / `schema-attribute(N)` forms, where the node
+    /// also matches when its name substitutes for `N` in `N`'s
+    /// substitution group.
+    Element(Option<String>, Option<String>, bool),
+    Attribute(Option<String>, Option<String>, bool),
     Text,
     Comment,
     PI(Option<String>),

@@ -1019,16 +1019,14 @@ impl Parser {
                     "namespace-node"         => Some(ItemType::NamespaceNode),
                     "document-node"          => Some(ItemType::Document),
                     "processing-instruction" => Some(ItemType::PI(None)),
-                    "element"                => Some(ItemType::Element(None, None)),
-                    "attribute"              => Some(ItemType::Attribute(None, None)),
+                    "element"                => Some(ItemType::Element(None, None, false)),
+                    "attribute"              => Some(ItemType::Attribute(None, None, false)),
                     // XPath 2.0 §2.5.4 — `schema-element(N)` / `schema-attribute(N)`
-                    // match a (substitution-group member of a) globally-declared
-                    // element/attribute.  Without a schema we approximate them by
-                    // the declared name, reusing the element()/attribute() shapes
-                    // so `instance of schema-element(N)` at least parses and
-                    // name-matches.
-                    "schema-element"         => Some(ItemType::Element(None, None)),
-                    "schema-attribute"       => Some(ItemType::Attribute(None, None)),
+                    // match a globally-declared element/attribute or (for
+                    // elements) a member of its substitution group; the third
+                    // field flags the schema-aware form for the matcher.
+                    "schema-element"         => Some(ItemType::Element(None, None, true)),
+                    "schema-attribute"       => Some(ItemType::Attribute(None, None, true)),
                     _ => None,
                 };
                 if let Some(k) = kind {
@@ -1074,16 +1072,16 @@ impl Parser {
                             }
                             ItemType::PI(arg)
                         }
-                        ItemType::Element(..) => {
+                        ItemType::Element(.., se) => {
                             let arg = match self.peek() {
                                 Token::Name(s) => { let s = s.clone(); self.consume(); Some(s) }
                                 Token::Star    => { self.consume(); None }
                                 _              => None,
                             };
                             let ty = self.kind_test_type_arg();
-                            ItemType::Element(arg, ty)
+                            ItemType::Element(arg, ty, se)
                         }
-                        ItemType::Attribute(..) => {
+                        ItemType::Attribute(.., se) => {
                             let arg = match self.peek() {
                                 Token::Name(s) => { let s = s.clone(); self.consume(); Some(s) }
                                 Token::At      => { self.consume();
@@ -1095,7 +1093,7 @@ impl Parser {
                                 _              => None,
                             };
                             let ty = self.kind_test_type_arg();
-                            ItemType::Attribute(arg, ty)
+                            ItemType::Attribute(arg, ty, se)
                         }
                         other => other,
                     };

@@ -7254,17 +7254,15 @@ pub(crate) fn parse_as_atomic_type(
         };
         let item = match bare {
             "node"           => ItemType::AnyNode,
-            "element"        => ItemType::Element(first_arg_local(inside), None),
-            "attribute"      => ItemType::Attribute(first_arg_local(inside), None),
-            // We don't implement schema-aware processing, but a
-            // `schema-element(N)` / `schema-attribute(N)` target still
-            // identifies the bound value as an element / attribute, so
-            // treat it as the corresponding kind test.  Without this the
-            // type is unrecognised, the body-form RTF stays wrapped in
-            // its synthetic document node, and `apply-templates` over
-            // the variable re-matches `/` — an infinite loop.
-            "schema-element"   => ItemType::Element(None, None),
-            "schema-attribute" => ItemType::Attribute(None, None),
+            "element"        => ItemType::Element(first_arg_local(inside), None, false),
+            "attribute"      => ItemType::Attribute(first_arg_local(inside), None, false),
+            // `schema-element(N)` / `schema-attribute(N)` carry the name and
+            // the schema-aware flag (the matcher applies substitution-group
+            // membership); without recognising the kind the body-form RTF
+            // stays wrapped in its synthetic document node and
+            // `apply-templates` over the variable re-matches `/` — a loop.
+            "schema-element"   => ItemType::Element(first_arg_local(inside), None, true),
+            "schema-attribute" => ItemType::Attribute(first_arg_local(inside), None, true),
             "document-node"  => ItemType::Document,
             "text"           => ItemType::Text,
             "comment"        => ItemType::Comment,
@@ -7324,9 +7322,9 @@ fn node_matches_kind_test<I: sup_xml_core::xpath::DocIndexLike>(
     let k = idx.kind(id);
     match item {
         ItemType::Any | ItemType::AnyNode => true,
-        ItemType::Element(name, _) => matches!(k, K::Element)
+        ItemType::Element(name, _, _) => matches!(k, K::Element)
             && name.as_ref().map_or(true, |n| idx.local_name(id) == n),
-        ItemType::Attribute(name, _) => matches!(k, K::Attribute)
+        ItemType::Attribute(name, _, _) => matches!(k, K::Attribute)
             && name.as_ref().map_or(true, |n| idx.local_name(id) == n),
         ItemType::Text     => matches!(k, K::Text | K::CData),
         ItemType::Comment  => matches!(k, K::Comment),
@@ -7407,12 +7405,16 @@ fn result_node_matches_item(
     use crate::result_tree::ResultNode as R;
     match item {
         ItemType::Any | ItemType::AnyNode => true,
-        ItemType::Element(name, _) => matches!(node,
+        // `schema-element(N)` / `schema-attribute(N)` (the `se` flag) match
+        // by substitution-group membership, which this structural check
+        // can't decide without the schema — stay lenient on the name and
+        // accept any element/attribute of the kind.
+        ItemType::Element(name, _, se) => matches!(node,
             R::Element { name: qn, .. }
-                if name.as_ref().map_or(true, |n| &qn.local == n)),
-        ItemType::Attribute(name, _) => matches!(node,
+                if *se || name.as_ref().map_or(true, |n| &qn.local == n)),
+        ItemType::Attribute(name, _, se) => matches!(node,
             R::Attribute { name: qn, .. }
-                if name.as_ref().map_or(true, |n| &qn.local == n)),
+                if *se || name.as_ref().map_or(true, |n| &qn.local == n)),
         ItemType::Text     => matches!(node, R::Text { .. }),
         ItemType::Comment  => matches!(node, R::Comment(_)),
         ItemType::PI(name) => matches!(node,
