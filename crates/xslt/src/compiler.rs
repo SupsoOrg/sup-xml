@@ -3922,7 +3922,8 @@ fn compile_template(node: &Node) -> Result<Template, XsltError> {
             // leading XPath 2.0 comments `(: ... :)` — those aren't
             // grouping parens, just whitespace.
             let leading = strip_leading_xpath_comments_and_space(s.as_ref());
-            if leading.starts_with('(') && !is_xslt_3_0_compile() {
+            let parenthesised = leading.starts_with('(');
+            if parenthesised && !is_xslt_3_0_compile() {
                 return Err(XsltError::InvalidStylesheet(format!(
                     "xsl:template match='{s}' uses a parenthesised \
                      top-level expression, which is not allowed in a \
@@ -3930,9 +3931,19 @@ fn compile_template(node: &Node) -> Result<Template, XsltError> {
                 )));
             }
             let e = parse_xpath_at(node, s).map_err(XsltError::from)?;
+            // XSLT 3.0 §5.5.2 — even where 3.0 relaxes top-level parens, a
+            // *predicate pattern* `.[...]` may not be parenthesised: `(.[p])`
+            // is XTSE0340 though `.[p]` is a valid pattern.
+            if parenthesised && is_context_item_predicate_pattern(&e) {
+                return Err(XsltError::InvalidStylesheet(format!(
+                    "xsl:template match='{s}' parenthesises a predicate pattern \
+                     `.[...]`, which the pattern grammar doesn't permit (XTSE0340)"
+                )));
+            }
             reject_pattern_grouping_calls(&e, "xsl:template match=")?;
             reject_invalid_pattern_axes(&e, "xsl:template match=")?;
             reject_invalid_pattern_key_calls(&e, "xsl:template match=")?;
+            reject_predicate_pattern_in_union(&e, "xsl:template match=")?;
             ensure_pattern_shape(&e, "xsl:template match=")?;
             Some(e)
         }
@@ -9231,6 +9242,41 @@ fn ensure_pattern_shape(expr: &Expr, who: &str) -> Result<(), XsltError> {
     if let E::Union(l, r) = expr {
         ensure_pattern_shape(l, who)?;
         ensure_pattern_shape(r, who)?;
+    }
+    Ok(())
+}
+
+/// Is `e` a context-item predicate pattern (`.[...]`)?  XSLT 3.0's
+/// grammar admits `PredicatePattern ::= "." PredicateList` only as a
+/// *whole* pattern — never as a union operand or wrapped in parentheses.
+fn is_context_item_predicate_pattern(e: &Expr) -> bool {
+    use sup_xml_core::xpath::ast::{Expr as E, LocationPath, Axis, NodeTest};
+    matches!(e, E::Path(LocationPath::Relative(steps))
+        if steps.len() == 1
+           && steps[0].axis == Axis::Self_
+           && matches!(steps[0].node_test, NodeTest::AnyNode)
+           && steps[0].filter.is_none()
+           && !steps[0].predicates.is_empty())
+}
+
+/// XSLT 3.0 §5.5.2 / XTSE0340 — a predicate pattern `.[...]` is a
+/// top-level pattern in its own right and may not appear as an operand
+/// of a union pattern (`.[...] | x`).
+fn reject_predicate_pattern_in_union(expr: &Expr, who: &str) -> Result<(), XsltError> {
+    use sup_xml_core::xpath::ast::Expr as E;
+    fn operand(e: &Expr, who: &str) -> Result<(), XsltError> {
+        match e {
+            E::Union(l, r) => { operand(l, who)?; operand(r, who) }
+            _ if is_context_item_predicate_pattern(e) =>
+                Err(XsltError::InvalidStylesheet(format!(
+                    "{who} uses a predicate pattern `.[...]` as a union operand, \
+                     which the pattern grammar doesn't permit (XTSE0340)"))),
+            _ => Ok(()),
+        }
+    }
+    if let Expr::Union(l, r) = expr {
+        operand(l, who)?;
+        operand(r, who)?;
     }
     Ok(())
 }
