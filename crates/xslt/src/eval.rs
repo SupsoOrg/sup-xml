@@ -3702,6 +3702,9 @@ fn copy_result_node(state: &mut EvalState, n: &crate::result_tree::ResultNode) {
         ResultNode::Attribute { name, value } => {
             state.builder.push_attribute(name.clone(), value.clone());
         }
+        ResultNode::Namespace { prefix, uri } => {
+            state.builder.push_namespace_decl(prefix.clone(), uri.clone());
+        }
     }
 }
 
@@ -8964,6 +8967,7 @@ fn result_node_is_significant(n: &ResultNode) -> bool {
         ResultNode::Comment(s) => !s.is_empty(),
         ResultNode::ProcessingInstruction { data, .. } => !data.is_empty(),
         ResultNode::Attribute { .. } => true,
+        ResultNode::Namespace { .. } => true,
     }
 }
 
@@ -9322,6 +9326,8 @@ fn add_result_node_and_return_id(
             b.start_attrs(owner);
             Some(b.add_attribute(owner, &qname, &name.uri, prefix, value))
         }
+        // A free namespace node has no addressable place in the arena.
+        ResultNode::Namespace { .. } => None,
         ResultNode::Element { name, attributes, namespaces, children, schema_type, attr_types } => {
             let prefix_str = name.prefix.as_deref();
             let qname = match prefix_str {
@@ -9399,6 +9405,8 @@ fn add_result_node(
             };
             b.add_attribute(parent, &qname, &name.uri, prefix, value);
         }
+        // A free namespace node has no addressable place in the arena.
+        ResultNode::Namespace { .. } => {}
         ResultNode::Element { name, attributes, namespaces, children, schema_type, attr_types } => {
             let prefix_str = name.prefix.as_deref();
             let qname = match prefix_str {
@@ -9510,6 +9518,9 @@ fn copy_result_node_into(state: &mut EvalState, node: &ResultNode) {
         }
         ResultNode::Attribute { name, value } => {
             state.builder.push_attribute(name.clone(), value.clone());
+        }
+        ResultNode::Namespace { prefix, uri } => {
+            state.builder.push_namespace_decl(prefix.clone(), uri.clone());
         }
     }
 }
@@ -9626,7 +9637,8 @@ fn collect_value_of_body_pieces(
                     flush(&mut pieces, &mut text_buf);
                     pieces.push(value.clone());
                 }
-                ResultNode::Comment(_) | ResultNode::ProcessingInstruction { .. } => {}
+                ResultNode::Comment(_) | ResultNode::ProcessingInstruction { .. }
+                | ResultNode::Namespace { .. } => {}
             }
         }
         // `xsl:sequence` items are always distinct pieces — flush the
@@ -9650,7 +9662,8 @@ fn append_string_value(node: &ResultNode, out: &mut String) {
             for c in children { append_string_value(c, out); }
         }
         ResultNode::Attribute { value, .. } => out.push_str(value),
-        ResultNode::Comment(_) | ResultNode::ProcessingInstruction { .. } => {}
+        ResultNode::Comment(_) | ResultNode::ProcessingInstruction { .. }
+        | ResultNode::Namespace { .. } => {}
     }
 }
 

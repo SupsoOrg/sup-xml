@@ -444,6 +444,8 @@ fn serialize_xml_node(
         // content (XSLT consumes it via copy-of / apply-templates);
         // emit nothing rather than malformed output.
         ResultNode::Attribute { .. } => {}
+        // A top-level namespace node has no serialized form on its own.
+        ResultNode::Namespace { .. } => {}
     }
 }
 
@@ -616,6 +618,8 @@ fn normalize_result_node(node: &ResultNode, form: sup_xml_core::normalize::NormF
                 target: target.clone(), data: normalize(data, form) },
         ResultNode::Attribute { name, value } =>
             ResultNode::Attribute { name: name.clone(), value: normalize(value, form) },
+        ResultNode::Namespace { prefix, uri } =>
+            ResultNode::Namespace { prefix: prefix.clone(), uri: uri.clone() },
     }
 }
 
@@ -921,6 +925,8 @@ fn serialize_html_node(node: &ResultNode, out: &mut String, cmap: &[(char, Strin
         }
         // Parentless attribute — no element-content serialization.
         ResultNode::Attribute { .. } => {}
+        // A top-level namespace node has no serialized form on its own.
+        ResultNode::Namespace { .. } => {}
     }
 }
 

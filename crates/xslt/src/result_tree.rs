@@ -61,6 +61,12 @@ pub enum ResultNode {
     /// appears among an element's children (element attributes live in
     /// the `attributes` vec).
     Attribute { name: QName, value: String },
+    /// A parentless namespace node — the result of `xsl:namespace`
+    /// evaluated with no element under construction (e.g. as the
+    /// ordinary content of `xsl:on-empty`'s enclosing element, captured
+    /// before that element is open).  Re-attached as a namespace
+    /// declaration when emitted onto an open element.
+    Namespace { prefix: Option<String>, uri: String },
 }
 
 /// The complete result of a transformation.  Carries the
@@ -478,6 +484,11 @@ impl ResultBuilder {
                  after element content (XTDE0410)"));
         }
         let Some(ResultNode::Element { namespaces, .. }) = self.stack.last_mut() else {
+            // No element under construction: an *implicit* namespace fixup
+            // (the prefix push_attribute synthesises for a parentless
+            // attribute) is not itself a node and is dropped here.  An
+            // *explicit* xsl:namespace with no open element is preserved
+            // by push_namespace_decl_explicit before it delegates here.
             return;
         };
         // A prefix already bound to a *different* URI is left alone —
@@ -501,6 +512,14 @@ impl ResultBuilder {
     pub fn push_namespace_decl_explicit(
         &mut self, prefix: Option<String>, uri: String,
     ) {
+        if !matches!(self.stack.last(), Some(ResultNode::Element { .. })) {
+            // A parentless explicit namespace node (e.g. xsl:namespace as
+            // the ordinary content of an xsl:on-empty's enclosing element,
+            // captured before that element is open) survives as its own
+            // item so it isn't silently dropped.
+            self.top.push(ResultNode::Namespace { prefix, uri });
+            return;
+        }
         let conflict = matches!(self.stack.last(),
             Some(ResultNode::Element { namespaces, .. })
                 if namespaces.iter().any(|(p, u)| *p == prefix && *u != uri));
@@ -600,10 +619,12 @@ impl ResultBuilder {
         // A replayed attribute must attach to the open element's
         // attribute list (or become a parentless attribute when none is
         // open) — pushing it as a child would drop it on serialization.
-        if let ResultNode::Attribute { name, value } = node {
-            self.push_attribute(name, value);
-        } else {
-            self.push_node(node);
+        match node {
+            ResultNode::Attribute { name, value } => self.push_attribute(name, value),
+            // A replayed namespace node re-attaches as a declaration on
+            // the open element (or stays parentless when none is open).
+            ResultNode::Namespace { prefix, uri } => self.push_namespace_decl(prefix, uri),
+            _ => self.push_node(node),
         }
     }
 
