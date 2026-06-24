@@ -5783,12 +5783,16 @@ fn compile_raw_instr_into(
                     }
                 }
             }
-            // `standalone` accepts yes | no | omit (XSLT 2.0 §20), not just
-            // a boolean — validate it separately.
+            // `standalone` accepts yes | no | omit (XSLT 2.0 §20); XSLT 3.0
+            // additionally accepts the boolean lexical forms true | false |
+            // 1 | 0 (matching xsl:output), which map to yes / no.
             if let Some(v) = read_attribute(node, "standalone") {
                 if value_is_avt(&v) {
                     serialization_avts.push(("standalone".to_string(), avt(node, v)?));
-                } else if !matches!(v.trim(), "yes" | "no" | "omit") {
+                } else if !matches!(v.trim(),
+                    "yes" | "no" | "omit"
+                    | "true" | "false" | "1" | "0")
+                {
                     return Err(XsltError::InvalidStylesheet(format!(
                         "xsl:result-document standalone='{v}' must be 'yes', 'no', \
                          or 'omit' (XTSE0020)")));
@@ -7092,7 +7096,7 @@ fn compile_copy(node: &Node) -> Result<Instr, XsltError> {
     // XSLT 2.0 §11.9.1 — `copy-namespaces` (default `yes`) controls
     // whether the namespace nodes of the copied element are carried to
     // the copy.  `no` keeps only the bindings its own name needs.
-    let copy_namespaces = match read_attribute(node, "copy-namespaces") {
+    let copy_namespaces = match read_attr_with_shadow(node, "copy-namespaces")? {
         Some(v) => parse_bool_attr(&v, "xsl:copy", "copy-namespaces")?,
         None => true,
     };
@@ -7148,7 +7152,7 @@ fn compile_copy_of(node: &Node) -> Result<Instr, XsltError> {
     // whether the namespace nodes of copied elements are carried over.
     // `no` copies only the namespaces needed for the element's and its
     // attributes' own names, dropping inherited in-scope declarations.
-    let copy_namespaces = match read_attribute(node, "copy-namespaces") {
+    let copy_namespaces = match read_attr_with_shadow(node, "copy-namespaces")? {
         Some(v) => parse_bool_attr(&v, "xsl:copy-of", "copy-namespaces")?,
         None => true,
     };
@@ -7211,7 +7215,7 @@ fn compile_element(node: &Node) -> Result<Instr, XsltError> {
 /// Default `true`; a value outside the boolean lexical space is
 /// XTSE0020 (skipped in forwards-compatible mode).
 fn read_inherit_namespaces(node: &Node, attr: &str) -> Result<bool, XsltError> {
-    match read_attribute(node, attr) {
+    match read_attr_with_shadow(node, attr)? {
         None => Ok(true),
         Some(v) => match v.trim() {
             "yes" | "true" | "1" => Ok(true),
