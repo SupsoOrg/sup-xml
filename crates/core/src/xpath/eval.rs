@@ -808,6 +808,15 @@ pub trait XPathBindings {
     fn node_derives_from(&self, _node_id: NodeId, _turi: &str, _tlocal: &str) -> Option<bool> {
         None
     }
+    /// Whether element node `node_id`'s name is `(huri, hlocal)` or
+    /// transitively substitutes for it in that head's substitution group
+    /// (XSD §2.2.2.2) — the `schema-element(N)` node test.  `Some(true)`
+    /// when a member, `Some(false)` when a schema is in scope but the node
+    /// isn't a member, `None` when no schema can decide (→ lenient name
+    /// match by the caller).
+    fn node_substitutes_for(&self, _node_id: NodeId, _huri: &str, _hlocal: &str) -> Option<bool> {
+        None
+    }
     /// Whether schema-aware type information is available — true when an
     /// `xsl:import-schema` made governing types queryable.  When false the
     /// engine has no type annotations, so a typed `element(*, T)` kind test
@@ -3199,6 +3208,18 @@ fn principal_kind(axis: &Axis) -> XPathNodeKind {
     }
 }
 
+/// The expanded name `(uri, local)` denoted by a name node test, or
+/// `None` for a wildcard / non-name test — used to recover the head of a
+/// `schema-element(N)` substitution-group query.
+fn node_test_head_qname(nt: &NodeTest) -> Option<(String, String)> {
+    match nt {
+        NodeTest::QName(uri, local) => Some((uri.clone(), local.clone())),
+        NodeTest::DefaultNamespaceName { uri, local } => Some((uri.clone(), local.clone())),
+        NodeTest::LocalName(local) => Some((String::new(), local.clone())),
+        _ => None,
+    }
+}
+
 /// Test `node` against `test` as if reached on the `child::` axis
 /// (principal node kind = element).  Exposed for the XSLT pattern
 /// matcher, which handles `document-node(element(N))` patterns
@@ -3337,9 +3358,27 @@ fn node_matches<I: DocIndexLike>(
         // it here requires accurate source/constructed-node typing the
         // validator doesn't yet supply uniformly; until it does, matching
         // stays name-based (the type narrows nothing).
-        NodeTest::SchemaType { inner, type_name } => {
-            if !node_matches(node, inner, axis, idx, bindings, libxml2_compatible) {
+        NodeTest::SchemaType { inner, type_name, schema_element } => {
+            // Name test: an exact match of `inner`, or — for the
+            // `schema-element(N)` form — an element that substitutes for N.
+            let name_ok = node_matches(node, inner, axis, idx, bindings, libxml2_compatible)
+                || (*schema_element
+                    && matches!(idx.kind(node), XPathNodeKind::Element)
+                    && node_test_head_qname(inner).is_some_and(|(hpref, hl)| {
+                        // `inner` is a name test: a `QName` carries a prefix
+                        // (resolve it), a `DefaultNamespaceName` carries the
+                        // URI already (resolution is a no-op / keeps it).
+                        let huri = resolve_prefix_or_implicit(bindings, &hpref)
+                            .unwrap_or(hpref);
+                        bindings.node_substitutes_for(node, &huri, &hl) == Some(true)
+                    }));
+            if !name_ok {
                 return false;
+            }
+            // `schema-element(N)` / `schema-attribute(N)` with no governing
+            // type carries an empty `type_name` — the name test is enough.
+            if type_name.is_empty() {
+                return true;
             }
             let is_attr = matches!(idx.kind(node), XPathNodeKind::Attribute);
             let (turi, tlocal) = match type_name.split_once(':') {

@@ -1651,6 +1651,7 @@ impl Parser {
                     // tests collapse to the existing 1.0 name-based
                     // NodeTest variants, keyed on axis context.
                     "element" | "attribute" | "schema-element" | "schema-attribute" => {
+                        let is_schema = name.starts_with("schema-");
                         let nt = if matches!(self.peek(), Token::RParen) {
                             self.consume();
                             NodeTest::Wildcard
@@ -1659,18 +1660,28 @@ impl Parser {
                             // Optional second arg: the governing TypeName
                             // (XPath 2.0 §2.5.4.3/4).  When present, carry
                             // it on a `SchemaType` test so schema-aware
-                            // matching can discriminate by PSVI type; with
-                            // no type the test stays the plain name test.
+                            // matching can discriminate by PSVI type.
+                            // `schema-element(N)` / `schema-attribute(N)`
+                            // also use SchemaType (with empty type) so the
+                            // matcher applies substitution-group membership.
                             // A trailing `?` (nillable) is accepted and
                             // ignored — nillability doesn't affect matching.
-                            if matches!(self.peek(), Token::Comma) {
+                            let type_name = if matches!(self.peek(), Token::Comma) {
                                 self.consume();
-                                let type_name = self.parse_type_qname_string()?;
+                                let t = self.parse_type_qname_string()?;
                                 self.expect(&Token::RParen)?;
-                                NodeTest::SchemaType { inner: Box::new(inner), type_name }
+                                t
                             } else {
                                 self.expect(&Token::RParen)?;
+                                String::new()
+                            };
+                            if type_name.is_empty() && !is_schema {
                                 inner
+                            } else {
+                                NodeTest::SchemaType {
+                                    inner: Box::new(inner), type_name,
+                                    schema_element: is_schema,
+                                }
                             }
                         };
                         nt

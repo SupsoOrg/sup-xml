@@ -74,7 +74,12 @@ pub enum NodeTest {
     /// it satisfies `inner` AND its governing PSVI type is `type_name`
     /// or derived from it (schema-aware processing); an unannotated node
     /// matches leniently (see `node_type_match`).
-    SchemaType { inner: Box<NodeTest>, type_name: String },
+    /// `schema_element` is true for the `schema-element(N)` /
+    /// `schema-attribute(N)` forms: the node matches when its name is `N`
+    /// OR (for elements) substitutes for `N` in `N`'s substitution group.
+    /// `type_name` is empty when no governing type was given (the bare
+    /// `schema-element(N)` form).
+    SchemaType { inner: Box<NodeTest>, type_name: String, schema_element: bool },
 }
 
 #[derive(Debug, Clone)]

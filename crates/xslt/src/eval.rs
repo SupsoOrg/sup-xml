@@ -921,6 +921,29 @@ impl<'a, I: DocIndexLike> XPathBindings for XsltBindings<'a, I> {
         Some(hit)
     }
     #[cfg(feature = "xsd")]
+    fn node_substitutes_for(&self, node_id: NodeId, huri: &str, hlocal: &str) -> Option<bool> {
+        use sup_xml_core::xsd::QName as XQName;
+        if self.style.schemas.is_empty() { return None; }
+        let nuri = self.idx.namespace_uri(node_id);
+        let nlocal = self.idx.local_name(node_id);
+        let head = XQName::new((!huri.is_empty()).then_some(huri), hlocal);
+        // Walk the node's element name up its substitutionGroup chain
+        // (XSD §2.2.2.2) until it reaches the head or the chain ends.
+        for schema in &self.style.schemas {
+            let mut cur = XQName::new((!nuri.is_empty()).then_some(nuri), nlocal);
+            let mut seen = 0;
+            loop {
+                if cur == head { return Some(true); }
+                let Some(decl) = schema.element(&cur) else { break };
+                let Some(g) = &decl.substitution_group else { break };
+                cur = g.clone();
+                seen += 1;
+                if seen > 64 { break; } // cyclic guard
+            }
+        }
+        Some(false)
+    }
+    #[cfg(feature = "xsd")]
     fn node_typed_value(&self, node_id: NodeId, lexical: &str) -> Option<Value> {
         use sup_xml_core::xsd::TypeRef;
         // Constructed (RTF) nodes built with a `type=` / `xsl:type=`

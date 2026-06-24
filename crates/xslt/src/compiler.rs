@@ -874,14 +874,25 @@ pub(crate) fn apply_xpath_default_namespace_uri(expr: &mut Expr, uri: &str) {
             | Axis::AncestorOrSelf | Axis::FollowingSibling
             | Axis::PrecedingSibling | Axis::Following | Axis::Preceding);
         if on_element_axis {
-            if let NodeTest::LocalName(local) = &s.node_test {
-                s.node_test = NodeTest::DefaultNamespaceName {
-                    uri: uri.to_string(),
-                    local: local.clone(),
-                };
-            }
+            rewrite_node_test(&mut s.node_test, uri);
         }
         for p in &mut s.predicates { rewrite(p, uri); }
+    }
+    // An unprefixed element name takes the default element namespace —
+    // including the `inner` name test wrapped inside a typed/schema kind
+    // test (`schema-element(N)` / `element(N, T)`) or a
+    // `document-node(element(N))` form.
+    fn rewrite_node_test(nt: &mut NodeTest, uri: &str) {
+        match nt {
+            NodeTest::LocalName(local) => {
+                *nt = NodeTest::DefaultNamespaceName {
+                    uri: uri.to_string(), local: local.clone(),
+                };
+            }
+            NodeTest::SchemaType { inner, .. } => rewrite_node_test(inner, uri),
+            NodeTest::Document(Some(inner)) => rewrite_node_test(inner, uri),
+            _ => {}
+        }
     }
     fn rewrite(e: &mut Expr, uri: &str) {
         match e {
