@@ -1711,6 +1711,22 @@ impl Parser {
             Token::Name(name) => {
                 let name = name.clone();
                 self.consume();
+                // Q{uri}local — a braced URI-qualified EQName (XPath 3.0
+                // §2.5.5).  It matches by expanded name, so route through
+                // DefaultNamespaceName (a direct uri+local compare); the
+                // `:` inside the URI must not be treated as a prefix sep.
+                if let Some(rest) = name.strip_prefix("Q{") {
+                    if let Some(close) = rest.find('}') {
+                        let uri = rest[..close].to_string();
+                        let local = rest[close + 1..].to_string();
+                        return Ok(if local == "*" {
+                            if uri.is_empty() { NodeTest::Wildcard }
+                            else { NodeTest::DefaultNamespaceName { uri, local } }
+                        } else {
+                            NodeTest::DefaultNamespaceName { uri, local }
+                        });
+                    }
+                }
                 if let Some((prefix, local)) = name.split_once(':') {
                     if local == "*" {
                         Ok(NodeTest::PrefixWildcard(prefix.to_string()))

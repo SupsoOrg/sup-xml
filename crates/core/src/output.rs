@@ -116,6 +116,34 @@ impl XmlBuf {
     /// version="1.0" by default and so won't trigger NEL/LS
     /// normalization on the receiving end.
     pub fn push_escaped_text(&mut self, s: &str) {
+        if self.charset != OutputCharset::Utf8 {
+            return self.push_escaped_text_charset(s);
+        }
+        // Fast path: every byte that needs escaping is ASCII and never occurs
+        // inside a multibyte UTF-8 sequence, so we can scan raw bytes and
+        // bulk-copy each clean run verbatim (multibyte content included)
+        // instead of decoding and re-encoding character by character.
+        let bytes = s.as_bytes();
+        let mut run_start = 0;
+        for (i, &b) in bytes.iter().enumerate() {
+            let rep: &str = match b {
+                b'&'  => "&amp;",
+                b'<'  => "&lt;",
+                b'>'  => "&gt;",
+                b'\r' => "&#xD;",
+                _     => continue,
+            };
+            self.inner.extend_from_slice(&bytes[run_start..i]);
+            self.inner.extend_from_slice(rep.as_bytes());
+            run_start = i + 1;
+        }
+        self.inner.extend_from_slice(&bytes[run_start..]);
+    }
+
+    /// Cold path for [`push_escaped_text`] when the output charset is narrower
+    /// than UTF-8: characters outside the charset repertoire become numeric
+    /// character references, which requires decoding to `char`.
+    fn push_escaped_text_charset(&mut self, s: &str) {
         for c in s.chars() {
             match c {
                 '&'      => self.push_str("&amp;"),
@@ -135,6 +163,32 @@ impl XmlBuf {
     /// tab / LF / CR to a single space on the receiving end, so
     /// preserving them through the wire requires char-ref escaping.
     pub fn push_escaped_attr(&mut self, s: &str) {
+        if self.charset != OutputCharset::Utf8 {
+            return self.push_escaped_attr_charset(s);
+        }
+        // See `push_escaped_text` — same bulk-copy scan; the attribute path
+        // escapes `"` instead of `>` and additionally char-refs tab / LF.
+        let bytes = s.as_bytes();
+        let mut run_start = 0;
+        for (i, &b) in bytes.iter().enumerate() {
+            let rep: &str = match b {
+                b'&'  => "&amp;",
+                b'<'  => "&lt;",
+                b'"'  => "&quot;",
+                b'\t' => "&#x9;",
+                b'\n' => "&#xA;",
+                b'\r' => "&#xD;",
+                _     => continue,
+            };
+            self.inner.extend_from_slice(&bytes[run_start..i]);
+            self.inner.extend_from_slice(rep.as_bytes());
+            run_start = i + 1;
+        }
+        self.inner.extend_from_slice(&bytes[run_start..]);
+    }
+
+    /// Cold path for [`push_escaped_attr`]; see [`push_escaped_text_charset`].
+    fn push_escaped_attr_charset(&mut self, s: &str) {
         for c in s.chars() {
             match c {
                 '&'      => self.push_str("&amp;"),
@@ -172,6 +226,49 @@ mod tests {
         b.push_escaped_attr(r#"say "hello" & <bye>"#);
         // '>' does not require escaping in attribute values (XML spec § 2.4)
         assert_eq!(b.into_string(), r#"say &quot;hello&quot; &amp; &lt;bye>"#);
+    }
+
+    #[test]
+    fn escape_text_carriage_return() {
+        // \r must survive as a char-ref so a round-trip parse doesn't
+        // normalize it to \n (XML § 2.11).
+        let mut b = XmlBuf::new();
+        b.push_escaped_text("line\rmore");
+        assert_eq!(b.into_string(), "line&#xD;more");
+    }
+
+    #[test]
+    fn escape_attr_control_chars() {
+        // Tab / LF / CR survive as char-refs so attribute-value
+        // normalization (XML § 3.3.3) doesn't collapse them to spaces.
+        let mut b = XmlBuf::new();
+        b.push_escaped_attr("a\tb\nc\rd");
+        assert_eq!(b.into_string(), "a&#x9;b&#xA;c&#xD;d");
+    }
+
+    #[test]
+    fn escape_text_multibyte_interleaved() {
+        // Multibyte runs around an escape: the bulk-copy fast path must
+        // not split a UTF-8 sequence or mis-handle the boundary.
+        let mut b = XmlBuf::new();
+        b.push_escaped_text("日本<語&>🦀");
+        assert_eq!(b.into_string(), "日本&lt;語&amp;&gt;🦀");
+    }
+
+    #[test]
+    fn escape_text_latin1_charset() {
+        // Cold path: a code point outside Latin-1 becomes a numeric
+        // char-ref while in-repertoire bytes pass through.
+        let mut b = XmlBuf::with_charset(0, OutputCharset::Latin1);
+        b.push_escaped_text("é < 語");
+        assert_eq!(b.into_string(), "é &lt; &#35486;");
+    }
+
+    #[test]
+    fn escape_attr_ascii_charset() {
+        let mut b = XmlBuf::with_charset(0, OutputCharset::Ascii);
+        b.push_escaped_attr("é \"q\"");
+        assert_eq!(b.into_string(), "&#233; &quot;q&quot;");
     }
 
     #[test]
