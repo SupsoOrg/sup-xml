@@ -717,7 +717,6 @@ fn is_uri_attribute(element: &str, attr: &str) -> bool {
             "audio" | "embed" | "frame" | "iframe" | "img" | "input" | "script"
             | "source" | "track" | "video"),
         "usemap"     => matches!(element, "img" | "input" | "object"),
-        "value"      => element == "input",
         _ => false,
     }
 }

@@ -836,7 +836,15 @@ fn resolve_xpath_variable_prefixes(expr: &mut Expr, node: &Node) {
     fn walk(e: &mut Expr, node: &Node) {
         match e {
             Expr::Variable(name) => {
-                if let Some((p, local)) = name.split_once(':') {
+                // `$Q{uri}local` braced EQName — normalize to the same
+                // `{uri}local` (or bare `local` for an empty URI) Clark
+                // key the declaration is stored under.
+                if let Some(rest) = name.strip_prefix("Q{") {
+                    if let Some((uri, local)) = rest.split_once('}') {
+                        *name = if uri.is_empty() { local.to_string() }
+                                else { format!("{{{uri}}}{local}") };
+                    }
+                } else if let Some((p, local)) = name.split_once(':') {
                     if let Some(uri) = lookup(node, p) {
                         *name = format!("{{{uri}}}{local}");
                     }

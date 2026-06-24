@@ -6625,7 +6625,14 @@ fn eval_instr(
                 }
                 None => false,
             };
-            let s = stringify_into_string(state, body, ctx_node, pos, size)?;
+            // XSLT 3.0 §6.2 — a dynamic error while evaluating the
+            // content of a non-terminating xsl:message must not abort the
+            // transformation.
+            let s = match stringify_into_string(state, body, ctx_node, pos, size) {
+                Ok(s)                    => s,
+                Err(_) if !terminate_yes => String::new(),
+                Err(e)                   => return Err(e),
+            };
             // Emit to stderr (libxslt convention).  Real apps wire a
             // callback; we keep it simple.
             eprintln!("xsl:message: {s}");
