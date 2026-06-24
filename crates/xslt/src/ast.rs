@@ -826,6 +826,11 @@ pub enum Instr {
     Unsupported {
         name:     String,
         fallback: Body,
+        /// Whether the instruction had at least one `xsl:fallback` child
+        /// (XSLT 1.0 §15).  An *empty* `xsl:fallback` is still a valid
+        /// fallback — its presence means "recover silently", distinct
+        /// from no fallback at all (which is a runtime error).
+        has_fallback: bool,
     },
 }
 

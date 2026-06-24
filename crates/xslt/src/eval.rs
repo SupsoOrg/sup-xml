@@ -6746,14 +6746,15 @@ fn eval_instr(
                 copy_value_into(state, &map, true)?;
             }
         }
-        Instr::Unsupported { name, fallback } => {
-            // XSLT 1.0 §15: when the unknown instruction has
-            // `xsl:fallback` children, run them as if they replaced
-            // the parent.  Otherwise an unrecognised instruction
-            // surfaces as a runtime error — only when reached, so
-            // forward-compat stylesheets that gate the bad branch
-            // with `xsl:choose` etc. don't fail unnecessarily.
-            if !fallback.is_empty() {
+        Instr::Unsupported { name, fallback, has_fallback } => {
+            // XSLT 1.0 §15: when the unknown instruction has one or more
+            // `xsl:fallback` children, run them as if they replaced the
+            // parent.  An empty xsl:fallback still counts (recover
+            // silently).  With no fallback at all the unrecognised
+            // instruction surfaces as a runtime error — only when
+            // reached, so forward-compat stylesheets that gate the bad
+            // branch with `xsl:choose` etc. don't fail unnecessarily.
+            if *has_fallback {
                 eval_body(state, fallback, ctx_node, pos, size)?;
             } else {
                 return Err(XsltError::InvalidStylesheet(format!(

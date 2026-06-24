@@ -5751,15 +5751,17 @@ fn compile_raw_instr_into(
                 )));
             }
             let mut fallback = Body::new();
+            let mut has_fallback = false;
             for child in node.children() {
                 if child.is_element()
                     && is_xslt_element(child)
                     && child.local_name() == "fallback"
                 {
+                    has_fallback = true;
                     fallback.append(compile_body(child)?);
                 }
             }
-            Instr::Unsupported { name: other.to_string(), fallback }
+            Instr::Unsupported { name: other.to_string(), fallback, has_fallback }
         }
     };
     out.push(instr, pos);
@@ -7292,17 +7294,20 @@ fn compile_literal_element(node: &Node) -> Result<Instr, XsltError> {
     let ext_uris = collect_extension_element_uris(node);
     if !ext_uris.is_empty() && ext_uris.contains(&name.uri) {
         let mut fallback = Body::new();
+        let mut has_fallback = false;
         for child in node.children() {
             if child.is_element()
                 && is_xslt_element(child)
                 && child.local_name() == "fallback"
             {
+                has_fallback = true;
                 fallback.append(compile_body(child)?);
             }
         }
         return Ok(Instr::Unsupported {
             name: format!("{}{}", name.uri, name.local),
             fallback,
+            has_fallback,
         });
     }
     let mut attributes = Vec::new();
