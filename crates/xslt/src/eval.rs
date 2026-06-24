@@ -3808,9 +3808,14 @@ fn run_template_body(
     // committing.  A mismatch (wrong count, or a node kind the type
     // doesn't admit) is a dynamic error.  Atomic / `item()` result
     // types aren't checked structurally here (they atomise).
-    let declared = template.as_type.as_deref()
-        .and_then(parse_as_atomic_type)
-        .filter(|st| template_result_type_is_node_kind(st));
+    let declared_st = template.as_type.as_deref().and_then(parse_as_atomic_type);
+    let declared = declared_st.clone().filter(template_result_type_is_node_kind);
+    // An *atomic* `as=` result type (e.g. `xs:string+`) atomises the body
+    // sequence and casts each item to the target type (XSLT 2.0 §10) — a
+    // node-selecting body like `<xsl:sequence select="x"/>` must yield the
+    // nodes' atomised values, not the nodes themselves.
+    let declared_atomic = declared_st.filter(|st|
+        matches!(st.item, sup_xml_core::xpath::ast::ItemType::Atomic(_)));
     let result = if let Some(st) = declared {
         use crate::result_tree::ResultBuilder;
         let prev = std::mem::replace(&mut state.builder, ResultBuilder::new());
@@ -3825,6 +3830,27 @@ fn run_template_body(
                 )));
             }
             for n in &nodes { copy_result_node(state, n); }
+            Ok(())
+        })
+    } else if let Some(st) = declared_atomic {
+        use crate::result_tree::ResultBuilder;
+        use sup_xml_core::xpath::ast::{SequenceType, Occurrence};
+        let prev = std::mem::replace(&mut state.builder, ResultBuilder::new());
+        let r = eval_body(state, &template.body, ctx_node, pos, size);
+        let written = std::mem::replace(&mut state.builder, prev);
+        r.and_then(|()| {
+            let nodes = written.finish();
+            let single = SequenceType { item: st.item.clone(), occurrence: Occurrence::One };
+            for n in &nodes {
+                let mut s = String::new();
+                append_string_value(n, &mut s);
+                let atom = sup_xml_core::xpath::eval::cast_value_to_atomic(
+                    &Value::String(s), &single, state.idx)
+                    .map_err(|_| XsltError::InvalidStylesheet(format!(
+                        "template result can't be atomised to the declared \
+                         type {:?} (XTTE0505)", st.item)))?;
+                copy_value_into(state, &atom, true)?;
+            }
             Ok(())
         })
     } else {
