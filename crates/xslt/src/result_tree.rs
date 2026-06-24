@@ -179,6 +179,21 @@ impl ResultBuilder {
                 }
             }
         }
+        // An element's own prefix must be declared in scope wherever it
+        // is serialized.  When a prefixed element is grafted from a
+        // source tree (xsl:copy-of) and its binding was declared on an
+        // ancestor that isn't part of the copy, the binding would
+        // otherwise be lost; re-declare it here unless an open ancestor
+        // already binds the same prefix to the same URI.
+        if let Some(p) = name.prefix.clone() {
+            if !name.uri.is_empty() && p != "xml"
+                && !namespaces.iter().any(|(pp, _)| pp.as_deref() == Some(p.as_str()))
+                && !self.inscope_prefixed_namespaces().iter()
+                    .any(|(sp, su)| sp == &p && su == &name.uri)
+            {
+                namespaces.push((Some(p), name.uri.clone()));
+            }
+        }
         self.stack.push(ResultNode::Element {
             name,
             namespaces,

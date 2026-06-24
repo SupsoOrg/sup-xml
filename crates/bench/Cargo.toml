@@ -47,6 +47,14 @@ harness = false
 name    = "parse"
 harness = false
 
+# Serializer throughput: sup-xml's serializer vs libxml2's xmlDocDumpMemory.
+# Fixtures isolate the text / attribute escaping path (clean / prose / cjk /
+# attrs / escapes) so the bulk-copy escaping fast path can be measured per
+# content shape.
+[[bench]]
+name    = "serialize"
+harness = false
+
 # Fast dev-loop bench — runs each parser × fixture combination N=2 times by
 # default (env: SUPXML_MINI_ITERS), no warmup, prints a plain MB/s table.
 # Bypasses criterion's 10-sample floor so the whole sweep finishes in under

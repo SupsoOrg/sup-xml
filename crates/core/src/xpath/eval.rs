@@ -10445,6 +10445,25 @@ fn cast_value_to_atomic_impl<I: DocIndexLike>(
                     if name == "hexBinary" {
                         return Ok(make_typed(kind, trimmed.to_ascii_uppercase(), None, None));
                     }
+                    // XSD §3.2.6 — xs:duration canonical form carries
+                    // months into years and seconds into days/h/m/s; an
+                    // all-zero duration is "PT0S".  Compose the
+                    // year-month and day-time bodies.
+                    if name == "duration" {
+                        if let Some((months, seconds)) = parse_duration_split(trimmed) {
+                            if months == 0 && seconds == 0 {
+                                return Ok(make_typed(kind, "PT0S".into(), None, None));
+                            }
+                            let ym = format_year_month_duration_months(months.abs());
+                            let dt = format_day_time_duration_secs(seconds.abs());
+                            let mut lex = String::new();
+                            if months < 0 || seconds < 0 { lex.push('-'); }
+                            lex.push('P');
+                            if months != 0 { lex.push_str(ym.trim_start_matches('P')); }
+                            if seconds != 0 { lex.push_str(dt.trim_start_matches('P')); }
+                            return Ok(make_typed(kind, lex, None, None));
+                        }
+                    }
                     Ok(make_typed(kind, trimmed.to_string(), None, None))
                 }
                 _ => Ok(Value::String(s)),

@@ -8481,7 +8481,11 @@ fn evaluate_with_params(
             if p.tunnel { state.tunnel_pool.insert(qname_key(&p.name), v); }
             else        { out.push((p.name.clone(), v, None)); }
         } else if p.body.is_empty() {
-            let v = Value::String(String::new());
+            // XSLT 2.0 §9.3 — with `as=` present and no content the
+            // supplied value is the empty sequence; only without `as=`
+            // is it the zero-length string.
+            let v = if p.as_type.is_some() { Value::Sequence(Vec::new()) }
+                    else { Value::String(String::new()) };
             if p.tunnel { state.tunnel_pool.insert(qname_key(&p.name), v); }
             else        { out.push((p.name.clone(), v, None)); }
         } else {

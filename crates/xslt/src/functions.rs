@@ -1383,7 +1383,10 @@ fn function_available_fn<I: DocIndexLike>(
     // atomic of type T from a single value, so any recognised XSD
     // built-in type counts as available with arity 1.
     let xsd_ns = "http://www.w3.org/2001/XMLSchema";
+    // The abstract types have no constructor function (XPath 2.0 §17.1.1).
     if uri == xsd_ns
+        && !matches!(local.as_str(),
+            "anyAtomicType" | "anySimpleType" | "anyType" | "NOTATION")
         && sup_xml_core::xpath::eval::atomic_kind_static(&local).is_some()
     {
         let n = arity.unwrap_or(1);
