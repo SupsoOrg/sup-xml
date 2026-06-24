@@ -1423,4 +1423,9 @@ pub struct UserFunction {
     /// XSLT 3.0 package this function belongs to (`0` = principal).
     /// See [`Template::package_id`].
     pub package_id: u32,
+    /// XSLT 3.0 §10.3 `new-each-time` — `false` only when explicitly
+    /// `no`, marking the function deterministic so repeated calls with
+    /// equal arguments return the same (identical) result; `yes`/`maybe`/
+    /// absent leave it `true`.
+    pub new_each_time: bool,
 }

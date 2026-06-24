@@ -1286,6 +1286,22 @@ fn call_user_function_pure_xpath<I: DocIndexLike>(
         }
         cur
     }
+    // XSLT 3.0 §10.3 — a deterministic (`new-each-time="no"`) function
+    // returns the same result for equal arguments.  Key the memo on the
+    // *coerced* argument values (after each param's as= conversion), so a
+    // node argument atomised to xs:integer keys by its value, not its
+    // (per-iteration) node identity.  A function-item argument has no
+    // stable key and disables the cache.
+    let memo_key: Option<String> = if uf.new_each_time {
+        None
+    } else {
+        function_memo_key(&uf.name, &coerced, idx)
+    };
+    if let Some(key) = &memo_key {
+        if let Some(cached) = FUNCTION_MEMO.with(|m| m.borrow().get(key).cloned()) {
+            return Ok(cached);
+        }
+    }
     let chain = build_chain(&uf.params, coerced, outer);
     let static_ctx = static_ctx_for_version(&style.version);
     // XSLT 2.0 §10.3 — the focus is *undefined* inside an
@@ -1312,18 +1328,56 @@ fn call_user_function_pure_xpath<I: DocIndexLike>(
     // through coerce_to_atomic_sequence and translate the XSLT error
     // back into an XmlError so the pure-XPath call site can surface
     // it the same way as any other dynamic function failure.
-    if let Some(t) = &uf.as_type {
+    let result = if let Some(t) = &uf.as_type {
         // A user-defined (schema) return type coerces via the schema;
         // built-in atomic types route through the ordinary coercion.
         if let Some(typed) = crate::eval::coerce_to_user_schema_type(&v, t, style, idx) {
-            return Ok(typed);
+            typed
+        } else if let Some(st) = crate::eval::parse_as_atomic_type(t) {
+            crate::eval::coerce_to_atomic_sequence(v, &st, idx)
+                .map_err(|e| err(&format!("xsl:function: {e}")))?
+        } else {
+            v
         }
-        if let Some(st) = crate::eval::parse_as_atomic_type(t) {
-            return crate::eval::coerce_to_atomic_sequence(v, &st, idx)
-                .map_err(|e| err(&format!("xsl:function: {e}")));
-        }
+    } else {
+        v
+    };
+    if let Some(key) = memo_key {
+        FUNCTION_MEMO.with(|m| m.borrow_mut().insert(key, result.clone()));
     }
-    Ok(v)
+    Ok(result)
+}
+
+/// Build the memo key for a deterministic `xsl:function` call — the
+/// expanded name followed by a type-tagged form of each argument value.
+/// Returns `None` when an argument is a function item (no stable key).
+fn function_memo_key<I: DocIndexLike>(
+    name: &QName, args: &[Value], idx: &I,
+) -> Option<String> {
+    fn item_key<I: DocIndexLike>(v: &Value, idx: &I, out: &mut String) -> bool {
+        use sup_xml_core::xpath::eval::value_to_string;
+        match v {
+            Value::Map(_) | Value::Function(_) | Value::Array(_) => return false,
+            Value::NodeSet(ns) =>
+                for id in ns { out.push_str(&format!("n{id};")); },
+            Value::ForeignNodeSet(_) => return false,
+            Value::Sequence(items) =>
+                for it in items { if !item_key(it, idx, out) { return false; } },
+            Value::Boolean(b) => out.push_str(if *b { "bT" } else { "bF" }),
+            Value::Number(n) => out.push_str(&format!("#{}:{}", n.kind(),
+                value_to_string(v, idx))),
+            Value::String(s) => { out.push('s'); out.push_str(s); }
+            Value::Typed(t) => out.push_str(&format!("t{}:{}", t.kind, t.lexical)),
+            Value::IntRange { lo, hi } => out.push_str(&format!("r{lo}..{hi}")),
+        }
+        out.push('\u{1f}');
+        true
+    }
+    let mut key = format!("{{{}}}{}\u{1e}", name.uri, name.local);
+    for a in args {
+        if !item_key(a, idx, &mut key) { return None; }
+    }
+    Some(key)
 }
 
 /// Sequence-constructor interpreter for `xsl:function` bodies.
@@ -2989,6 +3043,10 @@ pub fn apply_stylesheet_full_with_params_and_initial(
         }
     }
 
+    // Deterministic-function memo holds NodeIds into THIS transform's
+    // index — discard any entries left over from a previous apply.
+    FUNCTION_MEMO.with(|m| m.borrow_mut().clear());
+
     let mut state = EvalState {
         style,
         idx:        &idx,
@@ -3798,6 +3856,13 @@ enum IterateControl {
 }
 
 thread_local! {
+    /// Memoized results of deterministic (`new-each-time="no"`) stylesheet
+    /// functions, keyed by expanded name + argument values.  Repeated
+    /// calls with equal arguments return the same (identical-identity)
+    /// result (XSLT 3.0 §10.3).  Holds NodeIds into the current
+    /// transform's index, so it is cleared at the start of every apply.
+    static FUNCTION_MEMO: std::cell::RefCell<HashMap<String, Value>> =
+        std::cell::RefCell::new(HashMap::new());
     static ITERATE_CONTROL: std::cell::RefCell<Option<IterateControl>> =
         const { std::cell::RefCell::new(None) };
     /// XSLT 3.0 §18.2 streaming — while a streamed transform processes

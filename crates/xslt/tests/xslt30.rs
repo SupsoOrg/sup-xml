@@ -2795,7 +2795,16 @@ fn run_case_xslt2(
         src_doc = &src_doc_owned;
     }
     let base = xsl_path.to_string_lossy().to_string();
-    let stylesheet = match Stylesheet::compile_str_with_loader(&xsl_text, loader, Some(&base)) {
+    // Thread static parameters (XSLT 3.0 §3.5) so shadow attributes /
+    // use-when that depend on a `<param static="yes">` compile — some
+    // version="2.0" stylesheets exercise these 3.0 features.
+    let compiled = if !case.static_params.is_empty() {
+        Stylesheet::compile_str_with_loader_and_static_params(
+            &xsl_text, loader, Some(&base), &case.static_params)
+    } else {
+        Stylesheet::compile_str_with_loader(&xsl_text, loader, Some(&base))
+    };
+    let stylesheet = match compiled {
         Ok(s)  => s,
         Err(_) => return Some(check_expectation_against(
             &case.expects, &ApplyResult::CompileFailed)),

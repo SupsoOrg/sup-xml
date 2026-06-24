@@ -2365,7 +2365,17 @@ fn compile_function(node: &Node) -> Result<UserFunction, XsltError> {
     }
     let as_type = read_attribute(node, "as").map(str::to_string);
     let visibility = read_attribute(node, "visibility").map(str::to_string);
-    Ok(UserFunction { name: qname, params, body, as_type, visibility, package_id: 0 })
+    // `new-each-time` may be supplied via a `_new-each-time` shadow
+    // attribute fed by a static parameter (§3.9), which takes precedence
+    // over a static literal value when both are present.
+    let new_each_time_val = match resolve_shadow_attr(node, "new-each-time")? {
+        Some(s) => Some(s),
+        None    => read_attribute(node, "new-each-time").map(str::to_string),
+    };
+    let new_each_time = new_each_time_val
+        .map_or(true, |v| !matches!(v.trim(), "no" | "false" | "0"));
+    Ok(UserFunction { name: qname, params, body, as_type, visibility,
+        package_id: 0, new_each_time })
 }
 
 /// Walk `body` for instructions that reference the dynamic focus —
