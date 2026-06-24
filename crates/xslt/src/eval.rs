@@ -7781,9 +7781,14 @@ fn evaluate_variable_value(
     // `xsl:call-template` / `xsl:apply-templates` produces a typed
     // sequence whose items keep their identity / type, rather than
     // being deep-copied into an RTF.
+    // A body that constructs a map / array / function item must be
+    // captured through the sequence sink even when the `as=` type is a
+    // singleton (e.g. `as="item()"`): building it as an RTF would route
+    // the function item through the result tree (XTDE0450).
     let want_item_seq = v.as_type.as_deref()
         .map(as_is_sequence_typed)
-        .unwrap_or(false);
+        .unwrap_or(false)
+        || body_constructs_function_item(&v.body);
     if want_item_seq && body_uses_sequence_or_call(&v.body) {
         state.sequence_sinks.push(Vec::new());
         let res = eval_body(state, &v.body, ctx_node, pos, size);
