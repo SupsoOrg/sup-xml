@@ -233,6 +233,29 @@ pub(crate) fn validate_input_type_annotations(
     Ok(())
 }
 
+/// XSLT 1.0 §3.4 / XTSE0270 — an `xsl:strip-space` and an
+/// `xsl:preserve-space` that match the same element name (same NameTest,
+/// hence same priority) at the same import precedence conflict.
+pub(crate) fn validate_whitespace_rules(ast: &StylesheetAst) -> Result<(), XsltError> {
+    use crate::ast::WhitespaceRule;
+    let mut seen: std::collections::HashMap<(String, String, i32), (bool, bool)> =
+        std::collections::HashMap::new();
+    for r in &ast.whitespace_rules {
+        let (q, prec, strip) = match r {
+            WhitespaceRule::Strip(q, p)    => (q, *p, true),
+            WhitespaceRule::Preserve(q, p) => (q, *p, false),
+        };
+        let e = seen.entry((q.uri.clone(), q.local.clone(), prec)).or_insert((false, false));
+        if strip { e.0 = true; } else { e.1 = true; }
+    }
+    if seen.values().any(|(s, p)| *s && *p) {
+        return Err(XsltError::InvalidStylesheet(
+            "xsl:strip-space and xsl:preserve-space both match the same element \
+             name at the same import precedence (XTSE0270)".into()));
+    }
+    Ok(())
+}
+
 fn set_static_param(key: String, v: sup_xml_core::xpath::eval::Value) {
     STATIC_PARAMS.with(|m| { m.borrow_mut().insert(key, v); });
 }

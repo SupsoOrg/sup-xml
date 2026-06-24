@@ -191,6 +191,7 @@ impl Stylesheet {
         compiler::validate_call_template_with_params(&ast)?;
         compiler::validate_iterate_constraints(&ast)?;
         compiler::validate_input_type_annotations(&ast)?;
+        compiler::validate_whitespace_rules(&ast)?;
         compiler::validate_package_exposes(&ast)?;
         compiler::validate_global_context_item(&ast)?;
         compiler::validate_declared_modes(&ast)?;
