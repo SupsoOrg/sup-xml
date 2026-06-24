@@ -1304,10 +1304,10 @@ pub fn compile(doc: &Document) -> Result<StylesheetAst, XsltError> {
         for attr in root.attributes() {
             let name = attr.name();
             if attr.namespace.get().is_some() || name.starts_with("xmlns") || name.contains(':') { continue; }
-            // XSLT 3.0 §3.8.2 — a shadow attribute `_X` supplies `X`.
-            let name = if version_enables_3_0(&ast.version) {
-                name.strip_prefix('_').unwrap_or(name)
-            } else { name };
+            // XSLT 3.0 §3.8.2 — a shadow attribute `_X` supplies `X`; the
+            // `_X` form is reserved for shadow attributes regardless of
+            // the stylesheet's declared version, so recognise it always.
+            let name = name.strip_prefix('_').unwrap_or(name);
             // xsl:package (XSLT 3.0 §3.5) additionally carries name,
             // package-version, and declared-modes.
             let package_attr = local == "package"
@@ -2163,19 +2163,19 @@ fn compile_top_level(node: &Node, ast: &mut StylesheetAst, pos: u32) -> Result<(
         "include"  => {
             validate_xslt_only_attributes(node, "xsl:include", &["href"])?;
             validate_must_be_empty(node, "xsl:include")?;
-            let href = read_attribute(node, "href").ok_or_else(||
+            let href = read_attr_with_shadow(node, "href")?.ok_or_else(||
                 XsltError::InvalidStylesheet(
                     "xsl:include requires an href= attribute (XTSE0010)".into()))?;
-            ast.includes.push(href.to_string());
+            ast.includes.push(href);
             ast.include_positions.push(pos);
         }
         "import"   => {
             validate_xslt_only_attributes(node, "xsl:import", &["href"])?;
             validate_must_be_empty(node, "xsl:import")?;
-            let href = read_attribute(node, "href").ok_or_else(||
+            let href = read_attr_with_shadow(node, "href")?.ok_or_else(||
                 XsltError::InvalidStylesheet(
                     "xsl:import requires an href= attribute (XTSE0010)".into()))?;
-            ast.imports.push(href.to_string());
+            ast.imports.push(href);
         }
         "namespace-alias" => {
             if let Some(pair) = compile_namespace_alias(node)? {

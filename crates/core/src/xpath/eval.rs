@@ -12098,6 +12098,38 @@ fn min_max_avg<I: DocIndexLike>(
     if strs.is_empty() {
         return Ok(Value::NodeSet(Vec::new()));
     }
+    // F&O §15.4 / FORG0006 — fn:min / fn:max require the items to be
+    // mutually comparable.  Mixing distinct, non-castable categories
+    // (numeric vs temporal vs boolean) is an error.  String /
+    // untypedAtomic / node values stay "compatible" (category 0) so an
+    // untyped node sequence that happens to be numeric still works.
+    if matches!(op, MinMaxOp::Min | MinMaxOp::Max) {
+        fn category(x: &Value) -> u8 {
+            let numeric = |k: &str| matches!(k, "integer" | "decimal" | "float" | "double");
+            let temporal = |k: &str| matches!(k,
+                "date" | "time" | "dateTime" | "duration" | "dayTimeDuration"
+                | "yearMonthDuration" | "gYear" | "gYearMonth" | "gMonth"
+                | "gMonthDay" | "gDay");
+            match x {
+                Value::Number(_) => 1,
+                Value::Boolean(_) => 3,
+                Value::Typed(t) if numeric(t.kind) => 1,
+                Value::Typed(t) if t.kind == "boolean" => 3,
+                Value::Typed(t) if temporal(t.kind) => 4,
+                _ => 0,
+            }
+        }
+        let items: Vec<&Value> = match v {
+            Value::Sequence(items) => items.iter().collect(),
+            other => vec![other],
+        };
+        let cats: std::collections::HashSet<u8> =
+            items.iter().map(|x| category(x)).filter(|&c| c != 0).collect();
+        if cats.len() > 1 {
+            return Err(xpath_err(
+                "fn:min/fn:max over values of incompatible types (FORG0006)"));
+        }
+    }
     // Typed values (durations, dates, dateTimes, times) aggregate by
     // their semantic value, not as numbers or strings.
     if let Value::Sequence(items) = v {
