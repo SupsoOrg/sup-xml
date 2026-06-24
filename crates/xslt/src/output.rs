@@ -198,28 +198,16 @@ fn first_character_data_char(nodes: &[ResultNode]) -> Option<char> {
     None
 }
 
-/// html-method content errors: a #x7F–#x9F control character in text or
-/// attribute content (SERE0014), or a `>` inside a processing
-/// instruction (SERE0015).
+/// html-method content error: a `>` inside a processing instruction
+/// (SERE0015), which an HTML PI (terminated by `>`, not `?>`) genuinely
+/// cannot represent.  A #x7F–#x9F control character in text/attribute
+/// content is NOT raised here: the Serialization spec lets the html
+/// method recover by emitting a numeric character reference, which the
+/// serializer does.
 fn html_content_error(nodes: &[ResultNode]) -> Result<(), XsltError> {
-    let is_c1 = |c: char| matches!(c as u32, 0x7F..=0x9F);
     for n in nodes {
         match n {
-            ResultNode::Text { content, .. } => {
-                if content.chars().any(is_c1) {
-                    return Err(XsltError::InvalidStylesheet(
-                        "serialization: the html output method cannot represent a \
-                         #x7F–#x9F control character in content (SERE0014)".into()));
-                }
-            }
-            ResultNode::Element { attributes, children, .. } => {
-                if attributes.iter().any(|(_, v)| v.chars().any(is_c1)) {
-                    return Err(XsltError::InvalidStylesheet(
-                        "serialization: the html output method cannot represent a \
-                         #x7F–#x9F control character in content (SERE0014)".into()));
-                }
-                html_content_error(children)?;
-            }
+            ResultNode::Element { children, .. } => html_content_error(children)?,
             ResultNode::ProcessingInstruction { data, .. } => {
                 if data.contains('>') {
                     return Err(XsltError::InvalidStylesheet(

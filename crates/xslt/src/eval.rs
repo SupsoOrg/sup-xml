@@ -10002,12 +10002,70 @@ fn matching_body_uses_regex_group(body: &[Instr]) -> bool {
     if crate::walk::body_invokes_templates(body) { return true; }
     let mut hit = false;
     crate::walk::walk_body(body, &mut |e| {
-        use sup_xml_core::xpath::ast::Expr;
-        if let Expr::FunctionCall(name, _) = e {
-            if name == "regex-group" || name.ends_with(":regex-group") { hit = true; }
-        }
+        if expr_uses_regex_group(e) { hit = true; }
     });
     hit
+}
+
+/// Whether `regex-group(...)` appears anywhere in `e` — including nested
+/// inside `for`/`let`/`!`(map) / predicates etc., not just at the top
+/// level.  `walk_body` only hands us each instruction's top-level Expr,
+/// so the capture-detecting analyze-string gate must recurse here.
+fn expr_uses_regex_group(e: &sup_xml_core::xpath::ast::Expr) -> bool {
+    use sup_xml_core::xpath::ast::{Expr, LocationPath, LookupKey};
+    let is_rg = |name: &str| name == "regex-group" || name.ends_with(":regex-group");
+    match e {
+        Expr::FunctionCall(name, args) =>
+            is_rg(name) || args.iter().any(expr_uses_regex_group),
+        Expr::NamedFunctionRef { name, .. } => is_rg(name),
+        Expr::Or(a, b) | Expr::And(a, b) | Expr::Eq(a, b) | Expr::Ne(a, b)
+        | Expr::Lt(a, b) | Expr::Gt(a, b) | Expr::Le(a, b) | Expr::Ge(a, b)
+        | Expr::ValueEq(a, b) | Expr::ValueNe(a, b) | Expr::ValueLt(a, b)
+        | Expr::ValueGt(a, b) | Expr::ValueLe(a, b) | Expr::ValueGe(a, b)
+        | Expr::Add(a, b) | Expr::Sub(a, b) | Expr::Mul(a, b) | Expr::Div(a, b)
+        | Expr::Mod(a, b) | Expr::Union(a, b) | Expr::IDiv(a, b)
+        | Expr::Intersect(a, b) | Expr::Except(a, b) | Expr::Range(a, b)
+        | Expr::SimpleMap(a, b) | Expr::NodeBefore(a, b) | Expr::NodeAfter(a, b)
+        | Expr::NodeIs(a, b) =>
+            expr_uses_regex_group(a) || expr_uses_regex_group(b),
+        Expr::Neg(a) | Expr::InstanceOf(a, _) | Expr::CastAs(a, _)
+        | Expr::CastableAs(a, _) | Expr::TreatAs(a, _)
+        | Expr::WithDefaultCollation(_, a) | Expr::BackwardsCompat(a) =>
+            expr_uses_regex_group(a),
+        Expr::Sequence(items) => items.iter().any(expr_uses_regex_group),
+        Expr::IfThenElse { cond, then_branch, else_branch } =>
+            expr_uses_regex_group(cond) || expr_uses_regex_group(then_branch)
+            || expr_uses_regex_group(else_branch),
+        Expr::For { bindings, body } | Expr::Let { bindings, body } =>
+            bindings.iter().any(|(_, e)| expr_uses_regex_group(e))
+            || expr_uses_regex_group(body),
+        Expr::Quantified { bindings, test, .. } =>
+            bindings.iter().any(|(_, e)| expr_uses_regex_group(e))
+            || expr_uses_regex_group(test),
+        Expr::FilterPath { primary, predicates, steps } =>
+            expr_uses_regex_group(primary)
+            || predicates.iter().any(expr_uses_regex_group)
+            || steps.iter().any(|s| s.predicates.iter().any(expr_uses_regex_group)),
+        Expr::Path(LocationPath::Absolute(steps))
+        | Expr::Path(LocationPath::Relative(steps)) =>
+            steps.iter().any(|s| s.predicates.iter().any(expr_uses_regex_group)),
+        Expr::TryCatch { body, catches } =>
+            expr_uses_regex_group(body)
+            || catches.iter().any(|c| expr_uses_regex_group(&c.body)),
+        Expr::MapConstructor(es) =>
+            es.iter().any(|(k, v)| expr_uses_regex_group(k) || expr_uses_regex_group(v)),
+        Expr::ArrayConstructor { members, .. } =>
+            members.iter().any(expr_uses_regex_group),
+        Expr::Lookup(b, key) =>
+            expr_uses_regex_group(b)
+            || matches!(key, LookupKey::Expr(e) if expr_uses_regex_group(e)),
+        Expr::UnaryLookup(key) =>
+            matches!(key, LookupKey::Expr(e) if expr_uses_regex_group(e)),
+        Expr::InlineFunction { body, .. } => expr_uses_regex_group(body),
+        Expr::DynamicCall { func, args } =>
+            expr_uses_regex_group(func) || args.iter().any(expr_uses_regex_group),
+        _ => false,
+    }
 }
 
 /// Run the matching / non-matching bodies over a pre-built

@@ -480,11 +480,13 @@ pub(crate) fn dispatch<I: DocIndexLike>(
             }
             // XSLT 3.0 §15.4 / XTDE1061 — calling current-group() when
             // there is no current group (outside any xsl:for-each-group
-            // body) is a dynamic error, not an empty sequence.
+            // body) is a dynamic error.  XSLT 2.0 instead returns the
+            // empty sequence, so the error is gated on 3.0+.
             match current_group {
                 Some(g) => Ok(Value::NodeSet(g.to_vec())),
-                None => return Some(Err(err(
+                None if xslt_version_3_or_more(xslt_version) => return Some(Err(err(
                     "current-group() called outside xsl:for-each-group (XTDE1061)"))),
+                None => Ok(Value::NodeSet(Vec::new())),
             }
         }
         "current-grouping-key" => {
@@ -492,11 +494,12 @@ pub(crate) fn dispatch<I: DocIndexLike>(
                 return Some(Err(err("current-grouping-key() takes no arguments")));
             }
             // XSLT 3.0 §15.4 / XTDE1071 — likewise an error when there is
-            // no current grouping key.
+            // no current grouping key (empty sequence in XSLT 2.0).
             match current_grouping_key {
                 Some(k) => Ok(k.clone()),
-                None => return Some(Err(err(
+                None if xslt_version_3_or_more(xslt_version) => return Some(Err(err(
                     "current-grouping-key() called outside xsl:for-each-group (XTDE1071)"))),
+                None => Ok(Value::String(String::new())),
             }
         }
         // XSLT 3.0 §15 `xsl:merge` accessors.  The current merge group

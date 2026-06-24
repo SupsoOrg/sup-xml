@@ -5586,7 +5586,7 @@ fn compile_raw_instr_into(
             // §27.1).  A static literal is validated now (XTSE0020); an
             // AVT-valued attribute is captured and applied at run time.
             let mut serialization_avts: Vec<(String, Avt)> = Vec::new();
-            for a in ["standalone", "omit-xml-declaration", "indent",
+            for a in ["omit-xml-declaration", "indent",
                       "include-content-type", "undeclare-prefixes",
                       "escape-uri-attributes", "byte-order-mark"] {
                 if let Some(v) = read_attribute(node, a) {
@@ -5595,6 +5595,17 @@ fn compile_raw_instr_into(
                     } else {
                         parse_yesno_strict(v, "xsl:result-document", a)?;
                     }
+                }
+            }
+            // `standalone` accepts yes | no | omit (XSLT 2.0 §20), not just
+            // a boolean — validate it separately.
+            if let Some(v) = read_attribute(node, "standalone") {
+                if value_is_avt(&v) {
+                    serialization_avts.push(("standalone".to_string(), avt(node, v)?));
+                } else if !matches!(v.trim(), "yes" | "no" | "omit") {
+                    return Err(XsltError::InvalidStylesheet(format!(
+                        "xsl:result-document standalone='{v}' must be 'yes', 'no', \
+                         or 'omit' (XTSE0020)")));
                 }
             }
             // String-valued serialization attributes may also be AVTs
@@ -5928,10 +5939,11 @@ fn validate_xslt_only_attributes(
         if attr.namespace.get().is_some() || n.contains(':') { continue; }
         // XSLT 3.0 §3.8.2 — a shadow attribute `_X` supplies attribute
         // `X` through a compile-time AVT; it is permitted wherever `X`
-        // itself is.
-        let resolved = if is_xslt_3_0_compile() {
-            n.strip_prefix('_').unwrap_or(n)
-        } else { n };
+        // itself is.  The `_X` form is reserved for shadow attributes
+        // regardless of the stylesheet's declared version (a 3.0
+        // processor honours them even in a `version="2.0"` host), so it
+        // is recognised unconditionally.
+        let resolved = n.strip_prefix('_').unwrap_or(n);
         // XSLT 3.0 §3.6 added default-mode and default-validation to the
         // attributes permitted on any XSLT element.
         let generic_3_0 = is_xslt_3_0_compile()
@@ -8727,12 +8739,15 @@ fn parse_qname_on(context_node: &Node, s: &str) -> Result<QName, XsltError> {
 fn reject_invalid_pattern_axes(expr: &Expr, who: &str) -> Result<(), XsltError> {
     use sup_xml_core::xpath::ast::{Axis, LocationPath};
     fn walk_step(s: &sup_xml_core::xpath::ast::Step, who: &str) -> Result<(), XsltError> {
-        // XSLT 3.0 §5.5.3 ForwardAxisP — the forward axes child,
-        // descendant, attribute, self, descendant-or-self and namespace
-        // are all permitted in a pattern step; reverse axes are not.
+        // XSLT 2.0 §5.5.2 permits only child, attribute, self and the
+        // descendant-or-self (`//`) axes in a pattern step.  XSLT 3.0
+        // §5.5.3 additionally allows the descendant and namespace forward
+        // axes; using those in a 2.0 stylesheet is XTSE0340.  Reverse
+        // axes are never permitted.
         let ok = matches!(s.axis,
-            Axis::Child | Axis::Attribute | Axis::Descendant
-            | Axis::DescendantOrSelf | Axis::Self_ | Axis::Namespace);
+            Axis::Child | Axis::Attribute | Axis::DescendantOrSelf | Axis::Self_)
+            || (is_xslt_3_0_compile()
+                && matches!(s.axis, Axis::Descendant | Axis::Namespace));
         if !ok {
             return Err(XsltError::InvalidStylesheet(format!(
                 "{who} pattern axis '{:?}' not permitted in a pattern (XTSE0340)",

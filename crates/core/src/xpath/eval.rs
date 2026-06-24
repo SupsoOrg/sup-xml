@@ -1385,7 +1385,37 @@ pub fn eval_expr<I: DocIndexLike>(expr: &Expr, ctx: &EvalCtx<'_>, idx: &I) -> Re
                 | (Value::ForeignNodeSet(_), Value::NodeSet(_)) => Err(xpath_err(
                     "mixed primary/foreign node-set union is not supported",
                 )),
-                _ => Err(xpath_err("union operator requires node-sets on both sides")),
+                // A union operand may be any node sequence, including the
+                // empty sequence (`$nodes | ()`) or a sequence whose items
+                // are themselves node-sets (XPath 2.0 §3.3.3).  Flatten
+                // those to node ids; a non-node item is a type error.
+                (lv, rv) => {
+                    fn as_node_ids(v: &Value) -> Option<Vec<NodeId>> {
+                        match v {
+                            Value::NodeSet(ns) => Some(ns.clone()),
+                            Value::Sequence(items) => {
+                                let mut out = Vec::new();
+                                for it in items {
+                                    match it {
+                                        Value::NodeSet(ns) => out.extend(ns),
+                                        _ => return None,
+                                    }
+                                }
+                                Some(out)
+                            }
+                            _ => None,
+                        }
+                    }
+                    match (as_node_ids(&lv), as_node_ids(&rv)) {
+                        (Some(mut a), Some(b)) => {
+                            a.extend(b);
+                            dedup_sort(&mut a);
+                            Ok(Value::NodeSet(a))
+                        }
+                        _ => Err(xpath_err(
+                            "union operator requires node-sets on both sides")),
+                    }
+                }
             }
         }
         Expr::Path(path) => {
@@ -4731,19 +4761,18 @@ fn date_arith_sub(l: &Value, r: &Value) -> Option<Value> {
                 numeric: None, boolean: None, user_type: None,
             })))
         }
-        // date - duration → date
+        // date - duration → date — add the negated duration so the
+        // month arithmetic (xs:yearMonthDuration) is handled, not just
+        // the day-time component.
         (Value::Typed(a), Value::Typed(b))
             if a.kind == "date" && is_duration_kind(b.kind) =>
         {
-            let (y, m, d, _) = parse_xsd_date_only(&a.lexical)?;
-            let sec = parse_day_time_duration_secs(&b.lexical)?;
-            let day_delta = sec / 86_400;
-            let new_days = ymd_to_days(y, m, d) - day_delta;
-            let (ny, nm, nd) = days_to_ymd(new_days);
-            let lex = format!("{:04}-{:02}-{:02}", ny, nm, nd);
-            Some(Value::Typed(Box::new(TypedAtomic {
-                kind: "date", lexical: lex, numeric: None, boolean: None, user_type: None,
-            })))
+            let negated = TypedAtomic {
+                kind: b.kind,
+                lexical: negate_duration_lex(&b.lexical),
+                numeric: None, boolean: None, user_type: None,
+            };
+            return date_arith_add(l, &Value::Typed(Box::new(negated)));
         }
         // dateTime - duration → dateTime / time - duration → time —
         // implement as addition of the negated duration so the
@@ -11265,6 +11294,10 @@ fn node_path_string<I: DocIndexLike>(node: NodeId, idx: &I) -> String {
     let mut cur = node;
     loop {
         let parent = idx.parent(cur);
+        // A node bound as a sequence item is parentless: it lives under a
+        // synthetic wrapper document (a storage artefact), so treat that
+        // wrapper as no parent at all.
+        let parent = parent.filter(|p| !idx.is_synthetic_wrap(*p));
         // A tree whose root is not a document node: the root node itself
         // is written as the fn:path placeholder `Q{…fn…}root()`, which
         // stands in for the root's own step (it is not appended to it).
