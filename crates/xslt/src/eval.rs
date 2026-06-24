@@ -772,11 +772,17 @@ impl<'a, I: DocIndexLike> XPathBindings for XsltBindings<'a, I> {
     }
     fn function_available_in(&self, ns_uri: &str, name: &str, arity: usize) -> bool {
         // A registered user `xsl:function` with this expanded name and
-        // arity (XSLT 2.0 function names are always namespaced).  Built-in
-        // and EXSLT availability is decided by the core engine.
-        self.user_functions.unwrap_or(&[]).iter().any(|uf| {
+        // arity (XSLT 2.0 function names are always namespaced).
+        if self.user_functions.unwrap_or(&[]).iter().any(|uf| {
             uf.name.uri == ns_uri && uf.name.local == name && uf.params.len() == arity
-        })
+        }) {
+            return true;
+        }
+        // Engine-level built-ins in the fn: namespace (e.g.
+        // `available-system-properties`) that the core XPath layer doesn't
+        // enumerate — so `fn:function-lookup` can reflect them as items.
+        (ns_uri.is_empty() || ns_uri == "http://www.w3.org/2005/xpath-functions")
+            && crate::functions::is_builtin_function_arity(name, arity)
     }
     fn function_signature_in(&self, ns_uri: &str, name: &str, arity: usize)
         -> Option<sup_xml_core::xpath::FunctionSig> {

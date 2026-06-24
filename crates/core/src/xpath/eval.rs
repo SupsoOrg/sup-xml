@@ -5717,7 +5717,10 @@ fn eval_hof_function<I: DocIndexLike>(
                 (FN_NAMESPACE.to_string(), qname.clone())
             };
             let available = if ns.is_empty() || ns.as_str() == FN_NAMESPACE {
+                // Core enumerates most fn: built-ins; the host layer adds the
+                // rest (XSLT-engine functions like available-system-properties).
                 xpath_function_available(&local, ctx)
+                    || ctx.bindings.function_available_in(FN_NAMESPACE, &local, arity)
             } else {
                 ctx.bindings.function_available_in(&ns, &local, arity)
             };

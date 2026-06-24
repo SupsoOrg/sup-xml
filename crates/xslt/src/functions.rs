@@ -1162,6 +1162,15 @@ pub(crate) fn is_builtin_function(local: &str) -> bool {
     FN_NAMES.iter().any(|e| *e == local)
 }
 
+/// A built-in XSLT/XPath function of the given name *and* an arity it
+/// accepts.  Used by `fn:function-lookup` / named function references so
+/// engine-level built-ins (e.g. `available-system-properties`) that the
+/// core XPath layer doesn't enumerate are still reflectable as function
+/// items.
+pub(crate) fn is_builtin_function_arity(local: &str, arity: usize) -> bool {
+    is_builtin_function(local) && builtin_arity_ok(local, arity)
+}
+
 fn element_available_fn<I: DocIndexLike>(
     args: &[Value], idx: &I, extras: &[&str], xslt_version: &str,
 ) -> Result<Value> {
