@@ -7719,58 +7719,76 @@ pub fn validate_output_declarations(ast: &StylesheetAst) -> Result<(), XsltError
         let mut on_stack = HS::new();
         visit(name, &mut on_stack, &mut done, &by_name)?;
     }
-    // XTSE1560 applies only to the principal (unnamed) output
-    // declarations; named output definitions are independent and may
-    // freely differ from the default and from each other.
-    let outs: Vec<&OutputSpec> = ast.outputs.iter().filter(|o| o.name.is_none()).collect();
-    if outs.len() < 2 { return Ok(()); }
-    macro_rules! check {
-        ($field:ident, $label:expr) => {
-            let mut prev: Option<&_> = None;
-            for o in &outs {
-                if let Some(v) = &o.$field {
-                    if let Some(p) = prev {
-                        if p != v {
-                            return Err(XsltError::InvalidStylesheet(format!(
-                                "conflicting xsl:output {}='{:?}' vs '{:?}' \
-                                 (XTSE1560)", $label, p, v,
-                            )));
+    // XTSE1560 — declarations of an output definition (the principal
+    // unnamed output, or all `xsl:output` sharing one name) that specify
+    // the same serialization parameter with different explicit values
+    // conflict.  Different parameters merge; only same-parameter
+    // disagreement is the error.
+    fn check_conflicts(outs: &[&OutputSpec]) -> Result<(), XsltError> {
+        if outs.len() < 2 { return Ok(()); }
+        macro_rules! check {
+            ($field:ident, $label:expr) => {
+                let mut prev: Option<&_> = None;
+                for o in outs {
+                    if let Some(v) = &o.$field {
+                        if let Some(p) = prev {
+                            if p != v {
+                                return Err(XsltError::InvalidStylesheet(format!(
+                                    "conflicting xsl:output {}='{:?}' vs '{:?}' \
+                                     (XTSE1560)", $label, p, v,
+                                )));
+                            }
+                        } else {
+                            prev = Some(v);
                         }
-                    } else {
-                        prev = Some(v);
                     }
                 }
-            }
-        };
-    }
-    macro_rules! check_bool {
-        ($field:ident, $label:expr) => {
-            let mut prev: Option<bool> = None;
-            for o in &outs {
-                if let Some(v) = o.$field {
-                    if let Some(p) = prev {
-                        if p != v {
-                            return Err(XsltError::InvalidStylesheet(format!(
-                                "conflicting xsl:output {}='{}' vs '{}' \
-                                 (XTSE1560)", $label, p, v,
-                            )));
+            };
+        }
+        macro_rules! check_bool {
+            ($field:ident, $label:expr) => {
+                let mut prev: Option<bool> = None;
+                for o in outs {
+                    if let Some(v) = o.$field {
+                        if let Some(p) = prev {
+                            if p != v {
+                                return Err(XsltError::InvalidStylesheet(format!(
+                                    "conflicting xsl:output {}='{}' vs '{}' \
+                                     (XTSE1560)", $label, p, v,
+                                )));
+                            }
+                        } else {
+                            prev = Some(v);
                         }
-                    } else {
-                        prev = Some(v);
                     }
                 }
-            }
-        };
+            };
+        }
+        check!(method, "method");
+        check!(encoding, "encoding");
+        check_bool!(indent, "indent");
+        check_bool!(omit_xml_declaration, "omit-xml-declaration");
+        check!(standalone, "standalone");
+        check!(media_type, "media-type");
+        check!(doctype_public, "doctype-public");
+        check!(doctype_system, "doctype-system");
+        check!(version, "version");
+        Ok(())
     }
-    check!(method, "method");
-    check!(encoding, "encoding");
-    check_bool!(indent, "indent");
-    check_bool!(omit_xml_declaration, "omit-xml-declaration");
-    check!(standalone, "standalone");
-    check!(media_type, "media-type");
-    check!(doctype_public, "doctype-public");
-    check!(doctype_system, "doctype-system");
-    check!(version, "version");
+    let unnamed: Vec<&OutputSpec> = ast.outputs.iter().filter(|o| o.name.is_none()).collect();
+    check_conflicts(&unnamed)?;
+    // Each named output definition independently: same-named declarations
+    // must agree on every explicitly-set parameter.
+    let mut seen: std::collections::HashSet<(String, String)> = HS::new();
+    for o in &ast.outputs {
+        let Some(name) = &o.name else { continue; };
+        if !seen.insert((name.uri.clone(), name.local.clone())) { continue; }
+        let group: Vec<&OutputSpec> = ast.outputs.iter()
+            .filter(|x| x.name.as_ref()
+                .is_some_and(|n| n.uri == name.uri && n.local == name.local))
+            .collect();
+        check_conflicts(&group)?;
+    }
     Ok(())
 }
 
