@@ -2229,7 +2229,20 @@ fn apply_builtin_template_with_args(
     // the built-in action; modes without an `xsl:mode` declaration use
     // the XSLT 1.0 default, `text-only-copy`.
     match mode_on_no_match(state.style, mode) {
-        OnNoMatch::DeepSkip => Ok(()),
+        // deep-skip does nothing for an unmatched node — except the
+        // document node, whose built-in rule still applies templates to
+        // its children so matchable descendants are reached (XSLT 3.0
+        // §6.7: deep-skip does not skip the document node).
+        OnNoMatch::DeepSkip => {
+            if matches!(state.idx.kind(node), XPathNodeKind::Document) {
+                let children: Vec<NodeId> = state.idx.children(node).to_vec();
+                let total = children.len();
+                for (i, child) in children.iter().enumerate() {
+                    apply_one_to_node_with_args(state, *child, mode, i + 1, total, args)?;
+                }
+            }
+            Ok(())
+        }
         OnNoMatch::Fail => Err(XsltError::dynamic("XTDE0555",
             "no template rule matches and the mode's on-no-match is 'fail'")),
         OnNoMatch::DeepCopy => {
