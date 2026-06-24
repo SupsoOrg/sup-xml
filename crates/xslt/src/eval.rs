@@ -7969,7 +7969,7 @@ fn build_rtf_nodes_no_merge(
         source_types: state.source_types,
         apply_imports_ctx: state.apply_imports_ctx.clone(),
         user_exts: state.user_exts,
-        sequence_sinks: std::mem::take(&mut state.sequence_sinks),
+        sequence_sinks: Vec::new(),
         template_call_depth: state.template_call_depth,
         current_group: std::mem::take(&mut state.current_group),
         in_grouping: state.in_grouping,
@@ -7993,7 +7993,6 @@ fn build_rtf_nodes_no_merge(
     state.variables       = tmp.variables;
     state.rtfs            = tmp.rtfs;
     state.rtf_scopes      = tmp.rtf_scopes;
-    state.sequence_sinks  = tmp.sequence_sinks;
     state.current_group   = tmp.current_group;
     state.regex_groups    = tmp.regex_groups;
     state.tunnel_pool     = tmp.tunnel_pool;
