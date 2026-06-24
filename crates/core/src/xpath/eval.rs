@@ -3021,7 +3021,7 @@ fn axis_nodes<I: DocIndexLike>(axis: &Axis, node: NodeId, idx: &I) -> Vec<NodeId
     match axis {
         Axis::Self_ => vec![node],
         Axis::Child => idx.children(node).to_vec(),
-        Axis::Parent => idx.parent(node).into_iter().collect(),
+        Axis::Parent => effective_parent(node, idx).into_iter().collect(),
         Axis::Attribute => idx.attr_range(node).collect(),
         Axis::Ancestor => ancestors(node, idx),
         Axis::AncestorOrSelf => {
@@ -3043,12 +3043,20 @@ fn axis_nodes<I: DocIndexLike>(axis: &Axis, node: NodeId, idx: &I) -> Vec<NodeId
     }
 }
 
+/// Parent of `node` for navigation purposes, treating a synthetic
+/// wrapper document (the storage artefact under which sequence-bound
+/// nodes live) as no parent: such nodes are parentless roots of their
+/// own tree (XSLT 2.0 §5.7 — items of a sequence are parentless).
+fn effective_parent<I: DocIndexLike>(node: NodeId, idx: &I) -> Option<NodeId> {
+    idx.parent(node).filter(|p| !idx.is_synthetic_wrap(*p))
+}
+
 fn ancestors<I: DocIndexLike>(node: NodeId, idx: &I) -> Vec<NodeId> {
     let mut result = Vec::new();
-    let mut cur = idx.parent(node);
+    let mut cur = effective_parent(node, idx);
     while let Some(p) = cur {
         result.push(p);
-        cur = idx.parent(p);
+        cur = effective_parent(p, idx);
     }
     result
 }
@@ -3086,7 +3094,7 @@ fn is_valid_lexical_qname(s: &str) -> bool {
 
 fn doc_root_of<I: DocIndexLike>(node: NodeId, idx: &I) -> NodeId {
     let mut cur = node;
-    while let Some(p) = idx.parent(cur) { cur = p; }
+    while let Some(p) = effective_parent(cur, idx) { cur = p; }
     cur
 }
 
@@ -3107,7 +3115,7 @@ fn collect_desc<I: DocIndexLike>(node: NodeId, idx: &I, out: &mut Vec<NodeId>) {
 }
 
 fn following_siblings<I: DocIndexLike>(node: NodeId, idx: &I) -> Vec<NodeId> {
-    let parent = match idx.parent(node) {
+    let parent = match effective_parent(node, idx) {
         Some(p) => p,
         None => return Vec::new(),
     };
@@ -3120,7 +3128,7 @@ fn following_siblings<I: DocIndexLike>(node: NodeId, idx: &I) -> Vec<NodeId> {
 }
 
 fn preceding_siblings<I: DocIndexLike>(node: NodeId, idx: &I) -> Vec<NodeId> {
-    let parent = match idx.parent(node) {
+    let parent = match effective_parent(node, idx) {
         Some(p) => p,
         None => return Vec::new(),
     };
@@ -3135,7 +3143,7 @@ fn following<I: DocIndexLike>(node: NodeId, idx: &I) -> Vec<NodeId> {
     let desc_set: HashSet<NodeId> = descendants(node, idx, true).into_iter().collect();
     let mut result = Vec::new();
     let mut cur = node;
-    while let Some(parent) = idx.parent(cur) {
+    while let Some(parent) = effective_parent(cur, idx) {
         let siblings = idx.children(parent);
         // Attribute and namespace nodes aren't in `children()`; in
         // document order (XPath 1.0 §5) they precede the element's
@@ -3158,7 +3166,7 @@ fn preceding<I: DocIndexLike>(node: NodeId, idx: &I) -> Vec<NodeId> {
     let ancestor_set: HashSet<NodeId> = ancestors(node, idx).into_iter().collect();
     let mut result = Vec::new();
     let mut cur = node;
-    while let Some(parent) = idx.parent(cur) {
+    while let Some(parent) = effective_parent(cur, idx) {
         let siblings = idx.children(parent);
         let pos = siblings.iter().position(|&n| n == cur).unwrap_or(0);
         for &sib in siblings[..pos].iter().rev() {
