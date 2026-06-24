@@ -8743,11 +8743,25 @@ fn eval_function<I: DocIndexLike>(name: &str, args: &[Expr], ctx: &EvalCtx<'_>, 
                 }
                 _ => {
                     let n = value_to_number(&a, idx);
+                    // Round via the exact decimal representation of the
+                    // double — `n * 10^precision` loses precision and can
+                    // turn a near-tie (e.g. the double for 250.025, which is
+                    // slightly above it) into an exact .5 tie, picking the
+                    // wrong even neighbour.  Fall back to f64 scaling for
+                    // values outside the decimal range (e.g. 1e300).
+                    use rust_decimal::prelude::ToPrimitive;
+                    if n.is_finite() {
+                        if let Some(dec) = rust_decimal::Decimal::from_f64_retain(n) {
+                            if let Some(mut f) = round_decimal_half_to_even(dec, precision).to_f64() {
+                                // F&O §4.5.4 — a zero result keeps the sign of
+                                // the argument (negative arg → "-0").
+                                if f == 0.0 && n.is_sign_negative() { f = -0.0; }
+                                return Ok(preserve_numeric_kind(&a, f));
+                            }
+                        }
+                    }
                     let scale = 10f64.powi(precision);
                     let scaled = n * scale;
-                    // Half-to-even: at an exact 0.5 fraction pick the
-                    // neighbour with an even integer part (f64::round
-                    // rounds half away from zero, which doesn't match).
                     let rounded = if scaled.fract().abs() == 0.5 {
                         let floor = scaled.floor();
                         if (floor as i64) % 2 == 0 { floor } else { floor + 1.0 }
@@ -8755,9 +8769,9 @@ fn eval_function<I: DocIndexLike>(name: &str, args: &[Expr], ctx: &EvalCtx<'_>, 
                         scaled.round()
                     };
                     let result = rounded / scale;
-                    // F&O §4.5.4 — a zero result is positive zero (avoid the
-                    // "-0" a negative-scale roundtrip would produce).
-                    let result = if result == 0.0 { 0.0 } else { result };
+                    let result = if result == 0.0 {
+                        if n.is_sign_negative() { -0.0 } else { 0.0 }
+                    } else { result };
                     Ok(preserve_numeric_kind(&a, result))
                 }
             }
