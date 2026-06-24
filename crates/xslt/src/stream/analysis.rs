@@ -407,8 +407,16 @@ pub fn analyze_expr(expr: &Expr, ctx: Posture) -> Ps {
 
         // ── function calls ──────────────────────────────────────────
         Expr::FunctionCall(name, args) => {
-            let arg_ps: Vec<Ps> = args.iter().map(|a| analyze_expr(a, ctx)).collect();
             let local = name.rsplit(':').next().unwrap_or(name);
+            // fn:last() needs the size of the context sequence, which is
+            // unknowable while streaming a striding / crawling (consuming)
+            // sequence — that makes the construct non-streamable (XTSE3430).
+            // fn:position() stays streamable (the running position is
+            // tracked); and over a grounded context item last() is fine.
+            if local == "last" && matches!(ctx, Striding | Crawling) {
+                return Ps::rejected();
+            }
+            let arg_ps: Vec<Ps> = args.iter().map(|a| analyze_expr(a, ctx)).collect();
             analyze_function(local, &arg_ps)
         }
 
