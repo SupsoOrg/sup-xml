@@ -119,10 +119,13 @@ impl ResultTree {
 
         let mut out = match method {
             "html"  => serialize_html(children, &self.output, &self.character_map, indent, escape_uri),
+            // `method="text"` (XSLT 2.0 §20) — character data only, with
+            // any `use-character-maps` substitutions applied.
+            "text" => serialize_text(children, &self.character_map),
             // `method="json"` (XSLT 3.0 §26.2): the JSON string is built
             // as a text node by the evaluator — emit it raw, with no XML
             // declaration or markup escaping.
-            "text" | "json" => serialize_text(children),
+            "json" => serialize_text(children, &[]),
             // The xhtml output method uses XML syntax with the
             // html-family parameter defaults applied above, plus the
             // XHTML empty-element rules (non-void elements keep an
@@ -936,17 +939,30 @@ fn serialize_html_node(node: &ResultNode, out: &mut String, cmap: &[(char, Strin
 
 // ── text serialiser ───────────────────────────────────────────────
 
-pub fn serialize_text(children: &[ResultNode]) -> String {
+pub fn serialize_text(children: &[ResultNode], cmap: &[(char, String)]) -> String {
     let mut out = String::new();
-    for c in children { append_text(c, &mut out); }
+    for c in children { append_text(c, &mut out, cmap); }
     out
 }
 
-fn append_text(node: &ResultNode, out: &mut String) {
+fn append_text(node: &ResultNode, out: &mut String, cmap: &[(char, String)]) {
     match node {
-        ResultNode::Text { content, .. } => out.push_str(content),
+        ResultNode::Text { content, .. } => {
+            if cmap.is_empty() {
+                out.push_str(content);
+            } else {
+                // `use-character-maps` substitutions apply to the text
+                // output method too (XSLT 2.0 §20.1).
+                for ch in content.chars() {
+                    match cmap_lookup(ch, cmap) {
+                        Some(s) => out.push_str(s),
+                        None    => out.push(ch),
+                    }
+                }
+            }
+        }
         ResultNode::Element { children, .. } => {
-            for c in children { append_text(c, out); }
+            for c in children { append_text(c, out, cmap); }
         }
         // Comments + PIs are stripped entirely in text output.
         _ => {}

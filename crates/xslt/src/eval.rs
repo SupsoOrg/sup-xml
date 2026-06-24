@@ -7393,6 +7393,22 @@ pub(crate) fn coerce_to_atomic_sequence<I: sup_xml_core::xpath::DocIndexLike>(
             };
             let mut out = Vec::with_capacity(items.len());
             for it in items {
+                // Subtype substitution: an item whose dynamic type is
+                // already a subtype of the target keeps its narrower type
+                // (an xs:integer under `as="xs:decimal*"` stays an
+                // integer), so later `instance of` queries answer
+                // correctly (XPath §3.5.4 — no downcast on widening).
+                let already_subtype = match &it {
+                    Value::Typed(t) =>
+                        sup_xml_core::xpath::eval::xsd_is_subtype_of(t.kind, target),
+                    Value::Number(n) =>
+                        sup_xml_core::xpath::eval::xsd_is_subtype_of(n.kind(), target),
+                    _ => false,
+                };
+                if already_subtype {
+                    out.push(it);
+                    continue;
+                }
                 match sup_xml_core::xpath::eval::cast_value_to_atomic(&it, &single, idx) {
                     Ok(c) => out.push(c),
                     Err(_) => out.push(it),
