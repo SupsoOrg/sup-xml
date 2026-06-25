@@ -66,10 +66,12 @@ memchr = "2"
 # positioning — with runtime CPU dispatch (AVX2/SSE4.2/NEON) and a scalar
 # fallback, so behavior is identical and only the happy path gets faster.
 simdutf8 = "0.1"
-# EXSLT `regexp:test` / `regexp:replace` (XPath function family at
-# http://exslt.org/regular-expressions).  Perl-style semantics —
-# matches what libexslt/libxml2 ship, modulo backreferences in
-# replacement which we serve via `${N}` instead of `$N` if needed.
+# EXSLT `regexp:test` / `regexp:match` / `regexp:replace` ONLY (XPath
+# function family at http://exslt.org/regular-expressions).  These are
+# specified against ECMAScript regex — a richer flavor than XSD §F (word
+# boundaries, backreferences, …) — so they keep this engine on purpose.
+# All XPath/XSLT regex (fn:matches/replace/tokenize, xsl:analyze-string)
+# runs on the in-house `crate::regex` engine and does NOT use this crate.
 regex = "1"
 # Calendar types + arithmetic for the EXSLT date family
 # (`xpath::exslt::date`).  Minimal feature set: `std` only — we
