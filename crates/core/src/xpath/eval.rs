@@ -7820,13 +7820,8 @@ fn eval_function<I: DocIndexLike>(name: &str, args: &[Expr], ctx: &EvalCtx<'_>, 
             // whole dialect — anchors, find semantics, class subtraction,
             // `\p{IsBlock}`, XSD `\s`/`\d`/`\w`, the `i`/`s`/`m`/`x`
             // flags, and the strict rejection of `(?…)` forms (FORX0002).
-            let (src, f) = native_regex_source(&pattern, &flags)?;
-            return crate::regex::compile_with_cached_flags(
-                &src, ctx.bindings.regex_dialect(), f,
-            )
-                .map(|p| Value::Boolean(p.find_match(&input)))
-                .map_err(|e| xpath_err(format!("invalid regex: {e}"))
-                    .with_xpath_code("FORX0002"));
+            return compile_xpath_pattern(&pattern, &flags, ctx.bindings.regex_dialect())
+                .map(|p| Value::Boolean(p.find_match(&input)));
         }
         "replace" => {
             if args.len() < 3 || args.len() > 4 {
@@ -7838,32 +7833,37 @@ fn eval_function<I: DocIndexLike>(name: &str, args: &[Expr], ctx: &EvalCtx<'_>, 
             let pattern     = arg_str!(1);
             let replacement = arg_str!(2);
             let flags       = if args.len() == 4 { arg_str!(3) } else { String::new() };
-            let re = compile_xpath_regex_dialect(&pattern, &flags,
-                ctx.bindings.regex_dialect())?;
-            // F&O §7.6.3 / FORX0003 — same zero-length-match rule as
-            // tokenize(): replacing an empty match would loop forever,
-            // so it's a dynamic error.
-            if re.is_match("") {
+            let re = compile_xpath_pattern(&pattern, &flags, ctx.bindings.regex_dialect())?;
+            // F&O §7.6.3 / FORX0003 — a pattern that can match a
+            // zero-length string is a dynamic error (replacing an empty
+            // match would not terminate).
+            if re.find_match("") {
                 return Err(xpath_err(format!(
                     "replace(): the pattern '{pattern}' matches a \
                      zero-length string (FORX0003)"
                 )).with_xpath_code("FORX0003"));
             }
-            // XPath 2.0 §7.6.3 replacement syntax: `\$` represents
-            // `$`, `\\` represents `\`, `$N` represents group N,
-            // `$0` represents the full match.  Rust's regex crate
-            // uses `$N` / `${N}` and treats `$` as the only escape
-            // (no backslash escaping).  Translate the XPath form
-            // into the Rust form, capping multi-digit `$N` to the
-            // number of capture groups in the compiled regex so
-            // `$10` past a 5-group regex becomes `$1` + literal `0`
-            // (XPath 2.0 §7.6.3 "longest prefix that yields a valid
-            // backref").
-            // captures_len() includes group 0 (the whole match) so
-            // subtract 1 for the user-visible group count.
-            let group_count = re.captures_len().saturating_sub(1);
-            let translated = translate_xpath_replacement(&replacement, group_count)?;
-            Ok(Value::String(re.replace_all(&input, translated.as_str()).into_owned()))
+            let parts = parse_xpath_replacement(&replacement, re.group_count())?;
+            // Walk the non-overlapping matches, emitting the unmatched
+            // text between them and the replacement (with `$N` groups
+            // substituted) for each.
+            let mut out  = String::with_capacity(input.len());
+            let mut last = 0usize;
+            for cap in re.find_captures(&input) {
+                let (ms, me) = cap[0].expect("whole-match span always present");
+                out.push_str(&input[last..ms]);
+                for part in &parts {
+                    match part {
+                        ReplPart::Lit(s)   => out.push_str(s),
+                        ReplPart::Group(n) => if let Some(Some((gs, ge))) = cap.get(*n) {
+                            out.push_str(&input[*gs..*ge]);
+                        },
+                    }
+                }
+                last = me;
+            }
+            out.push_str(&input[last..]);
+            Ok(Value::String(out))
         }
         "tokenize" => {
             // Two-arg form `tokenize(input, pattern)` is the workhorse.
@@ -7883,18 +7883,25 @@ fn eval_function<I: DocIndexLike>(name: &str, args: &[Expr], ctx: &EvalCtx<'_>, 
             if input.is_empty() {
                 return Ok(Value::NodeSet(Vec::new()));
             }
-            let re = compile_xpath_regex_dialect(&pattern, &flags,
-                ctx.bindings.regex_dialect())?;
+            let re = compile_xpath_pattern(&pattern, &flags, ctx.bindings.regex_dialect())?;
             // F&O §7.6.4 / FORX0003 — a pattern that matches the empty
             // string is a dynamic error, since `tokenize` would then
             // produce infinite empty separators.
-            if re.is_match("") {
+            if re.find_match("") {
                 return Err(xpath_err(format!(
                     "tokenize(): the pattern '{pattern}' matches a \
                      zero-length string (FORX0003)"
                 )).with_xpath_code("FORX0003"));
             }
-            let parts: Vec<String> = re.split(&input).map(str::to_string).collect();
+            // Split on the separator matches: the tokens are the text
+            // between (and around) the non-overlapping matches.
+            let mut parts: Vec<String> = Vec::new();
+            let mut last = 0usize;
+            for (s, e) in re.find_iter(&input) {
+                parts.push(input[last..s].to_string());
+                last = e;
+            }
+            parts.push(input[last..].to_string());
             // Materialise the result as a node-set of synthetic text
             // nodes so callers can iterate / count / index into it the
             // way `str:tokenize` already supports.  Indexes that can't
@@ -12964,22 +12971,6 @@ fn sequence_to_numbers<I: DocIndexLike>(v: &Value, idx: &I) -> Vec<f64> {
         .collect()
 }
 
-/// Translate an XPath 2.0 regex pattern + flag string into a compiled
-/// `regex::Regex`.  Flags map to Rust's inline `(?flags)` group:
-///
-/// * `s` — dotall (`.` matches newline)
-/// * `m` — multiline (`^`/`$` match line boundaries)
-/// * `i` — case-insensitive
-/// * `x` — ignore whitespace + `#` comments
-///
-/// XPath 2.0's `q` flag (treat pattern as a literal) is honoured by
-/// pre-escaping the pattern with `regex::escape`.
-/// Public entry point for callers outside the XPath evaluator (e.g.
-/// `xsl:analyze-string`) that need the same XPath 2.0 regex
-/// translation we use internally.
-pub fn compile_xpath_2_0_regex(pattern: &str, flags: &str) -> Result<regex::Regex> {
-    compile_xpath_regex(pattern, flags)
-}
 
 /// Backslash-escape every regex metacharacter in `s` so it matches
 /// literally — the native-engine equivalent of `regex::escape`, used for
@@ -13016,6 +13007,18 @@ fn native_regex_source(
     } else {
         Ok((pattern.to_string(), f))
     }
+}
+
+/// Compile an XPath regex (`pattern` + `flags` string) on the native
+/// engine — the shared entry for `fn:matches`/`replace`/`tokenize` and
+/// `xsl:analyze-string`.  Applies the `q` (literal) flag, validates the
+/// flag letters (FORX0001) and the pattern (FORX0002).
+pub fn compile_xpath_pattern(
+    pattern: &str, flags: &str, dialect: crate::regex::Dialect,
+) -> Result<std::sync::Arc<crate::regex::Pattern>> {
+    let (src, f) = native_regex_source(pattern, flags)?;
+    crate::regex::compile_with_cached_flags(&src, dialect, f)
+        .map_err(|e| xpath_err(format!("invalid regex: {e}")).with_xpath_code("FORX0002"))
 }
 
 /// True iff `uri` names the W3C HTML ASCII case-insensitive
@@ -13061,176 +13064,64 @@ fn collation_ends_with(s: &str, suf: &str, uri: Option<&str>) -> bool {
     }
 }
 
-/// Translate an XPath 2.0 §7.6.3 replacement string to the Rust
-/// regex crate's replacement form.  XPath escapes `\$` and `\\`
-/// where the regex crate only special-cases `$`.  The function
-/// also raises FORX0004 on any unescaped `\` followed by a non-
-/// `$` / non-`\` character (XPath 2.0 §7.6.3 prohibits the
-/// pattern `\X` for arbitrary X in the replacement).
-fn translate_xpath_replacement(s: &str, group_count: usize) -> Result<String> {
-    let mut out = String::with_capacity(s.len());
+/// One piece of a parsed XPath replacement string: literal text or a
+/// reference to capture group `n` (`n == 0` is the whole match).
+enum ReplPart { Lit(String), Group(usize) }
+
+/// Parse an XPath 2.0 §7.6.3 replacement string into literal/group parts,
+/// resolving `$N` (longest-prefix ≤ `group_count`; trailing digits become
+/// literal) and the `\$` / `\\` escapes.  Raises FORX0004 on an illegal
+/// `\X` escape or an unescaped `$` not followed by a digit.
+fn parse_xpath_replacement(s: &str, group_count: usize) -> Result<Vec<ReplPart>> {
+    let mut parts: Vec<ReplPart> = Vec::new();
+    let mut lit = String::new();
     let mut chars = s.chars().peekable();
     while let Some(c) = chars.next() {
         match c {
-            '\\' => {
-                match chars.next() {
-                    Some('\\') => out.push('\\'),
-                    Some('$')  => out.push('$'),
-                    Some(other) => return Err(xpath_err(format!(
-                        "replace(): replacement contains illegal escape '\\{other}'"
-                    )).with_xpath_code("FORX0004")),
-                    None => return Err(xpath_err(
-                        "replace(): replacement ends with a trailing backslash"
-                    ).with_xpath_code("FORX0004")),
-                }
-            }
-            '$' => {
-                match chars.peek() {
-                    Some(d) if d.is_ascii_digit() => {
-                        // XPath 2.0 §7.6.3: read digits greedily,
-                        // then truncate the trailing digits until the
-                        // resulting backref index is ≤ group_count.
-                        // The truncated digits become literal text.
-                        let mut digits = String::new();
-                        while let Some(&d) = chars.peek() {
-                            if d.is_ascii_digit() { digits.push(d); chars.next(); }
-                            else { break; }
-                        }
-                        // Take the longest prefix whose numeric value
-                        // is ≤ group_count.  The remainder is literal.
-                        let mut take = digits.len();
-                        while take > 0 {
-                            let n: usize = digits[..take].parse().unwrap_or(usize::MAX);
-                            if n <= group_count { break; }
-                            take -= 1;
-                        }
-                        if take == 0 {
-                            // No valid backref — the whole "$" + digits
-                            // becomes literal text in Rust replacement
-                            // syntax.  Escape the `$` so the regex
-                            // crate doesn't treat it as a sigil.
-                            out.push_str("$$");
-                            out.push_str(&digits);
-                        } else if take == digits.len() {
-                            // All digits form a single backref — emit
-                            // `$N` (Rust regex accepts it directly).
-                            out.push('$');
-                            out.push_str(&digits);
-                        } else {
-                            // Some trailing digits are literal text.
-                            // Use the `${N}` form so Rust regex parses
-                            // the backref precisely; then concatenate
-                            // the literal digits.
-                            out.push_str("${");
-                            out.push_str(&digits[..take]);
-                            out.push('}');
-                            out.push_str(&digits[take..]);
-                        }
+            '\\' => match chars.next() {
+                Some('\\') => lit.push('\\'),
+                Some('$')  => lit.push('$'),
+                Some(other) => return Err(xpath_err(format!(
+                    "replace(): replacement contains illegal escape '\\{other}'"
+                )).with_xpath_code("FORX0004")),
+                None => return Err(xpath_err(
+                    "replace(): replacement ends with a trailing backslash"
+                ).with_xpath_code("FORX0004")),
+            },
+            '$' => match chars.peek() {
+                Some(d) if d.is_ascii_digit() => {
+                    let mut digits = String::new();
+                    while let Some(&d) = chars.peek() {
+                        if d.is_ascii_digit() { digits.push(d); chars.next(); } else { break; }
                     }
-                    _ => return Err(xpath_err(
-                        "replace(): unescaped '$' in replacement"
-                    ).with_xpath_code("FORX0004")),
+                    let mut take = digits.len();
+                    while take > 0 {
+                        let n: usize = digits[..take].parse().unwrap_or(usize::MAX);
+                        if n <= group_count { break; }
+                        take -= 1;
+                    }
+                    if take == 0 {
+                        // No valid group reference — the `$` and digits are
+                        // literal text (matches the prior translation path).
+                        lit.push('$');
+                        lit.push_str(&digits);
+                    } else {
+                        if !lit.is_empty() { parts.push(ReplPart::Lit(std::mem::take(&mut lit))); }
+                        parts.push(ReplPart::Group(digits[..take].parse().unwrap()));
+                        lit.push_str(&digits[take..]);
+                    }
                 }
-            }
-            other => out.push(other),
+                _ => return Err(xpath_err(
+                    "replace(): unescaped '$' in replacement"
+                ).with_xpath_code("FORX0004")),
+            },
+            other => lit.push(other),
         }
     }
-    Ok(out)
+    if !lit.is_empty() { parts.push(ReplPart::Lit(lit)); }
+    Ok(parts)
 }
 
-fn compile_xpath_regex(pattern: &str, flags: &str) -> Result<regex::Regex> {
-    compile_xpath_regex_dialect(pattern, flags, crate::regex::Dialect::Xpath)
-}
-
-/// Like [`compile_xpath_regex`] but pre-validates the pattern against
-/// the given dialect's grammar so XSLT-2.0 hosts surface FORX0002 on
-/// constructs only XPath 3.0+ permits (notably non-capturing `(?:`).
-fn compile_xpath_regex_dialect(
-    pattern: &str, flags: &str, dialect: crate::regex::Dialect,
-) -> Result<regex::Regex> {
-    let literal = flags.contains('q');
-    // Strict pre-parse: in XPath 2.0 / Xpath20 mode reject patterns
-    // that include `(?:…)` and the XPath 3.0 inline-modifier forms.
-    // Skip the pre-parse in literal mode (q flag) — there the
-    // pattern is interpreted as plain text, not regex syntax.
-    if !literal && dialect == crate::regex::Dialect::Xpath20 {
-        crate::regex::parser::parse_with(pattern, dialect)
-            .map_err(|e| xpath_err(format!("invalid regex: {e}"))
-                .with_xpath_code("FORX0002"))?;
-    }
-    let mut inline = String::new();
-    if !flags.is_empty() {
-        // Dedupe flag letters — Rust's regex crate rejects duplicate
-        // inline flag characters (`(?ii)` → error), but XPath 2.0
-        // §7.6.1 silently accepts a flag appearing more than once.
-        let mut seen = [false; 128];
-        inline.push_str("(?");
-        for c in flags.chars() {
-            if matches!(c, 's' | 'm' | 'i' | 'x') {
-                let idx = c as usize;
-                if !seen[idx] {
-                    seen[idx] = true;
-                    inline.push(c);
-                }
-            }
-        }
-        inline.push(')');
-        // No flags were translatable → drop the empty prefix.
-        if inline.ends_with("(?)") { inline.clear(); }
-    }
-    let body = if literal {
-        regex::escape(pattern)
-    } else {
-        translate_xsd_regex_escapes(pattern)
-    };
-    let full = format!("{inline}{body}");
-    regex::Regex::new(&full)
-        .map_err(|e| xpath_err(format!("invalid regex: {e}")).with_xpath_code("FORX0002"))
-}
-
-/// Convert the XSD-specific regex escapes (`\c`, `\C`, `\i`, `\I`)
-/// into character-class equivalents Rust's `regex` crate understands.
-///
-/// * `\c` — XML NameChar:  letters, digits, `.`, `-`, `_`, `:`,
-///   plus the Unicode extensions specified in XML 1.0 § 2.3.  We
-///   approximate with the practical ASCII subset most tests rely on.
-/// * `\i` — XML NameStartChar — like `\c` minus the digit /
-///   dash / dot characters that can't open a name.
-/// * `\C` / `\I` — complement of the above.
-///
-/// Escapes inside `[...]` character classes are translated too, with
-/// the same approximate expansion.  Other XSD-specific constructs
-/// (`\p{Is...}` block test, character-class subtraction) pass through
-/// unchanged and may error at compile time — the caller surfaces the
-/// regex-crate error verbatim, which is the right diagnostic.
-fn translate_xsd_regex_escapes(pattern: &str) -> String {
-    const NAME_CHAR:        &str = "A-Za-z0-9._\\-:\u{00B7}\u{C0}-\u{D6}\u{D8}-\u{F6}\u{F8}-\u{2FF}\u{370}-\u{37D}\u{37F}-\u{1FFF}\u{200C}-\u{200D}\u{2070}-\u{218F}\u{2C00}-\u{2FEF}\u{3001}-\u{D7FF}\u{F900}-\u{FDCF}\u{FDF0}-\u{FFFD}";
-    const NAME_CHAR_NEG:    &str = "^A-Za-z0-9._\\-:\u{00B7}\u{C0}-\u{D6}\u{D8}-\u{F6}\u{F8}-\u{2FF}\u{370}-\u{37D}\u{37F}-\u{1FFF}\u{200C}-\u{200D}\u{2070}-\u{218F}\u{2C00}-\u{2FEF}\u{3001}-\u{D7FF}\u{F900}-\u{FDCF}\u{FDF0}-\u{FFFD}";
-    const NAME_START:       &str = "A-Za-z_:\u{C0}-\u{D6}\u{D8}-\u{F6}\u{F8}-\u{2FF}\u{370}-\u{37D}\u{37F}-\u{1FFF}\u{200C}-\u{200D}\u{2070}-\u{218F}\u{2C00}-\u{2FEF}\u{3001}-\u{D7FF}\u{F900}-\u{FDCF}\u{FDF0}-\u{FFFD}";
-    const NAME_START_NEG:   &str = "^A-Za-z_:\u{C0}-\u{D6}\u{D8}-\u{F6}\u{F8}-\u{2FF}\u{370}-\u{37D}\u{37F}-\u{1FFF}\u{200C}-\u{200D}\u{2070}-\u{218F}\u{2C00}-\u{2FEF}\u{3001}-\u{D7FF}\u{F900}-\u{FDCF}\u{FDF0}-\u{FFFD}";
-
-    let mut out = String::with_capacity(pattern.len());
-    let mut chars = pattern.chars().peekable();
-    let mut in_class = false;
-    while let Some(c) = chars.next() {
-        match c {
-            '\\' => {
-                let next = chars.next().unwrap_or('\0');
-                match next {
-                    'c' => if in_class { out.push_str(NAME_CHAR) }    else { out.push_str(&format!("[{NAME_CHAR}]")) },
-                    'C' => if in_class { out.push_str(NAME_CHAR_NEG) } else { out.push_str(&format!("[{NAME_CHAR_NEG}]")) },
-                    'i' => if in_class { out.push_str(NAME_START) }   else { out.push_str(&format!("[{NAME_START}]")) },
-                    'I' => if in_class { out.push_str(NAME_START_NEG) } else { out.push_str(&format!("[{NAME_START_NEG}]")) },
-                    other => { out.push('\\'); out.push(other); }
-                }
-            }
-            '[' => { out.push('['); in_class = true; }
-            ']' => { out.push(']'); in_class = false; }
-            _   => out.push(c),
-        }
-    }
-    out
-}
 
 /// XSD-namespace constructor functions used in XPath 2.0 / XSD 1.1
 /// assertion expressions.  `xs:integer("42")` coerces a string to a

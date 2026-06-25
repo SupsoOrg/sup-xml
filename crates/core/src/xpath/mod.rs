@@ -49,7 +49,7 @@ pub use ast::{FunctionSig, ItemType, Occurrence, SequenceType};
 pub use parser::parse_sequence_type_str;
 pub use context::{DocIndex, INodeKind, is_synthetic_id};
 pub use eval::Value as XPathValue;
-pub use eval::compile_xpath_2_0_regex;
+pub use eval::compile_xpath_pattern;
 pub use index::{DocIndexLike, NodeId, XPathNodeKind};
 
 use crate::error::Result;

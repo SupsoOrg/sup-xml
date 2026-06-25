@@ -83,7 +83,7 @@ fn collect(expr: &Expr, items: &mut Vec<Item>) -> Option<()> {
             items.push(Item { class: c.clone(), min: 1, max: Some(1) });
             Some(())
         }
-        Expr::Quant(inner, min, max) => match inner.as_ref() {
+        Expr::Quant(inner, min, max, _) => match inner.as_ref() {
             Expr::Class(c) => {
                 items.push(Item { class: c.clone(), min: *min, max: *max });
                 Some(())

@@ -156,7 +156,8 @@ impl Builder {
                 Frag { entry: acc }
             }
 
-            Expr::Quant(body, min, max) => self.lower_quant(body, *min, *max, out),
+            Expr::Quant(body, min, max, greedy) =>
+                self.lower_quant(body, *min, *max, *greedy, out),
 
             Expr::Anchor(kind) => {
                 let entry = self.add(State::Assert { kind: *kind, next: out });
@@ -176,11 +177,19 @@ impl Builder {
 
     fn lower_quant(
         &mut self,
-        body: &Expr,
-        min:  u32,
-        max:  Option<u32>,
-        out:  StateId,
+        body:   &Expr,
+        min:    u32,
+        max:    Option<u32>,
+        greedy: bool,
+        out:    StateId,
     ) -> Frag {
+        // A split offers two edges; the VM explores the first with higher
+        // priority.  Greedy quantifiers try the body (more repetitions)
+        // first; reluctant (`…?`) ones try the exit first.
+        let order = |body_edge: StateId, exit_edge: StateId| -> State {
+            if greedy { State::Split(body_edge, exit_edge) }
+            else      { State::Split(exit_edge, body_edge) }
+        };
         // Tail: the optional / unbounded portion that follows the
         // `min` mandatory copies.
         let tail = match max {
@@ -200,7 +209,7 @@ impl Builder {
                 // it), so allocate a placeholder and patch.
                 let split_id = self.add(State::Split(0, out));
                 let body_entry = self.lower(body, split_id).entry;
-                self.states[split_id as usize] = State::Split(body_entry, out);
+                self.states[split_id as usize] = order(body_entry, out);
                 split_id
             }
             Some(m) if m == min => out,
@@ -210,7 +219,7 @@ impl Builder {
                 let mut cur = out;
                 for _ in 0..(m - min) {
                     let body_frag = self.lower(body, cur);
-                    cur = self.add(State::Split(body_frag.entry, out));
+                    cur = self.add(order(body_frag.entry, out));
                 }
                 cur
             }

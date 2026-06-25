@@ -5469,68 +5469,31 @@ fn eval_instr(
                     }
                 }
             }
-            // Prefer the native XSD §F / XPath 2.0 engine when no
-            // flags are in play — it gives version-pinned Unicode
-            // answers (set by the conformance runner around
-            // version-locked test sets) and avoids Rust regex's
-            // looser XPath-grammar interpretation.  Capture groups
-            // aren't exposed yet from the native path; callers that
-            // need `regex-group(n)` fall back to the Rust engine.
-            let uses_captures = matching_body_uses_regex_group(matching);
-            // Reluctant quantifiers (`a+?`, `a{2,4}?`, …) need
-            // shortest-match semantics during partition.  Our
-            // `find_iter` is greedy-only so far — fall back to
-            // Rust regex for those.
-            let has_reluctant = regex_has_reluctant_quantifier(&pattern);
+            // Partition with the native XSD §F / XPath engine, which now
+            // carries flags, capture groups (for `regex-group(n)`), and
+            // reluctant quantifiers — one engine for every analyze-string.
             // One entry per substring in the XSLT 2.0 §15.1 partition:
-            // `(is_match, text, capture-groups)`.  Built first so the
-            // body for each substring can be run with the substring's
-            // position in the partition as `position()` and the total
-            // substring count as `last()` (XSLT 2.0 §5.6).
+            // `(is_match, text, capture-groups)`.  Built first so the body
+            // for each substring can run with the substring's position in
+            // the partition as `position()` / `last()` (XSLT 2.0 §5.6).
             let mut segments: Vec<(bool, String, Vec<String>)> = Vec::new();
-            if flag_s.is_empty() && !uses_captures && !has_reluctant {
-                if let Ok(p) = sup_xml_core::regex::Pattern::compile_with(
-                    &pattern, sup_xml_core::regex::Dialect::Xpath,
-                ) {
-                    let matches = p.find_iter(&input);
-                    let mut cursor = 0usize;
-                    for (start, end) in matches {
-                        if start > cursor {
-                            segments.push((false, input[cursor..start].to_string(), Vec::new()));
-                        }
-                        if end > start {
-                            let m_str = input[start..end].to_string();
-                            // No capture groups from this path —
-                            // group 0 (the whole match) is enough for
-                            // the bodies our gate above accepts.
-                            let groups = vec![m_str.clone()];
-                            segments.push((true, m_str, groups));
-                        }
-                        cursor = end;
-                    }
-                    if cursor < input.len() {
-                        segments.push((false, input[cursor..].to_string(), Vec::new()));
-                    }
-                    return run_analyze_partition(
-                        state, matching, non_matching, &segments, ctx_node);
-                }
-            }
-            // Fallback: Rust regex.  Used when flags are present,
-            // captures are wanted, or the pattern doesn't compile
-            // under the strict XPath dialect.
-            let re = sup_xml_core::xpath::compile_xpath_2_0_regex(&pattern, &flag_s)
-                .map_err(XsltError::from)?;
+            let re = sup_xml_core::xpath::compile_xpath_pattern(
+                &pattern, &flag_s, sup_xml_core::regex::Dialect::Xpath,
+            ).map_err(XsltError::from)?;
             let mut cursor = 0usize;
-            for cap in re.captures_iter(&input) {
-                let m = cap.get(0).unwrap();
-                if m.start() > cursor {
-                    segments.push((false, input[cursor..m.start()].to_string(), Vec::new()));
+            for cap in re.find_captures(&input) {
+                let (ms, me) = cap[0].expect("whole-match span always present");
+                if ms > cursor {
+                    segments.push((false, input[cursor..ms].to_string(), Vec::new()));
                 }
-                let groups: Vec<String> = (0..cap.len())
-                    .map(|i| cap.get(i).map(|m| m.as_str().to_string()).unwrap_or_default())
-                    .collect();
-                segments.push((true, m.as_str().to_string(), groups));
-                cursor = m.end();
+                // group 0 is the whole match; 1..n are the captures, with a
+                // non-participating group rendered as the empty string.
+                let groups: Vec<String> = cap.iter().map(|g| match g {
+                    Some((s, e)) => input[*s..*e].to_string(),
+                    None         => String::new(),
+                }).collect();
+                segments.push((true, input[ms..me].to_string(), groups));
+                cursor = me;
             }
             if cursor < input.len() {
                 segments.push((false, input[cursor..].to_string(), Vec::new()));
@@ -10341,114 +10304,6 @@ fn template_index_of(style: &StylesheetAst, t: &crate::ast::Template) -> Option<
 /// makes the substring the XPath context item; for our XSLT 1.0-
 /// flavoured value model we expose it via a synthetic text node so
 /// the body can reference `.` for its string-value.
-/// Heuristic: does this pattern contain a reluctant quantifier
-/// (`*?`, `+?`, `??`, `}?`) that's *not* inside a character class
-/// or escaped literal?  Used by `xsl:analyze-string` to gate the
-/// native engine — `find_iter` always picks the longest match,
-/// so reluctant patterns would silently produce the wrong
-/// partition and need to route through Rust regex instead.
-fn regex_has_reluctant_quantifier(src: &str) -> bool {
-    let bytes = src.as_bytes();
-    let mut in_class = false;
-    let mut i = 0;
-    while i < bytes.len() {
-        let b = bytes[i];
-        match b {
-            b'\\' => { i += 2; continue; } // skip escape body
-            b'[' if !in_class => { in_class = true; }
-            b']' if in_class  => { in_class = false; }
-            b'?' if !in_class && i > 0 => {
-                let prev = bytes[i - 1];
-                if matches!(prev, b'*' | b'+' | b'?' | b'}') {
-                    return true;
-                }
-            }
-            _ => {}
-        }
-        i += 1;
-    }
-    false
-}
-
-/// True iff the `<xsl:matching-substring>` body references
-/// `regex-group()` anywhere — in a select expression, an AVT-
-/// compiled attribute value, an `xsl:value-of` body, etc.  Used
-/// by `xsl:analyze-string` to decide whether the native regex
-/// engine (no capture support yet) can serve the call or whether
-/// the Rust regex crate's capture-aware path is required.
-fn matching_body_uses_regex_group(body: &[Instr]) -> bool {
-    // A matching-substring body that dispatches to a template carries
-    // the captured groups into the callee (XSLT 2.0 §15.3); we can't
-    // tell statically whether the callee reads them, so capture
-    // conservatively.
-    if crate::walk::body_invokes_templates(body) { return true; }
-    let mut hit = false;
-    crate::walk::walk_body(body, &mut |e| {
-        if expr_uses_regex_group(e) { hit = true; }
-    });
-    hit
-}
-
-/// Whether `regex-group(...)` appears anywhere in `e` — including nested
-/// inside `for`/`let`/`!`(map) / predicates etc., not just at the top
-/// level.  `walk_body` only hands us each instruction's top-level Expr,
-/// so the capture-detecting analyze-string gate must recurse here.
-fn expr_uses_regex_group(e: &sup_xml_core::xpath::ast::Expr) -> bool {
-    use sup_xml_core::xpath::ast::{Expr, LocationPath, LookupKey};
-    let is_rg = |name: &str| name == "regex-group" || name.ends_with(":regex-group");
-    match e {
-        Expr::FunctionCall(name, args) =>
-            is_rg(name) || args.iter().any(expr_uses_regex_group),
-        Expr::NamedFunctionRef { name, .. } => is_rg(name),
-        Expr::Or(a, b) | Expr::And(a, b) | Expr::Eq(a, b) | Expr::Ne(a, b)
-        | Expr::Lt(a, b) | Expr::Gt(a, b) | Expr::Le(a, b) | Expr::Ge(a, b)
-        | Expr::ValueEq(a, b) | Expr::ValueNe(a, b) | Expr::ValueLt(a, b)
-        | Expr::ValueGt(a, b) | Expr::ValueLe(a, b) | Expr::ValueGe(a, b)
-        | Expr::Add(a, b) | Expr::Sub(a, b) | Expr::Mul(a, b) | Expr::Div(a, b)
-        | Expr::Mod(a, b) | Expr::Union(a, b) | Expr::IDiv(a, b)
-        | Expr::Intersect(a, b) | Expr::Except(a, b) | Expr::Range(a, b)
-        | Expr::SimpleMap(a, b) | Expr::NodeBefore(a, b) | Expr::NodeAfter(a, b)
-        | Expr::NodeIs(a, b) =>
-            expr_uses_regex_group(a) || expr_uses_regex_group(b),
-        Expr::Neg(a) | Expr::InstanceOf(a, _) | Expr::CastAs(a, _)
-        | Expr::CastableAs(a, _) | Expr::TreatAs(a, _)
-        | Expr::WithDefaultCollation(_, a) | Expr::BackwardsCompat(a) =>
-            expr_uses_regex_group(a),
-        Expr::Sequence(items) => items.iter().any(expr_uses_regex_group),
-        Expr::IfThenElse { cond, then_branch, else_branch } =>
-            expr_uses_regex_group(cond) || expr_uses_regex_group(then_branch)
-            || expr_uses_regex_group(else_branch),
-        Expr::For { bindings, body } | Expr::Let { bindings, body } =>
-            bindings.iter().any(|(_, e)| expr_uses_regex_group(e))
-            || expr_uses_regex_group(body),
-        Expr::Quantified { bindings, test, .. } =>
-            bindings.iter().any(|(_, e)| expr_uses_regex_group(e))
-            || expr_uses_regex_group(test),
-        Expr::FilterPath { primary, predicates, steps } =>
-            expr_uses_regex_group(primary)
-            || predicates.iter().any(expr_uses_regex_group)
-            || steps.iter().any(|s| s.predicates.iter().any(expr_uses_regex_group)),
-        Expr::Path(LocationPath::Absolute(steps))
-        | Expr::Path(LocationPath::Relative(steps)) =>
-            steps.iter().any(|s| s.predicates.iter().any(expr_uses_regex_group)),
-        Expr::TryCatch { body, catches } =>
-            expr_uses_regex_group(body)
-            || catches.iter().any(|c| expr_uses_regex_group(&c.body)),
-        Expr::MapConstructor(es) =>
-            es.iter().any(|(k, v)| expr_uses_regex_group(k) || expr_uses_regex_group(v)),
-        Expr::ArrayConstructor { members, .. } =>
-            members.iter().any(expr_uses_regex_group),
-        Expr::Lookup(b, key) =>
-            expr_uses_regex_group(b)
-            || matches!(key, LookupKey::Expr(e) if expr_uses_regex_group(e)),
-        Expr::UnaryLookup(key) =>
-            matches!(key, LookupKey::Expr(e) if expr_uses_regex_group(e)),
-        Expr::InlineFunction { body, .. } => expr_uses_regex_group(body),
-        Expr::DynamicCall { func, args } =>
-            expr_uses_regex_group(func) || args.iter().any(expr_uses_regex_group),
-        _ => false,
-    }
-}
 
 /// Run the matching / non-matching bodies over a pre-built
 /// `xsl:analyze-string` partition.  Per XSLT 2.0 §5.6 the context

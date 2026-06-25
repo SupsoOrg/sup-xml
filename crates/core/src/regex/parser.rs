@@ -34,8 +34,11 @@ pub enum Expr {
     /// preference between branches (no backtracking semantics to
     /// preserve), but the NFA emits them in source order.
     Alt(Vec<Expr>),
-    /// Counted repetition.  `max == None` means unbounded.
-    Quant(Box<Expr>, u32, Option<u32>),
+    /// Counted repetition.  `max == None` means unbounded.  The `bool` is
+    /// the greediness: `true` = greedy (prefer more repetitions), `false`
+    /// = reluctant (`…?` suffix, prefer fewer) — which only changes which
+    /// span a find/replace/partition selects, not whether a match exists.
+    Quant(Box<Expr>, u32, Option<u32>, bool),
     /// Single-codepoint match against a character class.  Literal
     /// chars and `.` lower to single-range / universe classes.
     Class(ClassSet),
@@ -233,9 +236,10 @@ impl<'a> Parser<'a> {
         // two — so we consume one optional reluctant marker before
         // checking for a stray follow-on quantifier.
         let had_quantifier = (min, max) != (1, Some(1));
+        let mut greedy = true;
         if had_quantifier {
-            // Reluctant marker `?` is part of the quantifier.
-            self.eat(b'?');
+            // Reluctant marker `?` is part of the quantifier (`a*?`).
+            if self.eat(b'?') { greedy = false; }
             if let Some(b) = self.peek() {
                 if matches!(b, b'?' | b'*' | b'+' | b'{') {
                     return Err(format!(
@@ -248,7 +252,7 @@ impl<'a> Parser<'a> {
         }
         Ok(match (min, max) {
             (1, Some(1)) => atom,
-            _            => Expr::Quant(Box::new(atom), min, max),
+            _            => Expr::Quant(Box::new(atom), min, max, greedy),
         })
     }
 
@@ -986,7 +990,7 @@ mod tests {
     #[test]
     fn quantifier_star() {
         match p("a*") {
-            Expr::Quant(_, 0, None) => {}
+            Expr::Quant(_, 0, None, _) => {}
             other => panic!("expected Quant(_, 0, None), got {other:?}"),
         }
     }
@@ -994,7 +998,7 @@ mod tests {
     #[test]
     fn quantifier_range() {
         match p("a{2,4}") {
-            Expr::Quant(_, 2, Some(4)) => {}
+            Expr::Quant(_, 2, Some(4), _) => {}
             other => panic!("expected Quant(_, 2, Some(4)), got {other:?}"),
         }
     }
