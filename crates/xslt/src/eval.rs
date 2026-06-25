@@ -5112,7 +5112,7 @@ fn eval_instr(
                 r?;
             }
         }
-        Instr::ResultDocument { href, format, format_namespaces, output, serialization_avts, body } => {
+        Instr::ResultDocument { href, format, format_namespaces, output, serialization_avts, validate, body } => {
             use crate::result_tree::ResultBuilder;
             // XSLT 2.0 §19.1.1 / XTDE1460 — the `format=` AVT
             // expansion must be a valid EQName (a non-empty NCName,
@@ -5297,7 +5297,17 @@ fn eval_instr(
                 .unwrap_or_else(|| state.principal_buf.take().expect("principal stashed"));
             let written = std::mem::replace(&mut state.builder, restored);
             r?;
-            SECONDARY_DOCS.with(|d| d.borrow_mut().push((uri, written.finish(), doc_output)));
+            let nodes = written.finish();
+            // XSLT 2.0 §19.2 — validate the produced document against the
+            // imported schema (XTTE1510) when validation="strict".
+            if *validate && !validation_strips_types() && !in_source_document() {
+                for elem in nodes.iter()
+                    .filter(|n| matches!(n, crate::result_tree::ResultNode::Element { .. }))
+                {
+                    validate_constructed_element(state.style, elem)?;
+                }
+            }
+            SECONDARY_DOCS.with(|d| d.borrow_mut().push((uri, nodes, doc_output)));
         }
         Instr::Try { body, catches } => {
             run_try_instr(state, body, catches, ctx_node, pos, size)?;

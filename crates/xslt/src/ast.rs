@@ -792,6 +792,9 @@ pub enum Instr {
         /// template (XSLT 3.0 §27.1).  Evaluated at run time and applied
         /// to `output`; static-valued ones are baked into `output`.
         serialization_avts: Vec<(String, Avt)>,
+        /// `validation="strict"|"lax"` (XSLT 2.0 §19.2) — validate the
+        /// produced document against the imported schema (XTTE1510).
+        validate: bool,
         body: Body,
     },
     /// `xsl:namespace name="x" [select="uri"]` (XSLT 2.0 §11.7) —

@@ -5896,6 +5896,11 @@ fn compile_raw_instr_into(
             let output = Box::new(compile_output(node, true)?);
             Instr::ResultDocument {
                 href, format, format_namespaces, output, serialization_avts,
+                validate: match read_attribute(node, "validation").map(|s| s.trim().to_string()) {
+                    Some(v) => matches!(v.as_str(), "strict" | "lax"),
+                    None => matches!(
+                        effective_default_validation(node).as_deref(), Some("strict") | Some("lax")),
+                },
                 body: compile_body(node)?,
             }
         }
