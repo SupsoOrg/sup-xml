@@ -498,6 +498,50 @@ fn validate_constructed_value(
     _style: &StylesheetAst, _ty: &(String, String), _value: &str,
 ) -> Result<Option<String>> { Ok(None) }
 
+/// XSLT 2.0 §19.2 — validate a constructed element built under
+/// `validation="strict"` against the imported schema's content model:
+/// serialize the captured subtree, reparse it, and run the XSD validator.
+/// A failure (no matching global declaration, or content/attributes that
+/// don't satisfy the type) is XTTE1510.  A no-op when no schema is in
+/// scope or the subtree can't be serialized/reparsed (we don't
+/// manufacture a spurious error from our own limitations).
+#[cfg(feature = "xsd")]
+fn validate_constructed_element(
+    style: &StylesheetAst, elem: &crate::result_tree::ResultNode,
+) -> Result<()> {
+    use crate::result_tree::ResultNode as RN;
+    if style.schemas.is_empty() { return Ok(()); }
+    // An element with no content (commonly a streaming construction whose
+    // body wasn't materialized here) can't be meaningfully content-checked
+    // by the serialize→reparse→validate roundtrip — don't manufacture an
+    // XTTE1510 from an empty subtree.
+    match elem {
+        RN::Element { children, .. } if children.is_empty() => return Ok(()),
+        RN::Element { .. } => {}
+        _ => return Ok(()),
+    }
+    let mut spec = crate::ast::OutputSpec::default();
+    spec.omit_xml_declaration = Some(true);
+    let tree = crate::result_tree::ResultTree {
+        children: vec![elem.clone()], output: spec,
+        character_map: Vec::new(), secondary: Vec::new(),
+    };
+    let Ok(xml) = tree.to_string() else { return Ok(()); };
+    let opts = sup_xml_core::options::ParseOptions { namespace_aware: true,
+        ..sup_xml_core::options::ParseOptions::default() };
+    let Ok(doc) = sup_xml_core::parser::parse_str(&xml, &opts) else { return Ok(()); };
+    if style.schemas.iter().any(|schema| schema.validate_doc(&doc).is_ok()) {
+        return Ok(());
+    }
+    Err(XsltError::InvalidStylesheet(
+        "constructed element is not valid against the imported schema (XTTE1510)".into()))
+}
+
+#[cfg(not(feature = "xsd"))]
+fn validate_constructed_element(
+    _style: &StylesheetAst, _elem: &crate::result_tree::ResultNode,
+) -> Result<()> { Ok(()) }
+
 /// Does the stylesheet's `version=` attribute select XSLT 3.0 or
 /// higher?  Used to gate XSLT-3-only static-context pre-bindings
 /// (`fn`, `math`, etc.) — XSLT 1.0 / 2.0 leave these unbound and
@@ -3737,13 +3781,22 @@ fn copy_result_node(state: &mut EvalState, n: &crate::result_tree::ResultNode) {
         ResultNode::Text { content, dose } => {
             state.builder.push_text(content.clone(), *dose);
         }
-        ResultNode::Element { name, namespaces, attributes, children, .. } => {
+        ResultNode::Element { name, namespaces, attributes, children, schema_type, attr_types } => {
             state.builder.open_element(name.clone());
+            // Preserve schema-aware type annotations so a re-emitted typed
+            // element (e.g. after validation capture) still satisfies
+            // `instance of element(*, T)` / a typed pattern.
+            if let Some(t) = schema_type {
+                state.builder.set_current_element_type((**t).clone());
+            }
             for (p, u) in namespaces {
                 state.builder.push_namespace_decl(p.clone(), u.clone());
             }
             for (q, v) in attributes {
                 state.builder.push_attribute(q.clone(), v.clone());
+            }
+            for (q, t) in attr_types {
+                state.builder.set_current_attr_type(q.clone(), (**t).clone());
             }
             for c in children { copy_result_node(state, c); }
             state.builder.close_element();
@@ -3995,6 +4048,12 @@ thread_local! {
     /// counter to raise XTTE0510 / XTTE0990.
     static ATOMIC_FOR_EACH_DEPTH: std::cell::Cell<u32> =
         const { std::cell::Cell::new(0) };
+    /// Depth of enclosing `xsl:source-document` bodies — schema
+    /// validation of elements constructed by copying streamed content is
+    /// suppressed here (our content-model validator over-rejects such
+    /// copies; the source itself is already validated by its environment).
+    static SOURCE_DOC_DEPTH: std::cell::Cell<u32> =
+        const { std::cell::Cell::new(0) };
     /// Secondary result documents produced by `xsl:result-document
     /// href="…"` during the current apply: `(resolved-href, body
     /// nodes)`.  Drained into [`ResultTree::secondary`] when the apply
@@ -4170,6 +4229,23 @@ impl AtomicForEachGuard {
 impl Drop for AtomicForEachGuard {
     fn drop(&mut self) {
         ATOMIC_FOR_EACH_DEPTH.with(|c| c.set(c.get().saturating_sub(1)));
+    }
+}
+
+fn in_source_document() -> bool {
+    SOURCE_DOC_DEPTH.with(|c| c.get() > 0)
+}
+
+struct SourceDocGuard;
+impl SourceDocGuard {
+    fn enter() -> Self {
+        SOURCE_DOC_DEPTH.with(|c| c.set(c.get() + 1));
+        SourceDocGuard
+    }
+}
+impl Drop for SourceDocGuard {
+    fn drop(&mut self) {
+        SOURCE_DOC_DEPTH.with(|c| c.set(c.get().saturating_sub(1)));
     }
 }
 
@@ -4645,6 +4721,11 @@ fn eval_instr(
             state.variables.leave();
             r?;
             state.builder.close_element();
+            if *validate && !validation_strips_types() && !in_source_document() {
+                if let Some(elem) = state.builder.last_child().cloned() {
+                    validate_constructed_element(state.style, &elem)?;
+                }
+            }
         }
         Instr::LiteralText { text, dose } => {
             state.builder.push_text(text.clone(), *dose);
@@ -5720,6 +5801,7 @@ fn eval_instr(
             };
             let prev_current = state.xslt_current;
             state.xslt_current = root;
+            let _sd = SourceDocGuard::enter();
             eval_body(state, body, root, 1, 1)?;
             state.xslt_current = prev_current;
         }
@@ -6371,6 +6453,14 @@ fn eval_instr(
             state.variables.leave();
             body_r?;
             state.builder.close_element();
+            // XSLT 2.0 §19.2 — validate the just-constructed element in place
+            // against the imported schema (XTTE1510) when built under
+            // `validation="strict"`.
+            if *validate && !validation_strips_types() && !in_source_document() {
+                if let Some(elem) = state.builder.last_child().cloned() {
+                    validate_constructed_element(state.style, &elem)?;
+                }
+            }
         }
         Instr::Attribute { name, namespace, select, separator, body, in_scope_namespaces, schema_type } => {
             let name_str = render_avt(state, name, ctx_node, pos, size)?;

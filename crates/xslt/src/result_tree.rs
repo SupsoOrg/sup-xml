@@ -291,6 +291,16 @@ impl ResultBuilder {
         self.last_was_atomic = false;
     }
 
+    /// The most recently appended node in the element currently under
+    /// construction (or at the document root) — used to validate a
+    /// just-closed element in place without re-emitting it.
+    pub fn last_child(&self) -> Option<&ResultNode> {
+        match self.stack.last() {
+            Some(ResultNode::Element { children, .. }) => children.last(),
+            _ => self.top.last(),
+        }
+    }
+
     /// Append an attribute to the current element.  Per XSLT 1.0
     /// §7.1.3, emitting `xsl:attribute` after content children is
     /// legal — we just ignore the spec's "should be before children"
