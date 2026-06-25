@@ -22,6 +22,7 @@
 
 use std::cell::RefCell;
 
+use super::class::ClassSet;
 use super::nfa::{Program, State, StateId};
 use super::parser::AnchorKind;
 
@@ -109,19 +110,21 @@ impl Scratch {
     fn run(&mut self, prog: &Program, input: &str, mode: Mode) -> bool {
         self.reset(prog.states.len());
 
-        // Total codepoint count drives the end-of-input anchor.
-        let total = input.chars().count();
+        // Codepoint view drives the end-of-input anchor (its length) and
+        // the `m`-flag line-boundary anchors (per-position newline test).
+        let chars: Vec<char> = input.chars().collect();
+        let total = chars.len();
         let mut pos: usize = 0;
 
         // Seed: epsilon-closure of the start state at position 0.
         let seed_mark = self.cur_mark;
         add(&mut self.current, &mut self.marks, seed_mark,
-            prog, prog.start, pos, total);
+            prog, prog.start, pos, total, &chars);
         if mode == Mode::Find && contains_match(prog, &self.current) {
             return true;
         }
 
-        for c in input.chars() {
+        for &c in &chars {
             // Advance: bump generation, drain current → next.
             self.cur_mark = self.cur_mark.wrapping_add(1);
             let next_mark = self.cur_mark;
@@ -130,9 +133,9 @@ impl Scratch {
             for i in 0..self.current.len() {
                 let sid = self.current[i];
                 if let State::Char { class, next } = prog.states[sid as usize] {
-                    if prog.classes[class as usize].contains(c) {
+                    if class_matches(&prog.classes[class as usize], c, prog.case_insensitive) {
                         add(&mut self.next, &mut self.marks, next_mark,
-                            prog, next, pos + 1, total);
+                            prog, next, pos + 1, total, &chars);
                     }
                 }
             }
@@ -146,7 +149,7 @@ impl Scratch {
             // against states already in `current` at this position.
             if mode == Mode::Find {
                 add(&mut self.current, &mut self.marks, next_mark,
-                    prog, prog.start, pos, total);
+                    prog, prog.start, pos, total, &chars);
             }
 
             if mode == Mode::Find && contains_match(prog, &self.current) {
@@ -186,8 +189,14 @@ impl Scratch {
         let mut matched: Option<usize> = None;
 
         let seed_mark = self.cur_mark;
+        // `m`-flag line-boundary anchors need the full input around `pos`,
+        // but run_leftmost only sees the suffix `slice`; until find_iter
+        // is rewired to pass full context (regex consolidation Phase 3),
+        // `^`/`$` here fire only at the true input ends, not at interior
+        // newlines.  An empty char view disables the interior test safely.
+        const NO_LINE_CTX: &[char] = &[];
         add(&mut self.current, &mut self.marks, seed_mark,
-            prog, prog.start, pos, abs_total);
+            prog, prog.start, pos, abs_total, NO_LINE_CTX);
 
         let mut chars = slice.chars();
         loop {
@@ -209,9 +218,9 @@ impl Scratch {
                     }
                     State::Char { class, next } => {
                         if let Some(ch) = c {
-                            if prog.classes[class as usize].contains(ch) {
+                            if class_matches(&prog.classes[class as usize], ch, prog.case_insensitive) {
                                 add(&mut self.next, &mut self.marks, next_mark,
-                                    prog, next, pos + 1, abs_total);
+                                    prog, next, pos + 1, abs_total, NO_LINE_CTX);
                             }
                         }
                     }
@@ -267,6 +276,19 @@ fn contains_match(prog: &Program, list: &[StateId]) -> bool {
 /// consuming states are pushed onto the list for the next input
 /// step.  `pos` / `total` are the current codepoint position and
 /// total input length, used to evaluate position assertions.
+/// True if `class` matches codepoint `c` — under the `i` flag it also
+/// matches `c`'s simple upper/lower case folds (enough for the conformance
+/// surface; full multi-codepoint folding like ß→ss is not modelled).
+#[inline]
+fn class_matches(class: &ClassSet, c: char, case_insensitive: bool) -> bool {
+    if class.contains(c) { return true; }
+    if case_insensitive {
+        if c.to_uppercase().any(|u| class.contains(u)) { return true; }
+        if c.to_lowercase().any(|l| class.contains(l)) { return true; }
+    }
+    false
+}
+
 fn add(
     list:  &mut Vec<StateId>,
     marks: &mut [u32],
@@ -275,6 +297,9 @@ fn add(
     sid:   StateId,
     pos:   usize,
     total: usize,
+    // Codepoint view of the input, for `m`-flag line-boundary anchors.
+    // May be empty when line context isn't available (see run_leftmost).
+    chars: &[char],
 ) {
     if marks[sid as usize] == mark {
         return;
@@ -282,16 +307,22 @@ fn add(
     marks[sid as usize] = mark;
     match prog.states[sid as usize] {
         State::Split(a, b) => {
-            add(list, marks, mark, prog, a, pos, total);
-            add(list, marks, mark, prog, b, pos, total);
+            add(list, marks, mark, prog, a, pos, total, chars);
+            add(list, marks, mark, prog, b, pos, total, chars);
         }
         State::Assert { kind, next } => {
+            // XPath 3.0 §5.6.1.1 — with the `m` flag, `^`/`$` also assert
+            // at line boundaries (after / before a #x0A newline).
             let ok = match kind {
-                AnchorKind::Start => pos == 0,
-                AnchorKind::End   => pos == total,
+                AnchorKind::Start =>
+                    pos == 0 || (prog.multiline && pos <= chars.len()
+                        && pos > 0 && chars[pos - 1] == '\n'),
+                AnchorKind::End =>
+                    pos == total || (prog.multiline && pos < chars.len()
+                        && chars[pos] == '\n'),
             };
             if ok {
-                add(list, marks, mark, prog, next, pos, total);
+                add(list, marks, mark, prog, next, pos, total, chars);
             }
         }
         _ => list.push(sid),

@@ -7816,27 +7816,17 @@ fn eval_function<I: DocIndexLike>(name: &str, args: &[Expr], ctx: &EvalCtx<'_>, 
             let input   = arg_str!(0);
             let pattern = arg_str!(1);
             let flags   = if args.len() == 3 { arg_str!(2) } else { String::new() };
-            // The native XSD §F / XPath 2.0 engine implements the
-            // full XPath dialect (`^`/`$` anchors, find semantics,
-            // class subtraction, `\p{IsBlock}`, XSD `\s`/`\d`/`\w`,
-            // and the spec's strict rejection of `(?…)` forms).
-            // It is authoritative when no flags are in play —
-            // including for syntax errors, which must surface as
-            // FORX0002 rather than fall back to a more permissive
-            // engine that would silently accept the bad pattern.
-            // Flag handling still routes through the Rust crate
-            // until the native engine grows i/s/m/x support.
-            if flags.is_empty() {
-                return crate::regex::compile_with_cached(
-                    &pattern, ctx.bindings.regex_dialect(),
-                )
-                    .map(|p| Value::Boolean(p.find_match(&input)))
-                    .map_err(|e| xpath_err(format!("invalid regex: {e}"))
-                        .with_xpath_code("FORX0002"));
-            }
-            let re = compile_xpath_regex_dialect(&pattern, &flags,
-                ctx.bindings.regex_dialect())?;
-            Ok(Value::Boolean(re.is_match(&input)))
+            // The native XSD §F / XPath engine is authoritative for the
+            // whole dialect — anchors, find semantics, class subtraction,
+            // `\p{IsBlock}`, XSD `\s`/`\d`/`\w`, the `i`/`s`/`m`/`x`
+            // flags, and the strict rejection of `(?…)` forms (FORX0002).
+            let (src, f) = native_regex_source(&pattern, &flags)?;
+            return crate::regex::compile_with_cached_flags(
+                &src, ctx.bindings.regex_dialect(), f,
+            )
+                .map(|p| Value::Boolean(p.find_match(&input)))
+                .map_err(|e| xpath_err(format!("invalid regex: {e}"))
+                    .with_xpath_code("FORX0002"));
         }
         "replace" => {
             if args.len() < 3 || args.len() > 4 {
@@ -12989,6 +12979,43 @@ fn sequence_to_numbers<I: DocIndexLike>(v: &Value, idx: &I) -> Vec<f64> {
 /// translation we use internally.
 pub fn compile_xpath_2_0_regex(pattern: &str, flags: &str) -> Result<regex::Regex> {
     compile_xpath_regex(pattern, flags)
+}
+
+/// Backslash-escape every regex metacharacter in `s` so it matches
+/// literally — the native-engine equivalent of `regex::escape`, used for
+/// the `q` (literal) flag.
+fn escape_native_regex(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 8);
+    for c in s.chars() {
+        if matches!(c, '.' | '\\' | '+' | '*' | '?' | '(' | ')' | '|'
+                     | '[' | ']' | '{' | '}' | '^' | '$' | '-') {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    out
+}
+
+/// Resolve an XPath regex (`pattern`, `flags`) into the pattern source and
+/// [`crate::regex::Flags`] the native engine should compile.  Validates the
+/// flag string (FORX0001 on an unknown letter) and applies `q` (literal)
+/// by escaping the pattern — under `q` only `i` remains meaningful.
+fn native_regex_source(
+    pattern: &str, flags: &str,
+) -> Result<(String, crate::regex::Flags)> {
+    let f = crate::regex::Flags::parse(flags).map_err(|c| {
+        xpath_err(format!("invalid regular-expression flag '{c}'"))
+            .with_xpath_code("FORX0001")
+    })?;
+    if flags.contains('q') {
+        let only_i = crate::regex::Flags {
+            case_insensitive: f.case_insensitive,
+            ..Default::default()
+        };
+        Ok((escape_native_regex(pattern), only_i))
+    } else {
+        Ok((pattern.to_string(), f))
+    }
 }
 
 /// True iff `uri` names the W3C HTML ASCII case-insensitive

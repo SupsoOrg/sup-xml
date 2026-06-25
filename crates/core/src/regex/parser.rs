@@ -85,7 +85,28 @@ pub fn parse(src: &str) -> Result<Expr, String> {
 
 /// Parse with a specific source dialect.  See [`Dialect`].
 pub fn parse_with(src: &str, dialect: Dialect) -> Result<Expr, String> {
-    let mut p = Parser { input: src.as_bytes(), pos: 0, chars: src, dialect, depth: 0 };
+    parse_with_flags(src, dialect, false, false)
+}
+
+/// Parse with a dialect plus the parse-time regex flags: `dotall` (`.`
+/// matches newlines), `extended` (`x` — unescaped whitespace and `#`
+/// comments outside character classes are ignored), and `case_insensitive`
+/// (`i` — negated classes are case-closed before complement so they
+/// exclude both cases; positive matching is handled at match time).  The
+/// `m` flag is applied entirely at match time.
+pub fn parse_with_flags(
+    src: &str, dialect: Dialect, dotall: bool, extended: bool,
+) -> Result<Expr, String> {
+    parse_with_all_flags(src, dialect, dotall, extended, false)
+}
+
+pub fn parse_with_all_flags(
+    src: &str, dialect: Dialect, dotall: bool, extended: bool, case_insensitive: bool,
+) -> Result<Expr, String> {
+    let mut p = Parser {
+        input: src.as_bytes(), pos: 0, chars: src, dialect, depth: 0,
+        dotall, extended, case_insensitive,
+    };
     let expr = p.parse_regexp()?;
     if p.pos != p.input.len() {
         return Err(format!("unexpected '{}' at position {}",
@@ -102,6 +123,13 @@ struct Parser<'a> {
     /// only valid for ASCII boundary tests).
     chars: &'a str,
     dialect: Dialect,
+    /// `s` flag — `.` matches every codepoint including newlines.
+    dotall: bool,
+    /// `x` flag — ignore unescaped whitespace and `#…` comments outside
+    /// character classes (XPath 3.0 §5.6.1.1).
+    extended: bool,
+    /// `i` flag — case-close negated classes before complement.
+    case_insensitive: bool,
     /// Recursion depth of the current `parse_regexp` nesting, bumped
     /// on entry to each parenthesised group so a pathologically nested
     /// pattern (`((((…))))`) is rejected before it overflows the
@@ -145,10 +173,33 @@ impl<'a> Parser<'a> {
         Ok(Expr::Alt(branches))
     }
 
+    /// `x` (extended) flag: consume unescaped whitespace and `#…`
+    /// line comments between tokens.  No-op unless `extended` is set.
+    /// Never called inside a character class, so class whitespace is
+    /// preserved (XPath 3.0 §5.6.1.1).
+    fn skip_extended_ws(&mut self) {
+        if !self.extended { return; }
+        while let Some(b) = self.peek() {
+            match b {
+                b' ' | b'\t' | b'\n' | b'\r' | 0x0C => self.bump(),
+                b'#' => while let Some(c) = self.peek() {
+                    self.bump();
+                    if c == b'\n' { break; }
+                },
+                _ => break,
+            }
+        }
+    }
+
     fn parse_branch(&mut self) -> Result<Expr, String> {
         let mut pieces: Vec<Expr> = Vec::new();
-        while let Some(b) = self.peek() {
-            if b == b'|' || b == b')' { break; }
+        loop {
+            self.skip_extended_ws();
+            match self.peek() {
+                None => break,
+                Some(b'|') | Some(b')') => break,
+                _ => {}
+            }
             pieces.push(self.parse_piece()?);
         }
         Ok(match pieces.len() {
@@ -160,6 +211,9 @@ impl<'a> Parser<'a> {
 
     fn parse_piece(&mut self) -> Result<Expr, String> {
         let atom = self.parse_atom()?;
+        // In `x` mode, whitespace between the atom and its quantifier is
+        // insignificant (`a +` ≡ `a+`).
+        self.skip_extended_ws();
         let (min, max) = self.parse_quantifier()?;
         // Per XSD §F.1 and XPath 2.0 §7.6 a piece is `atom
         // quantifier?` — at most one quantifier.  Patterns like
@@ -218,9 +272,14 @@ impl<'a> Parser<'a> {
             b'.' => {
                 self.bump();
                 // XSD §F.1.3: `.` matches any char except line
-                // terminators (#x0A, #x0D).
-                let nl = ClassSet::from_ranges(vec![(0x0A, 0x0A), (0x0D, 0x0D)]);
-                Ok(Expr::Class(ClassSet::universe().subtract(&nl)))
+                // terminators (#x0A, #x0D) — unless the `s` (dotall)
+                // flag is set, when it matches every codepoint.
+                if self.dotall {
+                    Ok(Expr::Class(ClassSet::universe()))
+                } else {
+                    let nl = ClassSet::from_ranges(vec![(0x0A, 0x0A), (0x0D, 0x0D)]);
+                    Ok(Expr::Class(ClassSet::universe().subtract(&nl)))
+                }
             }
             b'\\' => {
                 self.bump();
@@ -429,8 +488,8 @@ impl<'a> Parser<'a> {
                 self.bump(); // -
                 self.bump(); // [
                 let sub = self.parse_class()?;
-                let mut head = if negated { acc.complement() } else { acc };
-                head = head.subtract(&sub);
+                let mut head = if negated { self.ci_close(acc).complement() } else { acc };
+                head = head.subtract(&self.ci_close(sub));
                 // After subtraction the class must close immediately —
                 // XSD §F.1.5 forbids more atoms in this class body.
                 if !self.eat(b']') {
@@ -493,7 +552,14 @@ impl<'a> Parser<'a> {
             }
         }
         self.bump(); // consume ']'
-        Ok(if negated { acc.complement() } else { acc })
+        Ok(if negated { self.ci_close(acc).complement() } else { acc })
+    }
+
+    /// Apply the case-insensitive class closure when the `i` flag is set.
+    /// Used on the positive accumulator before a negated class is
+    /// complemented, so `[^a-z]` under `i` excludes both `a-z` and `A-Z`.
+    fn ci_close(&self, set: ClassSet) -> ClassSet {
+        if self.case_insensitive { set.case_closure() } else { set }
     }
 
     /// One atom inside a class body — either a single literal/escaped

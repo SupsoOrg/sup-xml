@@ -43,6 +43,36 @@ pub use parser::Dialect;
 pub use ucd::UnicodeVersion;
 pub use unicode::with_unicode_version;
 
+/// The XPath/XSD regex flags (F&O §5.6.1.1): `i` case-insensitive,
+/// `s` dotall, `m` multiline, `x` extended.  `q` (literal) is handled by
+/// the caller (the whole pattern is escaped), not here.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+pub struct Flags {
+    pub case_insensitive: bool,
+    pub dotall:           bool,
+    pub multiline:        bool,
+    pub extended:         bool,
+}
+
+impl Flags {
+    /// Parse a flags string (`"imsx"`); unknown flag letters are a
+    /// (FORX0001) error, surfaced as `Err(letter)`.
+    pub fn parse(s: &str) -> Result<Self, char> {
+        let mut f = Flags::default();
+        for c in s.chars() {
+            match c {
+                'i' => f.case_insensitive = true,
+                's' => f.dotall = true,
+                'm' => f.multiline = true,
+                'x' => f.extended = true,
+                'q' => {} // literal — applied by the caller, not the engine
+                other => return Err(other),
+            }
+        }
+        Ok(f)
+    }
+}
+
 thread_local! {
     /// Per-thread compile cache keyed by (src, dialect, version).
     /// Patterns are returned as `Arc<Pattern>` so callers share one
@@ -72,6 +102,25 @@ pub fn compile_with_cached(
     COMPILE_CACHE.with(|c| {
         c.borrow_mut().insert(key, arc.clone());
     });
+    Ok(arc)
+}
+
+thread_local! {
+    static COMPILE_CACHE_F: RefCell<HashMap<(String, Dialect, Flags, UnicodeVersion), Arc<Pattern>>>
+        = RefCell::new(HashMap::new());
+}
+
+/// Cached compile with explicit [`Flags`].  See [`compile_with_cached`].
+pub fn compile_with_cached_flags(
+    src: &str, dialect: Dialect, flags: Flags,
+) -> Result<Arc<Pattern>, String> {
+    let version = unicode::current_ucd_version();
+    let key = (src.to_string(), dialect, flags, version);
+    if let Some(hit) = COMPILE_CACHE_F.with(|c| c.borrow().get(&key).cloned()) {
+        return Ok(hit);
+    }
+    let arc = Arc::new(Pattern::compile_with_flags(src, dialect, flags)?);
+    COMPILE_CACHE_F.with(|c| { c.borrow_mut().insert(key, arc.clone()); });
     Ok(arc)
 }
 
@@ -121,6 +170,32 @@ impl Pattern {
             Dialect::Xpath | Dialect::Xpath20 => Body::Full(nfa::compile(&ast)?),
         };
         Ok(Self { src: src.into(), body })
+    }
+
+    /// Compile under a dialect with the full XPath/XSD flag set.  The
+    /// `s` (dotall) and `x` (extended) flags affect parsing; `i`
+    /// (case-insensitive) and `m` (multiline) are recorded on the NFA
+    /// and applied at match time.  Flagged patterns always use the Pike
+    /// VM (the linear fast path doesn't carry match-time flags).
+    pub fn compile_with_flags(src: &str, dialect: Dialect, flags: Flags) -> Result<Self, String> {
+        let ast = parser::parse_with_all_flags(
+            src, dialect, flags.dotall, flags.extended, flags.case_insensitive)?;
+        if !flags.case_insensitive && !flags.multiline {
+            // No match-time flags — reuse the ordinary (possibly linear)
+            // build so the fast path still applies in XSD mode.
+            let body = match dialect {
+                Dialect::Xsd => match LinearMatcher::try_build(&ast) {
+                    Some(lm) => Body::Linear(lm),
+                    None     => Body::Full(nfa::compile(&ast)?),
+                },
+                Dialect::Xpath | Dialect::Xpath20 => Body::Full(nfa::compile(&ast)?),
+            };
+            return Ok(Self { src: src.into(), body });
+        }
+        let mut prog = nfa::compile(&ast)?;
+        prog.case_insensitive = flags.case_insensitive;
+        prog.multiline = flags.multiline;
+        Ok(Self { src: src.into(), body: Body::Full(prog) })
     }
 
     /// Compile bypassing the linear fast path — always builds the
@@ -244,6 +319,44 @@ impl std::fmt::Debug for Pattern {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn fm(src: &str, flags: &str, input: &str) -> bool {
+        let f = Flags::parse(flags).unwrap();
+        Pattern::compile_with_flags(src, Dialect::Xpath, f)
+            .unwrap()
+            .find_match(input)
+    }
+
+    #[test]
+    fn flag_i_positive_and_negated_classes() {
+        // Positive class: a literal/class matches either case.
+        assert!(fm("^abc$", "i", "ABC"));
+        assert!(fm("[a-z]+", "i", "ABC"));
+        // Negated class under `i` must exclude BOTH cases — `[^a-z]`
+        // does not match a letter of either case, but matches a digit.
+        assert!(!fm("^[^a-z]$", "i", "A"));
+        assert!(!fm("^[^a-z]$", "i", "a"));
+        assert!(fm("^[^a-z]$", "i", "5"));
+    }
+
+    #[test]
+    fn flag_s_dotall() {
+        assert!(fm("a.b", "s", "a\nb"));
+        assert!(!fm("a.b", "", "a\nb"));
+    }
+
+    #[test]
+    fn flag_m_multiline_anchors() {
+        assert!(fm("^bar$", "m", "foo\nbar"));
+        assert!(!fm("^bar$", "", "foo\nbar"));
+    }
+
+    #[test]
+    fn flag_x_extended_ignores_whitespace() {
+        assert!(fm("a b c", "x", "abc"));
+        // Escaped whitespace stays literal even under `x`.
+        assert!(fm("a\\ b", "x", "a b"));
+    }
 
     /// XPath 2.0 §7.6 adds `^` / `$` as zero-width anchors on top of
     /// the XSD grammar.  Both the `Xpath` (3.0) and `Xpath20` dialects

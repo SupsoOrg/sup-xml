@@ -45,6 +45,13 @@ pub struct Program {
     pub states:  Vec<State>,
     pub classes: Vec<ClassSet>,
     pub start:   StateId,
+    /// `i` flag — a class matches the simple case-folds of the input
+    /// codepoint as well (decided at match time so large classes aren't
+    /// expanded).
+    pub case_insensitive: bool,
+    /// `m` flag — `^` / `$` anchors assert at line boundaries (after /
+    /// before a newline) in addition to the input ends.
+    pub multiline: bool,
 }
 
 /// Compile an AST to a runnable [`Program`].
@@ -62,6 +69,8 @@ pub fn compile(ast: &Expr) -> Result<Program, String> {
         start:   frag.entry,
         states:  b.states,
         classes: b.classes,
+        case_insensitive: false,
+        multiline: false,
     })
 }
 

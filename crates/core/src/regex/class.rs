@@ -161,6 +161,35 @@ impl ClassSet {
     pub fn complement(&self) -> Self {
         Self::universe().subtract(self)
     }
+
+    /// Add the simple (single-codepoint) upper/lower case folds of every
+    /// codepoint in the set — the case-insensitive (`i`) closure.  Must be
+    /// applied to the positive set *before* any complement so a negated
+    /// class excludes both cases.  Ranges wider than `MAX_FOLD_SCAN` are
+    /// assumed already case-closed (true of the large Unicode
+    /// category/block sets) and skipped so the scan stays cheap.  Folds
+    /// that expand to multiple codepoints (e.g. ß→SS) are dropped — they
+    /// don't apply to single-codepoint class matching.
+    pub fn case_closure(&self) -> Self {
+        const MAX_FOLD_SCAN: u32 = 0x1_0000;
+        let mut extra: Vec<(u32, u32)> = Vec::new();
+        for &(lo, hi) in &self.ranges {
+            if hi - lo >= MAX_FOLD_SCAN { continue; }
+            for cp in lo..=hi {
+                let Some(c) = char::from_u32(cp) else { continue };
+                let mut up = c.to_uppercase();
+                if let (Some(u), None) = (up.next(), up.next()) {
+                    extra.push((u as u32, u as u32));
+                }
+                let mut lw = c.to_lowercase();
+                if let (Some(l), None) = (lw.next(), lw.next()) {
+                    extra.push((l as u32, l as u32));
+                }
+            }
+        }
+        if extra.is_empty() { return self.clone(); }
+        self.union(&Self::from_ranges(extra))
+    }
 }
 
 fn is_canonical(ranges: &[(u32, u32)]) -> bool {
