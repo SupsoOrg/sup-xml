@@ -44,6 +44,12 @@ pub enum Expr {
     /// position.  The `m`-flag (multiline) variants assert on line
     /// boundaries; without `m` they assert on input boundaries.
     Anchor(AnchorKind),
+    /// Capturing group `(…)`, carrying its 1-based group number.  The
+    /// body matches as normal; the group records the byte span it last
+    /// matched, for `fn:replace` `$N` and `xsl:analyze-string`'s
+    /// `regex-group()`.  Non-capturing `(?:…)` groups don't produce this
+    /// node — they lower to their body directly.
+    Group(Box<Expr>, u32),
 }
 
 /// Position-anchor variety used by [`Expr::Anchor`].
@@ -105,7 +111,7 @@ pub fn parse_with_all_flags(
 ) -> Result<Expr, String> {
     let mut p = Parser {
         input: src.as_bytes(), pos: 0, chars: src, dialect, depth: 0,
-        dotall, extended, case_insensitive,
+        dotall, extended, case_insensitive, group_count: 0,
     };
     let expr = p.parse_regexp()?;
     if p.pos != p.input.len() {
@@ -130,6 +136,9 @@ struct Parser<'a> {
     extended: bool,
     /// `i` flag — case-close negated classes before complement.
     case_insensitive: bool,
+    /// Number of capturing groups opened so far — assigns each `(…)` its
+    /// 1-based group number.
+    group_count: u32,
     /// Recursion depth of the current `parse_regexp` nesting, bumped
     /// on entry to each parenthesised group so a pathologically nested
     /// pattern (`((((…))))`) is rejected before it overflows the
@@ -259,11 +268,16 @@ impl<'a> Parser<'a> {
                 if self.eat(b'?') {
                     return self.parse_question_construct();
                 }
+                // Capturing group — number it at the opening paren so
+                // groups are numbered by open-paren order (outer before
+                // inner), matching XPath/Perl group numbering.
+                self.group_count += 1;
+                let idx = self.group_count;
                 let inner = self.parse_regexp()?;
                 if !self.eat(b')') {
                     return Err("unbalanced '(' in pattern".into());
                 }
-                Ok(inner)
+                Ok(Expr::Group(Box::new(inner), idx))
             }
             b'[' => {
                 self.bump();

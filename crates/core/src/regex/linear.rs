@@ -103,6 +103,8 @@ fn collect(expr: &Expr, items: &mut Vec<Item>) -> Option<()> {
         // fast path only knows about character runs, so route
         // anchored patterns through the full NFA.
         Expr::Anchor(_) => None,
+        // Capturing groups need slot tracking — the Pike VM handles them.
+        Expr::Group(_, _) => None,
     }
 }
 

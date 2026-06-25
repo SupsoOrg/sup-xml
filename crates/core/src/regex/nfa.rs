@@ -32,6 +32,13 @@ pub enum State {
     /// position satisfies the assertion (start/end of input, with
     /// multiline variants asserting on line boundaries).
     Assert { kind: AnchorKind, next: StateId },
+    /// Zero-width capture-slot write — records the current input
+    /// position into `slot` of the matching thread, then transitions to
+    /// `next` like an epsilon edge.  Group `g` uses slots `2g` (open) and
+    /// `2g+1` (close); the whole match is group 0.  Only the capture-
+    /// tracking VM acts on these; the boolean matchers treat them as
+    /// plain epsilons.
+    Save { slot: u32, next: StateId },
     /// Accept state.  Reaching this with no input remaining is a
     /// match (in anchored mode) or a match at any position (in
     /// find mode).
@@ -52,6 +59,9 @@ pub struct Program {
     /// `m` flag — `^` / `$` anchors assert at line boundaries (after /
     /// before a newline) in addition to the input ends.
     pub multiline: bool,
+    /// Number of capture slots = `2 * (highest group number + 1)`.  Slots
+    /// 0/1 are the whole match; group `g` is `2g`/`2g+1`.
+    pub num_slots: u32,
 }
 
 /// Compile an AST to a runnable [`Program`].
@@ -60,6 +70,7 @@ pub fn compile(ast: &Expr) -> Result<Program, String> {
         states:  Vec::new(),
         classes: Vec::new(),
         intern:  FxHashMap::default(),
+        max_group: 0,
     };
     // Reserve state 0 for `Match`; every fragment's dangling
     // out-edges get patched to point here.
@@ -71,6 +82,7 @@ pub fn compile(ast: &Expr) -> Result<Program, String> {
         classes: b.classes,
         case_insensitive: false,
         multiline: false,
+        num_slots: 2 * (b.max_group + 1),
     })
 }
 
@@ -87,6 +99,8 @@ struct Builder {
     /// in the same pattern shares one slot.  Keyed by the canonical
     /// range list.
     intern:  FxHashMap<Vec<(u32, u32)>, ClassId>,
+    /// Highest capturing-group number lowered so far.
+    max_group: u32,
 }
 
 impl Builder {
@@ -147,6 +161,15 @@ impl Builder {
             Expr::Anchor(kind) => {
                 let entry = self.add(State::Assert { kind: *kind, next: out });
                 Frag { entry }
+            }
+
+            Expr::Group(body, idx) => {
+                if *idx > self.max_group { self.max_group = *idx; }
+                // open-save ─► body ─► close-save ─► out
+                let close = self.add(State::Save { slot: 2 * idx + 1, next: out });
+                let body_entry = self.lower(body, close).entry;
+                let open = self.add(State::Save { slot: 2 * idx, next: body_entry });
+                Frag { entry: open }
             }
         }
     }

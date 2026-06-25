@@ -40,6 +40,7 @@ use linear::LinearMatcher;
 use nfa::Program;
 
 pub use parser::Dialect;
+pub use vm::Captures;
 pub use ucd::UnicodeVersion;
 pub use unicode::with_unicode_version;
 
@@ -296,6 +297,30 @@ impl Pattern {
         out
     }
 
+    /// All non-overlapping matches of the pattern over `input`, left to
+    /// right, each with its capture-group byte spans (`group 0` is the
+    /// whole match).  Used by `fn:replace` and `xsl:analyze-string`.  Only
+    /// valid on patterns compiled with [`Dialect::Xpath`] — XSD-mode
+    /// patterns may take the linear fast path that has no NFA to capture
+    /// against.
+    pub fn find_captures(&self, input: &str) -> Vec<Captures> {
+        match &self.body {
+            Body::Full(p)   => vm::find_captures(p, input),
+            Body::Linear(_) => panic!(
+                "find_captures called on a Linear-compiled Pattern; \
+                 compile with Dialect::Xpath for capture iteration"
+            ),
+        }
+    }
+
+    /// Number of capturing groups in the pattern (excluding group 0).
+    pub fn group_count(&self) -> usize {
+        match &self.body {
+            Body::Full(p)   => (p.num_slots / 2).saturating_sub(1) as usize,
+            Body::Linear(_) => 0,
+        }
+    }
+
     /// Original XSD-flavour source, preserved for diagnostics.
     pub fn src(&self) -> &str { &self.src }
 }
@@ -337,6 +362,45 @@ mod tests {
         assert!(!fm("^[^a-z]$", "i", "A"));
         assert!(!fm("^[^a-z]$", "i", "a"));
         assert!(fm("^[^a-z]$", "i", "5"));
+    }
+
+    fn caps(src: &str, input: &str) -> Vec<Captures> {
+        Pattern::compile_with(src, Dialect::Xpath).unwrap().find_captures(input)
+    }
+
+    #[test]
+    fn captures_basic_groups() {
+        let c = caps("(a)(b)", "ab");
+        assert_eq!(c.len(), 1);
+        assert_eq!(c[0], vec![Some((0, 2)), Some((0, 1)), Some((1, 2))]);
+    }
+
+    #[test]
+    fn captures_quantified_groups() {
+        let c = caps("(a+)(b+)", "aabb");
+        assert_eq!(c[0], vec![Some((0, 4)), Some((0, 2)), Some((2, 4))]);
+    }
+
+    #[test]
+    fn captures_non_participating_alternative() {
+        // `(a)|(b)` on "b": group 1 absent, group 2 = "b".
+        let c = caps("(a)|(b)", "b");
+        assert_eq!(c[0], vec![Some((0, 1)), None, Some((0, 1))]);
+    }
+
+    #[test]
+    fn captures_find_all_nonoverlapping() {
+        let c = caps("([0-9])", "a1b2");
+        assert_eq!(c.len(), 2);
+        assert_eq!(c[0], vec![Some((1, 2)), Some((1, 2))]);
+        assert_eq!(c[1], vec![Some((3, 4)), Some((3, 4))]);
+    }
+
+    #[test]
+    fn captures_non_capturing_group_not_numbered() {
+        // `(?:a)(b)` — only one capturing group.
+        let c = caps("(?:a)(b)", "ab");
+        assert_eq!(c[0], vec![Some((0, 2)), Some((1, 2))]);
     }
 
     #[test]

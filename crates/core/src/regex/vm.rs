@@ -310,22 +310,182 @@ fn add(
             add(list, marks, mark, prog, a, pos, total, chars);
             add(list, marks, mark, prog, b, pos, total, chars);
         }
+        // Capture-slot writes are epsilons to the boolean matchers; only
+        // the capture VM (run_captures) acts on them.
+        State::Save { next, .. } => {
+            add(list, marks, mark, prog, next, pos, total, chars);
+        }
         State::Assert { kind, next } => {
             // XPath 3.0 §5.6.1.1 — with the `m` flag, `^`/`$` also assert
             // at line boundaries (after / before a #x0A newline).
-            let ok = match kind {
-                AnchorKind::Start =>
-                    pos == 0 || (prog.multiline && pos <= chars.len()
-                        && pos > 0 && chars[pos - 1] == '\n'),
-                AnchorKind::End =>
-                    pos == total || (prog.multiline && pos < chars.len()
-                        && chars[pos] == '\n'),
-            };
+            let ok = anchor_holds(kind, prog.multiline, pos, total, chars);
             if ok {
                 add(list, marks, mark, prog, next, pos, total, chars);
             }
         }
         _ => list.push(sid),
+    }
+}
+
+/// Whether a `^`/`$` assertion holds at codepoint position `pos`
+/// (`total` = input length).  With `multiline`, also fires at interior
+/// line boundaries when `chars` (the codepoint view) is available.
+#[inline]
+fn anchor_holds(
+    kind: AnchorKind, multiline: bool, pos: usize, total: usize, chars: &[char],
+) -> bool {
+    match kind {
+        AnchorKind::Start =>
+            pos == 0 || (multiline && pos > 0 && pos <= chars.len()
+                && chars[pos - 1] == '\n'),
+        AnchorKind::End =>
+            pos == total || (multiline && pos < chars.len() && chars[pos] == '\n'),
+    }
+}
+
+// ─────────────────────────── capture VM ───────────────────────────
+//
+// A submatch-tracking Pike VM, used by fn:replace and xsl:analyze-string
+// (and available to fn:tokenize, which ignores the group spans).  Unlike
+// the boolean matchers it carries a per-thread slot vector (byte offsets),
+// so it's not allocation-free — but it runs only on the capture-needing
+// paths, not the `fn:matches` hot loop.
+
+/// A capturing match: byte spans for group 0 (whole match) then groups
+/// 1..n in order.  `None` means the group didn't participate in the match.
+pub type Captures = Vec<Option<(usize, usize)>>;
+
+/// All non-overlapping matches of `prog` over `input`, left to right, each
+/// with its capture-group byte spans.  Leftmost-first priority; a
+/// zero-length match advances one codepoint so the scan always progresses.
+pub fn find_captures(prog: &Program, input: &str) -> Vec<Captures> {
+    let chars: Vec<char> = input.chars().collect();
+    let total_char = chars.len();
+    let mut out: Vec<Captures> = Vec::new();
+    let mut byte = 0usize;
+    let mut chpos = 0usize;
+    while byte <= input.len() {
+        match pike_at_start(prog, input, &chars, byte, chpos, total_char) {
+            Some(slots) => {
+                out.push(slots_to_captures(&slots, prog.num_slots));
+                let m_end = slots[1].max(0) as usize;
+                if m_end > byte {
+                    chpos += input[byte..m_end].chars().count();
+                    byte = m_end;
+                } else {
+                    if byte == input.len() { break; }
+                    let c = input[byte..].chars().next().unwrap();
+                    byte += c.len_utf8();
+                    chpos += 1;
+                }
+            }
+            None => {
+                if byte == input.len() { break; }
+                let c = input[byte..].chars().next().unwrap();
+                byte += c.len_utf8();
+                chpos += 1;
+            }
+        }
+    }
+    out
+}
+
+fn slots_to_captures(slots: &[i32], num_slots: u32) -> Captures {
+    (0..(num_slots / 2) as usize).map(|g| {
+        let (a, b) = (slots[2 * g], slots[2 * g + 1]);
+        (a >= 0 && b >= 0).then_some((a as usize, b as usize))
+    }).collect()
+}
+
+/// Leftmost-first match for the prefix of `input` starting exactly at byte
+/// `start_byte`, returning the capture slot vector (byte offsets; `-1`
+/// unset) or `None`.  Slots 0/1 are the whole-match span.
+fn pike_at_start(
+    prog: &Program, input: &str, chars: &[char],
+    start_byte: usize, start_char: usize, total_char: usize,
+) -> Option<Vec<i32>> {
+    let nslots = prog.num_slots as usize;
+    let mut clist: Vec<(StateId, Vec<i32>)> = Vec::new();
+    let mut nlist: Vec<(StateId, Vec<i32>)> = Vec::new();
+    let mut marks = vec![0u32; prog.states.len()];
+    let mut g = 1u32;
+    let mut matched: Option<Vec<i32>> = None;
+
+    let mut seed = vec![-1i32; nslots];
+    seed[0] = start_byte as i32;
+    add_thread(prog, &mut clist, &mut marks, g, prog.start,
+        start_byte, start_char, total_char, chars, seed);
+
+    let mut byte  = start_byte;
+    let mut chpos = start_char;
+    let mut it = input[start_byte..].chars();
+    loop {
+        let c = it.next();
+        g += 1;
+        let step_gen = g;
+        nlist.clear();
+        for i in 0..clist.len() {
+            let pc = clist[i].0;
+            match prog.states[pc as usize] {
+                State::Match => {
+                    let mut s = clist[i].1.clone();
+                    s[1] = byte as i32;
+                    matched = Some(s);
+                    break; // cut lower-priority threads at this step
+                }
+                State::Char { class, next } => {
+                    if let Some(ch) = c {
+                        if class_matches(&prog.classes[class as usize], ch, prog.case_insensitive) {
+                            let slots = clist[i].1.clone();
+                            add_thread(prog, &mut nlist, &mut marks, step_gen, next,
+                                byte + ch.len_utf8(), chpos + 1, total_char, chars, slots);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        match c {
+            None => break,
+            Some(ch) => {
+                byte  += ch.len_utf8();
+                chpos += 1;
+                std::mem::swap(&mut clist, &mut nlist);
+                if clist.is_empty() { break; }
+            }
+        }
+    }
+    matched
+}
+
+/// Priority-ordered epsilon closure for the capture VM: expands `Split`,
+/// applies `Save` (writes the byte position into a cloned slot vector) and
+/// `Assert`, and pushes consuming/accepting states onto `list`.  The first
+/// thread to reach a state wins (leftmost-first), enforced by `marks`.
+#[allow(clippy::too_many_arguments)]
+fn add_thread(
+    prog: &Program, list: &mut Vec<(StateId, Vec<i32>)>, marks: &mut [u32],
+    g: u32, pc: StateId, byte: usize, chpos: usize, total_char: usize,
+    chars: &[char], slots: Vec<i32>,
+) {
+    if marks[pc as usize] == g { return; }
+    marks[pc as usize] = g;
+    match prog.states[pc as usize] {
+        State::Split(a, b) => {
+            add_thread(prog, list, marks, g, a, byte, chpos, total_char, chars, slots.clone());
+            add_thread(prog, list, marks, g, b, byte, chpos, total_char, chars, slots);
+        }
+        State::Save { slot, next } => {
+            let mut s = slots;
+            s[slot as usize] = byte as i32;
+            add_thread(prog, list, marks, g, next, byte, chpos, total_char, chars, s);
+        }
+        State::Assert { kind, next } => {
+            if anchor_holds(kind, prog.multiline, chpos, total_char, chars) {
+                add_thread(prog, list, marks, g, next, byte, chpos, total_char, chars, slots);
+            }
+        }
+        _ => list.push((pc, slots)),
     }
 }
 
