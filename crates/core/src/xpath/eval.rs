@@ -13066,6 +13066,7 @@ fn collation_ends_with(s: &str, suf: &str, uri: Option<&str>) -> bool {
 
 /// One piece of a parsed XPath replacement string: literal text or a
 /// reference to capture group `n` (`n == 0` is the whole match).
+#[derive(Debug)]
 enum ReplPart { Lit(String), Group(usize) }
 
 /// Parse an XPath 2.0 §7.6.3 replacement string into literal/group parts,
@@ -13837,6 +13838,71 @@ fn dedup_foreign(nodes: &mut Vec<ForeignNodePtr>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── XPath regex function helpers (replacement + q-literal compile) ──
+
+    /// Parse an XPath replacement template and apply it given the group
+    /// values (`groups[0]` is the whole match).  Exercises both the
+    /// parsing and the per-match substitution `fn:replace` performs.
+    fn apply_repl(template: &str, group_count: usize, groups: &[&str]) -> Result<String> {
+        let parts = parse_xpath_replacement(template, group_count)?;
+        let mut out = String::new();
+        for p in &parts {
+            match p {
+                ReplPart::Lit(s)   => out.push_str(s),
+                ReplPart::Group(n) => out.push_str(groups.get(*n).copied().unwrap_or("")),
+            }
+        }
+        Ok(out)
+    }
+
+    #[test]
+    fn replacement_group_refs_and_literals() {
+        assert_eq!(apply_repl("$1-$2", 2, &["WHOLE", "a", "b"]).unwrap(), "a-b");
+        assert_eq!(apply_repl("$0!", 1, &["whole", "g1"]).unwrap(), "whole!");
+        assert_eq!(apply_repl("x$1y", 1, &["w", "G"]).unwrap(), "xGy");
+    }
+
+    #[test]
+    fn replacement_escapes() {
+        assert_eq!(apply_repl(r"\$5.00", 0, &[""]).unwrap(), "$5.00");
+        assert_eq!(apply_repl(r"a\\b", 0, &[""]).unwrap(), r"a\b");
+    }
+
+    #[test]
+    fn replacement_multidigit_group_capping() {
+        // `$12` with 5 groups → group 1 then literal "2".
+        assert_eq!(apply_repl("$12", 5, &["w", "ONE", "", "", "", ""]).unwrap(), "ONE2");
+        // `$3` with 1 group → no valid ref → literal "$3".
+        assert_eq!(apply_repl("$3", 1, &["w", "g1"]).unwrap(), "$3");
+    }
+
+    #[test]
+    fn replacement_invalid_raises_forx0004() {
+        // Illegal escape, bare `$`, trailing backslash all → FORX0004.
+        for bad in [r"\x", "a$b", r"end\"] {
+            let e = parse_xpath_replacement(bad, 1).unwrap_err();
+            assert!(format!("{e:?}").contains("FORX0004"), "{bad:?} should be FORX0004");
+        }
+    }
+
+    #[test]
+    fn q_literal_compile_disables_metacharacters() {
+        let p = compile_xpath_pattern("a.c", "q", crate::regex::Dialect::Xpath).unwrap();
+        assert!(p.find_match("a.c"));
+        assert!(!p.find_match("axc"));
+        // q + i: literal but case-insensitive.
+        let pi = compile_xpath_pattern("A.C", "qi", crate::regex::Dialect::Xpath).unwrap();
+        assert!(pi.find_match("a.c"));
+    }
+
+    #[test]
+    fn compile_rejects_bad_flag_and_pattern() {
+        let f = compile_xpath_pattern("a", "z", crate::regex::Dialect::Xpath).unwrap_err();
+        assert!(format!("{f:?}").contains("FORX0001"));
+        let p = compile_xpath_pattern("(a", "", crate::regex::Dialect::Xpath).unwrap_err();
+        assert!(format!("{p:?}").contains("FORX0002"));
+    }
 
     // ── date/time year range (FODT0001 vs FORG0001) ──────────────
 

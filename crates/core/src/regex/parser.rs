@@ -1093,6 +1093,27 @@ mod tests {
     }
 
     #[test]
+    fn xpath_dialect_rejects_back_references() {
+        // The constructs XSD accepts leniently are hard errors (FORX0002)
+        // in the XPath dialect used by fn:matches/replace/tokenize.
+        for d in [Dialect::Xpath, Dialect::Xpath20] {
+            assert!(parse_with(r"(a)\1", d).is_err(), "{d:?}: back-ref must be rejected");
+        }
+    }
+
+    #[test]
+    fn xpath_dialect_rejects_boundary_and_hex_escapes() {
+        for d in [Dialect::Xpath, Dialect::Xpath20] {
+            assert!(parse_with(r"a\b", d).is_err(), "{d:?}: \\b boundary escape");
+            assert!(parse_with(r"\A", d).is_err(),  "{d:?}: \\A anchor escape");
+            assert!(parse_with(r"\x41", d).is_err(), "{d:?}: \\x hex escape");
+        }
+        // …but XSD mode accepts them (Microsoft-schema compatibility).
+        assert!(parse_with(r"a\b", Dialect::Xsd).is_ok());
+        assert!(parse_with(r"\x41", Dialect::Xsd).is_ok());
+    }
+
+    #[test]
     fn accepts_anchor_escapes_leniently() {
         // \b, \B, \z, \Z, \A — anchors not in XSD §F.  Accepted
         // as match-any placeholders (degraded but compiles).

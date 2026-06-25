@@ -457,4 +457,173 @@ mod tests {
         assert!(re.is_match("^a$"), "XSD: `^`/`$` are literal characters");
         assert!(!re.is_match("a"), "XSD: the literal `^`/`$` must be present");
     }
+
+    // ─────────────────────── reluctant quantifiers ───────────────────────
+
+    #[test]
+    fn reluctant_vs_greedy_find_all() {
+        // Greedy `a+` swallows the whole run (one match); reluctant `a+?`
+        // takes the shortest run at each position (three single-char matches).
+        assert_eq!(caps("a+", "aaa").len(), 1);
+        assert_eq!(caps("a+?", "aaa").len(), 3);
+    }
+
+    #[test]
+    fn reluctant_group_span_is_shortest() {
+        // `<.+>` greedy spans the whole input; `<.+?>` stops at the first `>`.
+        assert_eq!(caps("(<.+>)", "<a><b>")[0][1], Some((0, 6)));
+        let rel = caps("(<.+?>)", "<a><b>");
+        assert_eq!(rel.len(), 2);
+        assert_eq!(rel[0][1], Some((0, 3)));
+        assert_eq!(rel[1][1], Some((3, 6)));
+    }
+
+    #[test]
+    fn reluctant_star_and_bounded() {
+        // `a*?` prefers zero; `a{2,4}?` prefers the lower bound (2).
+        assert_eq!(caps("a*?", "aa").len(), 3);            // empty at 0,1,2
+        let b = caps("(a{2,4}?)", "aaaa");
+        assert_eq!(b[0][1], Some((0, 2)));
+    }
+
+    #[test]
+    fn greedy_bounded_takes_max_in_range() {
+        // Sanity counterpart: greedy `a{2,4}` takes 4 of the 4 a's.
+        assert_eq!(caps("(a{2,4})", "aaaa")[0][1], Some((0, 4)));
+    }
+
+    // ───────────────────────── capture edge cases ────────────────────────
+
+    #[test]
+    fn captures_nested_groups() {
+        // `((a)(b))` — group 1 wraps 2 and 3.
+        let c = caps("((a)(b))", "ab");
+        assert_eq!(c[0], vec![Some((0, 2)), Some((0, 2)), Some((0, 1)), Some((1, 2))]);
+    }
+
+    #[test]
+    fn captures_quantified_group_keeps_last_iteration() {
+        // `(a)+` over "aaa": group 1 records only the final iteration.
+        let c = caps("(a)+", "aaa");
+        assert_eq!(c[0][0], Some((0, 3)));
+        assert_eq!(c[0][1], Some((2, 3)));
+    }
+
+    #[test]
+    fn captures_anchored_group() {
+        assert_eq!(caps("^(a+)$", "aaa")[0][1], Some((0, 3)));
+        // `$`-anchored group must reach the end.
+        assert!(caps("^(a+)$", "aaab").is_empty());
+    }
+
+    #[test]
+    fn captures_empty_group_participates() {
+        // `(a*)` against "" matches once with a zero-length group span.
+        let c = caps("(a*)", "");
+        assert_eq!(c.len(), 1);
+        assert_eq!(c[0], vec![Some((0, 0)), Some((0, 0))]);
+    }
+
+    #[test]
+    fn captures_optional_group_absent_is_none() {
+        // `(a)?b` against "b": group 1 didn't participate.
+        let c = caps("(a)?b", "b");
+        assert_eq!(c[0], vec![Some((0, 1)), None]);
+    }
+
+    // ───────────────────────── flag combinations ─────────────────────────
+
+    #[test]
+    fn flag_combo_i_and_m() {
+        // Case-insensitive + multiline: `^abc$` matches an upper-case line.
+        assert!(fm("^abc$", "im", "xyz\nABC"));
+        assert!(!fm("^abc$", "i", "xyz\nABC")); // no m → no interior anchor
+    }
+
+    #[test]
+    fn flag_combo_s_and_x() {
+        // dotall + extended: whitespace ignored, `.` crosses the newline.
+        assert!(fm("a . b", "sx", "a\nb"));
+    }
+
+    #[test]
+    fn flag_x_strips_comments() {
+        assert!(fm("ab  # a comment\nc", "x", "abc"));
+    }
+
+    // ─────────────────────── case-insensitivity depth ────────────────────
+
+    #[test]
+    fn flag_i_range_matches_opposite_case() {
+        assert!(fm("^[A-Z]+$", "i", "abc"));
+        assert!(fm("^[a-z]+$", "i", "ABC"));
+    }
+
+    #[test]
+    fn flag_i_negated_range_excludes_both_cases() {
+        // `[^A-Z]` under i excludes a-z too (case-closed before complement).
+        assert!(!fm("^[^A-Z]$", "i", "a"));
+        assert!(!fm("^[^A-Z]$", "i", "A"));
+        assert!(fm("^[^A-Z]$", "i", "0"));
+    }
+
+    #[test]
+    fn flag_i_does_not_leak_without_flag() {
+        assert!(!fm("^abc$", "", "ABC"));
+    }
+
+    // ───────────────────────────── find_iter ─────────────────────────────
+
+    #[test]
+    fn find_iter_non_overlapping_spans() {
+        let p = Pattern::compile_with("ab", Dialect::Xpath).unwrap();
+        assert_eq!(p.find_iter("xababy"), vec![(1, 3), (3, 5)]);
+    }
+
+    #[test]
+    fn find_iter_empty_matches_step_one_codepoint() {
+        // `a*` matches empty between every position plus the runs.
+        let p = Pattern::compile_with("a*", Dialect::Xpath).unwrap();
+        // "ba": empty@0, then 'a' run at 1, empty@2 → terminates (no hang).
+        assert!(!p.find_iter("ba").is_empty());
+    }
+
+    #[test]
+    fn empty_string_match_detection_for_forx0003() {
+        // fn:replace / fn:tokenize reject patterns that match the empty
+        // string (FORX0003) via find_match("").
+        let m = |p: &str| Pattern::compile_with(p, Dialect::Xpath).unwrap().find_match("");
+        assert!(m("a*"));
+        assert!(m("a?"));
+        assert!(m("(abc)*"));
+        assert!(!m("a+"));
+        assert!(!m("abc"));
+    }
+
+    #[test]
+    fn captures_honor_multiline_flag() {
+        // find_captures runs the Pike VM with full input context, so the
+        // `m` flag's interior `^` boundary works (unlike the find_iter
+        // slice path).  `^(b+)` matches at the line start after the \n.
+        let f = Flags::parse("m").unwrap();
+        let p = Pattern::compile_with_flags("^(b+)", Dialect::Xpath, f).unwrap();
+        let c = p.find_captures("aaa\nbbb");
+        assert_eq!(c.len(), 1);
+        assert_eq!(c[0][1], Some((4, 7)));
+    }
+
+    #[test]
+    fn captures_case_insensitive_group() {
+        let f = Flags::parse("i").unwrap();
+        let p = Pattern::compile_with_flags("(ab)+", Dialect::Xpath, f).unwrap();
+        let c = p.find_captures("ABab");
+        assert_eq!(c[0][0], Some((0, 4)));
+    }
+
+    #[test]
+    fn group_count_reported() {
+        assert_eq!(Pattern::compile_with("(a)(b)(c)", Dialect::Xpath).unwrap().group_count(), 3);
+        assert_eq!(Pattern::compile_with("(?:a)(b)", Dialect::Xpath).unwrap().group_count(), 1);
+        assert_eq!(Pattern::compile_with("abc", Dialect::Xpath).unwrap().group_count(), 0);
+    }
 }
