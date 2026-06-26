@@ -9683,6 +9683,13 @@ fn node_type_match(
             && matches!(tlocal, "untypedAtomic" | "anySimpleType" | "anyAtomicType")
             => Some(true),
         None if turi == XSD && !is_attr && tlocal == "untyped" => Some(true),
+        // An element's type annotation is a complex or simple type, never
+        // the atomic/attribute defaults — so `element(*, xs:untypedAtomic)`
+        // / `element(*, xs:anyAtomicType)` are definitely false even for an
+        // unvalidated element (other specific types stay undecidable for
+        // the partial-schema leniency above).
+        None if turi == XSD && !is_attr
+            && matches!(tlocal, "untypedAtomic" | "anyAtomicType") => Some(false),
         None => None,
     }
 }

@@ -6532,8 +6532,8 @@ fn compile_for_each_group(node: &Node) -> Result<Instr, XsltError> {
     // group-by / group-adjacent.  Pairing it with the positional
     // forms (group-starting-with / group-ending-with) is a static
     // error.
-    let mut collation = read_attribute(node, "collation").map(|c| c.trim().to_string());
-    if let Some(c) = &collation {
+    let raw_collation = read_attribute(node, "collation").map(|c| c.trim().to_string());
+    if let Some(c) = &raw_collation {
         if !in_forwards_compat_mode()
             && !matches!(kind, GroupingKind::By | GroupingKind::Adjacent)
         {
@@ -6542,20 +6542,22 @@ fn compile_for_each_group(node: &Node) -> Result<Instr, XsltError> {
                  group-adjacent (XTSE1090)".into()
             ));
         }
-        // XTSE1190 — collation URI must be recognised.
-        if !in_forwards_compat_mode() && !is_recognised_collation(c) {
+        // XTSE1190 — a *literal* collation URI must be recognised at
+        // compile time; an AVT (`{…}`) is checked at runtime (XTDE1035).
+        if !in_forwards_compat_mode() && !c.contains('{') && !is_recognised_collation(c) {
             return Err(XsltError::InvalidStylesheet(format!(
                 "xsl:for-each-group collation='{c}' is not recognised (XTSE1190)"
             )));
         }
     }
-    if collation.is_none() {
+    let collation: Option<Avt> = match raw_collation {
+        Some(c) => Some(avt(node, &c)?),
         // Inherit the in-scope default-collation when no explicit
-        // attribute is present.
-        if matches!(kind, GroupingKind::By | GroupingKind::Adjacent) {
-            collation = effective_default_collation(node);
-        }
-    }
+        // attribute is present (group-by / group-adjacent only).
+        None if matches!(kind, GroupingKind::By | GroupingKind::Adjacent) =>
+            effective_default_collation(node).map(|s| avt(node, &s)).transpose()?,
+        None => None,
+    };
     // XSLT 3.0 §19.1 — `composite="yes"` treats the whole grouping-key
     // sequence as one key.  It is meaningful only for the value-based
     // grouping forms (group-by / group-adjacent); for the positional

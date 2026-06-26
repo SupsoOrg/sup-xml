@@ -5525,6 +5525,18 @@ fn eval_instr(
         }
         Instr::ForEachGroup { select, kind, key, sort, body, collation, composite } => {
             use crate::ast::GroupingKind;
+            // The collation= attribute is an AVT — resolve it against the
+            // current focus, then validate (XTDE1035) at runtime.
+            let coll_str: Option<String> = match collation {
+                Some(a) => Some(render_avt(state, a, ctx_node, pos, size)?),
+                None    => None,
+            };
+            if let Some(c) = &coll_str {
+                if !crate::compiler::is_recognised_collation(c) {
+                    return Err(XsltError::InvalidStylesheet(format!(
+                        "xsl:for-each-group collation '{c}' is not recognised (XTDE1035)")));
+                }
+            }
             // XSLT 2.0 §14 — the input sequence may contain atomic
             // values as well as nodes.  Realise atomics as synthetic
             // text nodes so the rest of the grouping pipeline (which
@@ -5570,7 +5582,7 @@ fn eval_instr(
             // / group-adjacent treat the key as a value-comparison
             // result, so the collation drives equality.
             let collation_fold = |s: &str| -> String {
-                let ci = matches!(collation.as_deref(),
+                let ci = matches!(coll_str.as_deref(),
                     Some("http://www.w3.org/2005/xpath-functions/collation/html-ascii-case-insensitive"));
                 if ci {
                     let mut out = String::with_capacity(s.len());

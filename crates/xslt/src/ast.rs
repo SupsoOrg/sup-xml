@@ -645,11 +645,12 @@ pub enum Instr {
         key:      Expr,
         sort:     Vec<Sort>,
         body:     Body,
-        /// Optional `collation=` URI (defaults to the codepoint
-        /// collation if absent or empty).  Only `group-by` /
-        /// `group-adjacent` consult this — the positional grouping
-        /// forms compare nodes by identity.
-        collation: Option<String>,
+        /// Optional `collation=` URI as an AVT (XSLT 2.0 §14 — the
+        /// attribute is an attribute-value template; defaults to the
+        /// codepoint collation if absent or empty).  Only `group-by` /
+        /// `group-adjacent` consult this — the positional grouping forms
+        /// compare nodes by identity.
+        collation: Option<Avt>,
         /// `composite="yes"` (XSLT 3.0 §19.1).  When set, the whole
         /// grouping-key sequence is treated as a single composite key
         /// rather than each item being a distinct key, and
