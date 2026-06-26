@@ -8375,7 +8375,15 @@ fn eval_function<I: DocIndexLike>(name: &str, args: &[Expr], ctx: &EvalCtx<'_>, 
                     "deep-equal() cannot compare function items (FOTY0015)")
                     .with_xpath_code("FOTY0015"));
             }
-            Ok(Value::Boolean(deep_equal_values(&a, &b, idx, ctx.bindings)))
+            // The optional 3rd arg (or, absent, the in-scope default
+            // collation) drives string comparison; we honor the
+            // case-insensitive collation, codepoint otherwise.
+            let coll = if args.len() == 3 {
+                let c = arg!(2);
+                Some(value_to_string_with(&c, idx, ctx.bindings))
+            } else { None };
+            let ci = is_ascii_ci_collation(effective_collation(coll).as_deref());
+            Ok(Value::Boolean(deep_equal_values(&a, &b, idx, ctx.bindings, ci)))
         }
         "base-uri" => {
             // 0-arg form uses the context node; 1-arg takes the
@@ -11567,14 +11575,32 @@ fn pi_index_among_siblings<I: DocIndexLike>(
 /// * Pairwise items are deep-equal.  Atomic items use the same
 ///   `values_eq` semantics as the `=` general comparison;
 ///   nodes use kind-specific structural recursion.
+/// String equality under the deep-equal collation: case-insensitive ASCII
+/// fold when `ci`, exact codepoint otherwise.
+fn deq_str_eq(a: &str, b: &str, ci: bool) -> bool {
+    if ci { ascii_ci_fold(a) == ascii_ci_fold(b) } else { a == b }
+}
+
+/// True iff `v` is a string-family atomic (so a collation governs its
+/// comparison).
+fn is_string_atomic(v: &Value) -> bool {
+    match v {
+        Value::String(_) => true,
+        Value::Typed(t)  => matches!(t.kind, "string" | "untypedAtomic" | "anyURI"
+            | "normalizedString" | "token" | "language" | "Name" | "NCName"
+            | "ID" | "IDREF" | "ENTITY" | "NMTOKEN" | "anyAtomicType" | "anySimpleType"),
+        _ => false,
+    }
+}
+
 fn deep_equal_values<I: DocIndexLike>(
-    a: &Value, b: &Value, idx: &I, bindings: &dyn XPathBindings,
+    a: &Value, b: &Value, idx: &I, bindings: &dyn XPathBindings, ci: bool,
 ) -> bool {
     let a_items = items_of(a);
     let b_items = items_of(b);
     if a_items.len() != b_items.len() { return false; }
     a_items.iter().zip(b_items.iter()).all(|(x, y)|
-        deep_equal_one(x, y, idx, bindings))
+        deep_equal_one(x, y, idx, bindings, ci))
 }
 
 /// Decompose a `Value` into the per-item view that `deep-equal`
@@ -11716,13 +11742,13 @@ fn iter_items<'a>(v: &'a Value) -> Box<dyn Iterator<Item = Value> + 'a> {
 }
 
 fn deep_equal_one<I: DocIndexLike>(
-    a: &Value, b: &Value, idx: &I, bindings: &dyn XPathBindings,
+    a: &Value, b: &Value, idx: &I, bindings: &dyn XPathBindings, ci: bool,
 ) -> bool {
     match (a, b) {
         (Value::NodeSet(an), Value::NodeSet(bn))
             if an.len() == 1 && bn.len() == 1 =>
         {
-            deep_equal_node(an[0], bn[0], idx)
+            deep_equal_node(an[0], bn[0], idx, ci)
         }
         // Text-node-vs-atomic: many path expressions
         // (`/x/y/string()`, `/x/y/concat(.,'')`) flow atomic results
@@ -11734,7 +11760,8 @@ fn deep_equal_one<I: DocIndexLike>(
         (Value::NodeSet(ns), other) | (other, Value::NodeSet(ns))
             if ns.len() == 1 && matches!(idx.kind(ns[0]), XPathNodeKind::Text) =>
         {
-            value_to_string_with(other, idx, bindings) == idx.string_value(ns[0])
+            deq_str_eq(&value_to_string_with(other, idx, bindings),
+                       &idx.string_value(ns[0]), ci)
         }
         // Mixed node / non-node items are NEVER deep-equal per the
         // spec (FOTY0004 doesn't apply because we don't surface
@@ -11747,6 +11774,11 @@ fn deep_equal_one<I: DocIndexLike>(
         // can't `eq` each other (numeric vs string, boolean vs
         // anything else, etc.).
         _ if !deep_equal_types_comparable(a, b) => false,
+        // Under a case-insensitive collation, string atomics compare with
+        // the ASCII fold; other atomic families use value comparison.
+        _ if ci && is_string_atomic(a) && is_string_atomic(b) =>
+            deq_str_eq(&value_to_string_with(a, idx, bindings),
+                       &value_to_string_with(b, idx, bindings), true),
         _ => values_eq(a, b, idx, bindings),
     }
 }
@@ -11793,7 +11825,7 @@ fn deep_equal_types_comparable(a: &Value, b: &Value) -> bool {
     fa == fb
 }
 
-fn deep_equal_node<I: DocIndexLike>(a: NodeId, b: NodeId, idx: &I) -> bool {
+fn deep_equal_node<I: DocIndexLike>(a: NodeId, b: NodeId, idx: &I, ci: bool) -> bool {
     if idx.kind(a) != idx.kind(b) { return false; }
     match idx.kind(a) {
         XPathNodeKind::Element => {
@@ -11815,7 +11847,7 @@ fn deep_equal_node<I: DocIndexLike>(a: NodeId, b: NodeId, idx: &I) -> bool {
             for (&aa, &bb) in a_attrs.iter().zip(b_attrs.iter()) {
                 if idx.namespace_uri(aa) != idx.namespace_uri(bb) { return false; }
                 if idx.local_name(aa)    != idx.local_name(bb)    { return false; }
-                if idx.string_value(aa)  != idx.string_value(bb)  { return false; }
+                if !deq_str_eq(&idx.string_value(aa), &idx.string_value(bb), ci) { return false; }
             }
             // Children: filter out whitespace-only text nodes
             // (XPath 2.0 actually keeps them, but typed strip-
@@ -11825,22 +11857,22 @@ fn deep_equal_node<I: DocIndexLike>(a: NodeId, b: NodeId, idx: &I) -> bool {
             let b_kids = idx.children(b);
             if a_kids.len() != b_kids.len() { return false; }
             a_kids.iter().zip(b_kids.iter())
-                .all(|(&x, &y)| deep_equal_node(x, y, idx))
+                .all(|(&x, &y)| deep_equal_node(x, y, idx, ci))
         }
         XPathNodeKind::Document => {
             let a_kids = idx.children(a);
             let b_kids = idx.children(b);
             if a_kids.len() != b_kids.len() { return false; }
             a_kids.iter().zip(b_kids.iter())
-                .all(|(&x, &y)| deep_equal_node(x, y, idx))
+                .all(|(&x, &y)| deep_equal_node(x, y, idx, ci))
         }
         XPathNodeKind::Attribute => {
             idx.namespace_uri(a) == idx.namespace_uri(b)
                 && idx.local_name(a) == idx.local_name(b)
-                && idx.string_value(a) == idx.string_value(b)
+                && deq_str_eq(&idx.string_value(a), &idx.string_value(b), ci)
         }
         XPathNodeKind::Text | XPathNodeKind::CData => {
-            idx.string_value(a) == idx.string_value(b)
+            deq_str_eq(&idx.string_value(a), &idx.string_value(b), ci)
         }
         XPathNodeKind::Comment => {
             idx.string_value(a) == idx.string_value(b)
@@ -13362,6 +13394,8 @@ fn xs_constructor<I: DocIndexLike>(
         canonical_year_month_duration_lex(trimmed)
     } else if kind == "dayTimeDuration" {
         canonical_day_time_duration_lex(trimmed)
+    } else if kind == "duration" {
+        canonical_duration_lex(trimmed)
     } else if kind == "hexBinary" {
         // XSD §3.2.15 — the canonical lexical form uses upper-case
         // hex digits.
@@ -13459,6 +13493,60 @@ fn source_is_numeric(v: &Value) -> bool {
 /// XSD canonical form of `xs:yearMonthDuration` — total months
 /// decomposed into `PnYnM`, dropping zero-valued components.  Zero
 /// duration is `P0M`.
+/// XSD canonical form of `xs:duration` (§3.3.6.2).  The year-month part
+/// (carry months into years) and the day-time part (carry H/M/S up into
+/// days) normalize independently — days are NOT folded into months.  Zero
+/// is `PT0S`.  Returns the input unchanged if it isn't a plain integer
+/// duration we can canonicalize (e.g. fractional seconds).
+fn canonical_duration_lex(s: &str) -> String {
+    let (neg, rest) = match s.strip_prefix('-') { Some(r) => (true, r), None => (false, s) };
+    let Some(rest) = rest.strip_prefix('P') else { return s.to_string() };
+    let (date_part, time_part) = match rest.split_once('T') {
+        Some((d, t)) => (d, Some(t)),
+        None         => (rest, None),
+    };
+    // Generic [n<unit>]* scanner; returns None on any non-digit/unit char.
+    fn scan(part: &str, units: &[char]) -> Option<[i64; 3]> {
+        let mut out = [0i64; 3];
+        let mut num = String::new();
+        for ch in part.chars() {
+            if ch.is_ascii_digit() { num.push(ch); continue; }
+            let v: i64 = num.parse().ok()?;
+            num.clear();
+            let i = units.iter().position(|&u| u == ch)?;
+            out[i] = v;
+        }
+        if num.is_empty() { Some(out) } else { None }
+    }
+    let Some([years, months, days]) = scan(date_part, &['Y', 'M', 'D']) else {
+        return s.to_string();
+    };
+    let [hours, mins, secs] = match time_part {
+        Some(tp) if tp.contains('.') => return s.to_string(), // keep fractional as-is
+        Some(tp) => match scan(tp, &['H', 'M', 'S']) { Some(v) => v, None => return s.to_string() },
+        None => [0, 0, 0],
+    };
+    let total_months = years * 12 + months;
+    let (cy, cm) = (total_months / 12, total_months % 12);
+    let total_secs = days * 86_400 + hours * 3_600 + mins * 60 + secs;
+    let (cd, rem) = (total_secs / 86_400, total_secs % 86_400);
+    let (chh, cmm, css) = (rem / 3_600, (rem % 3_600) / 60, rem % 60);
+    if total_months == 0 && total_secs == 0 { return "PT0S".to_string(); }
+    let mut out = String::with_capacity(12);
+    if neg { out.push('-'); }
+    out.push('P');
+    if cy != 0 { out.push_str(&cy.to_string()); out.push('Y'); }
+    if cm != 0 { out.push_str(&cm.to_string()); out.push('M'); }
+    if cd != 0 { out.push_str(&cd.to_string()); out.push('D'); }
+    if chh != 0 || cmm != 0 || css != 0 {
+        out.push('T');
+        if chh != 0 { out.push_str(&chh.to_string()); out.push('H'); }
+        if cmm != 0 { out.push_str(&cmm.to_string()); out.push('M'); }
+        if css != 0 { out.push_str(&css.to_string()); out.push('S'); }
+    }
+    out
+}
+
 fn canonical_year_month_duration_lex(s: &str) -> String {
     let months = match parse_year_month_duration_months(s) {
         Some(m) => m,
