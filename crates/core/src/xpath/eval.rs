@@ -9491,6 +9491,13 @@ fn eval_function<I: DocIndexLike>(name: &str, args: &[Expr], ctx: &EvalCtx<'_>, 
                     let Some(&id) = ns.first() else {
                         return Ok(Value::NodeSet(Vec::new()));
                     };
+                    // F&O fn:node-name returns the empty sequence for nodes
+                    // that have no name (document, text, comment, CDATA).
+                    if matches!(idx.kind(id), XPathNodeKind::Document
+                        | XPathNodeKind::Text | XPathNodeKind::Comment
+                        | XPathNodeKind::CData) {
+                        return Ok(Value::NodeSet(Vec::new()));
+                    }
                     let local = idx.local_name(id);
                     let uri   = idx.namespace_uri(id);
                     let lex = if uri.is_empty() {
@@ -11127,8 +11134,10 @@ fn format_fractional_seconds(
         (None,     None) if min_w_explicit => (1, None),
         (None,     None)         => (1, None),
     };
-    // Round to `max_w` digits.  `None` max means unbounded — keep
-    // the full 6-digit microsecond precision (we don't store more).
+    // Round to `max_w` digits (XSLT 2.0 §16.5.1 half-up; XPath 3.1
+    // changed this to truncation — the `format-date-*a` test variants).
+    // `None` max means unbounded — keep the full 6-digit microsecond
+    // precision (we don't store more).
     let target = max_w.unwrap_or(6).min(6);
     if target == 0 { return String::new(); }
     let divisor = 10u32.pow((6 - target) as u32);

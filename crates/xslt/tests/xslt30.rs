@@ -1665,6 +1665,13 @@ fn run_case_detailed(case: &TestCase, ts_dir: &Path) -> Option<Result<(), FailRe
         Ok(rt) => ApplyResult::Ok(rt),
         Err(_) => ApplyResult::ApplyFailed,
     };
+    if std::env::var("XSLT2_DEBUG").map(|w| w == case.name || w == "ALL").unwrap_or(false) {
+        eprintln!("\n@@CASE {}\n@@EXPECT {:?}", case.name, case.expects);
+        match &result {
+            Ok(rt) => eprintln!("@@ACTUAL {:?}", rt.to_string()),
+            Err(e) => eprintln!("@@APPLYERR {e:?}"),
+        }
+    }
     Some(check_case_result(case, &tagged))
 }
 
@@ -2854,6 +2861,13 @@ fn run_case_xslt2(
         Ok(rt) => ApplyResult::Ok(rt),
         Err(_) => ApplyResult::ApplyFailed,
     };
+    if std::env::var("XSLT2_DEBUG").map(|w| w == case.name || w == "ALL").unwrap_or(false) {
+        eprintln!("\n@@CASE {}\n@@EXPECT {:?}", case.name, case.expects);
+        match &result {
+            Ok(rt) => eprintln!("@@ACTUAL {:?}", rt.to_string()),
+            Err(e) => eprintln!("@@APPLYERR {e:?}"),
+        }
+    }
     Some(check_case_result(case, &tagged))
 }
 

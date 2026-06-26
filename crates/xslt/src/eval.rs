@@ -1672,19 +1672,31 @@ fn eval_function_body<I: DocIndexLike>(
                     // xsl:for-each establishes a new focus (XSLT 2.0
                     // §13.1).  Inside an xsl:function the focus is
                     // otherwise undefined (§10.3), but each iteration
-                    // binds `.` to the selected item: a node gives a
-                    // node focus — so a contained xsl:number counts it —
-                    // whereas an atomic item leaves the focus node-less,
-                    // and xsl:number then reports XTTE0990.
-                    let (cx, item_is_node) = match &item {
-                        Value::NodeSet(ns) if ns.len() == 1 => (ns[0], true),
-                        _ => (ctx_node, false),
-                    };
-                    let mut sub = sup_xml_core::xpath::eval::with_focus_undefined(
-                        !item_is_node,
-                        || eval_function_body(
-                            fe_body, 0, idx, cx, i + 1, total, bindings, env, static_ctx),
-                    )?;
+                    // binds `.` to the selected item: a node gives a node
+                    // focus, while an atomic item is bound as the atomic
+                    // context item so `.`/`string(.)`/`format-time(.)`
+                    // resolve to its value (a contained xsl:number still
+                    // sees a non-node focus and reports XTTE0990).
+                    let mut sub = match &item {
+                        Value::NodeSet(ns) if ns.len() == 1 => {
+                            // Node item: establish a node focus so a
+                            // contained xsl:number counts it.
+                            sup_xml_core::xpath::eval::with_focus_undefined(false, ||
+                                eval_function_body(fe_body, 0, idx, ns[0],
+                                    i + 1, total, bindings, env, static_ctx))
+                        }
+                        other => {
+                            // Atomic item: bind it as the context item so
+                            // `.`/`string(.)`/`format-time(.)` resolve to
+                            // its value, while the focus stays node-less
+                            // (inherited from the xsl:function) so a
+                            // contained xsl:number still raises XTTE0990.
+                            sup_xml_core::xpath::eval::with_atomic_context_item(
+                                Some(other.clone()), ||
+                                eval_function_body(fe_body, 0, idx, ctx_node,
+                                    i + 1, total, bindings, env, static_ctx))
+                        }
+                    }?;
                     out.append(&mut sub);
                 }
             }
@@ -2470,7 +2482,18 @@ fn builtin_shallow(
             }
             Ok(())
         }
-        XPathNodeKind::Namespace => Ok(()),
+        XPathNodeKind::Namespace => {
+            // xsl:copy-of of a namespace node adds its binding to the
+            // element under construction (XSLT 2.0 §11.9.2); `xml` is
+            // implicitly in scope and never copied.
+            let prefix = state.idx.local_name(node);
+            if prefix != "xml" {
+                let uri = state.idx.string_value(node);
+                let p = if prefix.is_empty() { None } else { Some(prefix.to_string()) };
+                state.builder.push_namespace_decl(p, uri);
+            }
+            Ok(())
+        }
     }
 }
 
