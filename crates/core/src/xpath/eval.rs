@@ -5193,6 +5193,36 @@ fn cmp_op<I: DocIndexLike>(
         ctx.bindings.foreign_string_value(p)
             .trim().parse::<f64>().unwrap_or(f64::NAN)
     };
+    // XPath 2.0 §10.1 general comparison with an atomic *sequence* operand:
+    // true iff SOME pair of items satisfies the relation.  Numeric pairs
+    // compare numerically, string pairs lexically (via the same `op` over
+    // the Ordering), mixed numeric/string pairs are incomparable.  (The
+    // node-set arms below already give this existential semantics; a bare
+    // `Value::Sequence` of atomics otherwise collapsed to a single number.)
+    if matches!(lv, Value::Sequence(_)) || matches!(rv, Value::Sequence(_)) {
+        let litems = items_of(&lv);
+        let ritems = items_of(&rv);
+        let ord_f64 = |o: std::cmp::Ordering| match o {
+            std::cmp::Ordering::Less    => -1.0,
+            std::cmp::Ordering::Equal   =>  0.0,
+            std::cmp::Ordering::Greater =>  1.0,
+        };
+        for a in &litems {
+            let na = key_number(a);
+            for b in &ritems {
+                let nb = key_number(b);
+                let sat = match (na, nb) {
+                    (Some(x), Some(y)) => op(x, y),
+                    (Some(_), None) | (None, Some(_)) => false,
+                    (None, None) => op(ord_f64(
+                        value_to_string_with(a, idx, ctx.bindings)
+                            .cmp(&value_to_string_with(b, idx, ctx.bindings))), 0.0),
+                };
+                if sat { return Ok(Value::Boolean(true)); }
+            }
+        }
+        return Ok(Value::Boolean(false));
+    }
     match (&lv, &rv) {
         (Value::NodeSet(ns), other) | (other, Value::NodeSet(ns))
             if !matches!(other, Value::NodeSet(_) | Value::ForeignNodeSet(_)) =>
