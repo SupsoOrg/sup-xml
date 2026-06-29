@@ -1078,6 +1078,26 @@ pub struct OutputSpec {
     /// tree is built (`build-tree="no"`).  `None` leaves the default
     /// (a single space between adjacent atomic values, per §5.7.2).
     pub item_separator:         Option<String>,
+    /// XSLT 3.0 §27.1 / Serialization 3.1 §3: `json-node-output-method`
+    /// — the serialization method (`xml` / `html` / `xhtml` / `text` /
+    /// `adaptive`) used to serialize a *node* that appears as a value
+    /// within the structure serialized by `method="json"`.  `None`
+    /// defaults to `xml`.
+    pub json_node_output_method: Option<String>,
+    /// XSLT 3.0 §27.2: `parameter-document` — a URI (already resolved
+    /// against the declaring module's base) of an XML document supplying
+    /// serialization parameters.  Loaded and merged into this spec by a
+    /// compile-time post-pass (`apply_parameter_documents`).
+    pub parameter_document:     Option<String>,
+    /// Serialization 3.1 §3 `use-character-maps` entries supplied inline
+    /// by a `parameter-document` (`<output:character-map character=…
+    /// map-string=…/>`).  Merged into the effective character map
+    /// alongside the named `use_character_maps`.
+    pub inline_character_map:   Vec<(char, String)>,
+    /// Serialization 3.1 §3 `allow-duplicate-names` for the json method;
+    /// `None`/`Some(false)` means duplicate object keys (after string
+    /// conversion) are a serialization error (SERE0022).
+    pub allow_duplicate_names:  Option<bool>,
 }
 
 /// `xsl:output standalone="yes|no|omit"` (XSLT 2.0 §20).  Both
@@ -1233,6 +1253,12 @@ pub struct StylesheetAst {
     /// lower one (XSLT 2.0 §16.4.2).  `i32::MIN` marks "unset".
     pub decimal_format_attr_prec: std::collections::HashMap<String, [i32; 10]>,
     pub whitespace_rules:   Vec<WhitespaceRule>,
+    /// XSLT 3.0 §6.4 — a named `default-mode` on the principal module
+    /// element, captured for validation (it must reference a mode that is
+    /// declared or used).  `None` = unset or `#unnamed`/`#default`.  NOT
+    /// used to drive the initial invocation (that interacts subtly with
+    /// the harness's entry-point selection).
+    pub default_mode:       Option<QName>,
     pub outputs:            Vec<OutputSpec>,
     /// `xsl:include` href values — resolved during compilation if
     /// a loader is supplied; currently captured for diagnostics.
@@ -1286,6 +1312,11 @@ pub struct StylesheetAst {
     /// template aliases with its own declarations, not the user's.
     pub package_aliases:    std::collections::HashMap<u32,
                                 Vec<(String, String, Option<String>)>>,
+    /// Package use-graph: `package_id` → the ids of the packages it
+    /// directly `xsl:use-package`s (XSLT 3.0 §3.5).  Lets a component
+    /// reference resolve through the packages its home package uses when
+    /// the referenced component isn't declared in the home package itself.
+    pub package_uses:       std::collections::HashMap<u32, Vec<u32>>,
     /// Per-package `xsl:character-map` and named `xsl:output` tables,
     /// keyed by `package_id` (XSLT 3.0 §3.5: both are package-local).
     /// The principal package's stay in [`StylesheetAst::character_maps`]

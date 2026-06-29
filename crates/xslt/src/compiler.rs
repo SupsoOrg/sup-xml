@@ -1638,7 +1638,11 @@ pub fn compile(doc: &Document) -> Result<StylesheetAst, XsltError> {
     // XSLT 3.0 §6.4 — a `default-mode` on the module element scopes the
     // default mode for every template and `xsl:apply-templates` it
     // contains (unless overridden by a closer `default-mode`).
-    let _module_default_mode = read_default_mode(root)?.map(DefaultModeGuard::enter);
+    let root_default_mode = read_default_mode(root)?;
+    if let Some(Some(q)) = &root_default_mode {
+        ast.default_mode = Some(q.clone());
+    }
+    let _module_default_mode = root_default_mode.map(DefaultModeGuard::enter);
 
     let mut pos: u32 = 0;
     for child in root.children() {
@@ -2485,6 +2489,17 @@ fn compile_function(node: &Node) -> Result<UserFunction, XsltError> {
             parse_bool_attr(&v, "xsl:function", attr)?;
         }
     }
+    // XSLT 3.0 §10.3 / XTSE0020 — `override` (the 2.0 name) and
+    // `override-extension-function` (its 3.0 replacement) are synonyms;
+    // both may be present but they must agree.
+    if let (Some(a), Some(b)) = (read_attribute(node, "override"),
+                                 read_attribute(node, "override-extension-function")) {
+        if parse_yesno(a) != parse_yesno(b) {
+            return Err(XsltError::InvalidStylesheet(
+                "xsl:function override and override-extension-function \
+                 must have consistent values (XTSE0020)".into()));
+        }
+    }
     // XSLT 3.0 §10.3 / XTSE0020 — new-each-time is `yes|no|maybe`.
     if let Some(v) = read_attribute(node, "new-each-time") {
         if !matches!(v.trim(), "yes" | "no" | "true" | "false" | "1" | "0" | "maybe") {
@@ -3020,7 +3035,7 @@ pub fn compile_with_imports(
     // clash — so the check runs here, after the recursive build.
     PACKAGE_ID_COUNTER.with(|c| c.set(0));
     #[cfg_attr(not(feature = "xsd"), allow(unused_mut))]
-    let mut ast = compile_with_imports_inner(text, loader, base, acc, precedence_counter)?;
+    let mut ast = compile_with_imports_inner(text, loader, base, acc, precedence_counter, false, false, 0)?;
     finalize_decimal_format_conflicts(&ast)?;
     // Schema-aware: resolve `xsl:import-schema` against the loader and
     // compile each imported schema.  Lenient — a schema that can't be
@@ -3063,7 +3078,107 @@ pub fn compile_with_imports(
             }
         }
     }
+    // XSLT 3.0 §27.2 — load each xsl:output's parameter-document and merge
+    // its serialization parameters into the spec.
+    apply_parameter_documents(&mut ast.outputs, loader);
+    let pkg_keys: Vec<u32> = ast.package_outputs.keys().copied().collect();
+    for k in pkg_keys {
+        if let Some(outs) = ast.package_outputs.get_mut(&k) {
+            apply_parameter_documents(outs, loader);
+        }
+    }
     Ok(ast)
+}
+
+const SERIALIZATION_NS: &str = "http://www.w3.org/2010/xslt-xquery-serialization";
+
+/// Load each output spec's `parameter-document` (if any) and merge the
+/// serialization parameters it declares (XSLT 3.0 §27.2).
+fn apply_parameter_documents(outputs: &mut [OutputSpec], loader: &dyn Loader) {
+    for out in outputs.iter_mut() {
+        let Some(uri) = out.parameter_document.clone() else { continue };
+        if let Ok(text) = loader.load(&uri, None) {
+            merge_parameter_document(out, &text);
+        }
+    }
+}
+
+/// Parse an `<output:serialization-parameters>` document and fold its
+/// parameters into `out`.  An explicitly-set attribute on the xsl:output
+/// wins over the parameter document (Serialization 3.1 §3.1), so each
+/// value is applied only where the spec field is still unset.
+fn merge_parameter_document(out: &mut OutputSpec, text: &str) {
+    let opts = sup_xml_core::ParseOptions { namespace_aware: true, ..Default::default() };
+    let Ok(doc) = sup_xml_core::parse_str(text, &opts) else { return };
+    let root = doc.root();
+    let in_ser_ns = |n: &Node| n.namespace.get().map(|ns| ns.href()) == Some(SERIALIZATION_NS);
+    let params = if root.is_element() && root.local_name() == "serialization-parameters" {
+        root
+    } else {
+        match root.children().find(|c| c.is_element()
+            && c.local_name() == "serialization-parameters") {
+            Some(p) => p,
+            None => return,
+        }
+    };
+    let yes = |v: &str| matches!(v.trim(), "yes" | "true" | "1");
+    for child in params.children() {
+        if !child.is_element() || !in_ser_ns(&child) { continue; }
+        let local = child.local_name();
+        if local == "use-character-maps" {
+            for cm in child.children() {
+                if !cm.is_element() || cm.local_name() != "character-map" { continue; }
+                if let (Some(c), Some(s)) =
+                    (read_attribute(&cm, "character"), read_attribute(&cm, "map-string"))
+                {
+                    if let Some(ch) = c.chars().next() {
+                        out.inline_character_map.push((ch, s.to_string()));
+                    }
+                }
+            }
+            continue;
+        }
+        let Some(value) = read_attribute(&child, "value") else { continue };
+        match local {
+            "method" if out.method.is_none() =>
+                out.method = Some(value.trim().to_string()),
+            "json-node-output-method" if out.json_node_output_method.is_none() =>
+                out.json_node_output_method = Some(value.trim().to_string()),
+            "encoding" if out.encoding.is_none() =>
+                out.encoding = Some(value.to_string()),
+            "media-type" if out.media_type.is_none() =>
+                out.media_type = Some(value.to_string()),
+            "version" if out.version.is_none() =>
+                out.version = Some(value.to_string()),
+            "doctype-public" if out.doctype_public.is_none() =>
+                out.doctype_public = Some(value.to_string()),
+            "doctype-system" if out.doctype_system.is_none() =>
+                out.doctype_system = Some(value.to_string()),
+            "item-separator" if out.item_separator.is_none() =>
+                out.item_separator = Some(value.to_string()),
+            "normalization-form" if out.normalization_form.is_none() =>
+                out.normalization_form = Some(value.to_string()),
+            "omit-xml-declaration" if out.omit_xml_declaration.is_none() =>
+                out.omit_xml_declaration = Some(yes(value)),
+            "indent" if out.indent.is_none() => out.indent = Some(yes(value)),
+            "allow-duplicate-names" if out.allow_duplicate_names.is_none() =>
+                out.allow_duplicate_names = Some(yes(value)),
+            "byte-order-mark" if out.byte_order_mark.is_none() =>
+                out.byte_order_mark = Some(yes(value)),
+            "escape-uri-attributes" if out.escape_uri_attributes.is_none() =>
+                out.escape_uri_attributes = Some(yes(value)),
+            "include-content-type" if out.include_content_type.is_none() =>
+                out.include_content_type = Some(yes(value)),
+            "standalone" if out.standalone.is_none() => {
+                out.standalone = Some(match value.trim() {
+                    "omit" => crate::ast::Standalone::Omit,
+                    v if yes(v) => crate::ast::Standalone::Yes,
+                    _ => crate::ast::Standalone::No,
+                });
+            }
+            _ => {}
+        }
+    }
 }
 
 fn compile_with_imports_inner(
@@ -3072,6 +3187,9 @@ fn compile_with_imports_inner(
     base:                Option<&str>,
     mut acc:             StylesheetAst,
     precedence_counter:  &mut i32,
+    is_import:           bool,
+    is_submodule:        bool,
+    current_pkg_id:      u32,
 ) -> Result<StylesheetAst, XsltError> {
     // Publish the module's static base URI so `evaluate_use_when_at`
     // can resolve `fn:static-base-uri()` inside use-when expressions.
@@ -3175,6 +3293,23 @@ fn compile_with_imports_inner(
         }
     }
     let local = compile(&doc)?;
+    // XSLT 3.0 §3.5.1 / XTSE3008 — xsl:use-package may not appear in a
+    // stylesheet module pulled in by xsl:import.  (An xsl:include is a
+    // textual merge into the same package, so use-package in an included
+    // module is permitted — it resolves as part of the including package.)
+    // XSLT 3.0 §3.6.2 — the target of xsl:import / xsl:include must be a
+    // stylesheet module (xsl:stylesheet / xsl:transform), not a package.
+    // A package is loaded only via xsl:use-package.
+    if is_submodule && is_xslt_element(root) && root.local_name() == "package" {
+        return Err(XsltError::InvalidStylesheet(
+            "the target of xsl:import / xsl:include must be a stylesheet \
+             module, not an xsl:package (XTSE0210)".into()));
+    }
+    if is_import && !local.use_packages.is_empty() {
+        return Err(XsltError::InvalidStylesheet(
+            "xsl:use-package is not allowed in an imported \
+             stylesheet module (XTSE3008)".into()));
+    }
     // Capture the using package's own references before the merge
     // below moves local's component vectors — needed for the
     // xsl:use-package visibility check (XSLT 3.0 §3.5.2).
@@ -3257,6 +3392,7 @@ fn compile_with_imports_inner(
     }
     acc.whitespace_rules.extend(local_whitespace_rules);
     acc.outputs.extend(local.outputs);
+    if acc.default_mode.is_none() { acc.default_mode = local.default_mode; }
     acc.input_type_annotations.extend(local.input_type_annotations);
     acc.includes.extend(local.includes.iter().cloned());
     acc.imports.extend(local.imports.iter().cloned());
@@ -3287,7 +3423,7 @@ fn compile_with_imports_inner(
         let prev = *precedence_counter;
         *precedence_counter = this_precedence;
         let before = acc.templates.len();
-        acc = compile_with_imports_inner(&inc_text, loader, inc_base.as_deref(), acc, precedence_counter)?;
+        acc = compile_with_imports_inner(&inc_text, loader, inc_base.as_deref(), acc, precedence_counter, false, true, current_pkg_id)?;
         for t in &mut acc.templates[before..] {
             let mut p = vec![inc_pos];
             p.append(&mut t.source_path);
@@ -3308,7 +3444,7 @@ fn compile_with_imports_inner(
         let imp_text = loader.load(href, base)?;
         let imp_base = loader.resolve(href, base).ok();
         *precedence_counter -= 1;
-        acc = compile_with_imports_inner(&imp_text, loader, imp_base.as_deref(), acc, precedence_counter)?;
+        acc = compile_with_imports_inner(&imp_text, loader, imp_base.as_deref(), acc, precedence_counter, true, true, current_pkg_id)?;
     }
 
     // Resolve xsl:use-package (XSLT 3.0 §3.5.1).  An xsl:override's
@@ -3337,8 +3473,9 @@ fn compile_with_imports_inner(
                 // context applies at run time (XSLT 3.0 §3.5).
                 let pkg_id = PACKAGE_ID_COUNTER.with(|c| { let n = c.get() + 1; c.set(n); n });
                 *precedence_counter -= 1;
+                acc.package_uses.entry(current_pkg_id).or_default().push(pkg_id);
                 acc = compile_with_imports_inner(
-                    &src, loader, pkg_base.as_deref(), acc, precedence_counter)?;
+                    &src, loader, pkg_base.as_deref(), acc, precedence_counter, false, false, pkg_id)?;
                 for t in &mut acc.templates[before_templates..] {
                     if t.package_id == 0 { t.package_id = pkg_id; }
                 }
@@ -3386,7 +3523,7 @@ fn compile_with_imports_inner(
                 let mut tmp_prec = TOP_LEVEL_IMPORT_PRECEDENCE;
                 if let Ok(pure) = compile_with_imports_inner(
                     &src, loader, pkg_base.as_deref(),
-                    StylesheetAst::default(), &mut tmp_prec)
+                    StylesheetAst::default(), &mut tmp_prec, false, false, 0)
                 {
                     if !pure.decimal_formats.is_empty() {
                         acc.package_decimal_formats.entry(pkg_id)
@@ -3446,8 +3583,56 @@ fn compile_with_imports_inner(
                     up.overrides.attribute_sets.iter().map(|a| qname_key(&a.name)).collect();
                 if !overridden_sets.is_empty() {
                     let tail = acc.attribute_sets.split_off(before_attr_sets);
+                    // XSLT 3.0 §3.5.2 — only public/abstract components may be
+                    // overridden; an override of a final/private/hidden
+                    // attribute-set is an error.  Checked here (against `tail`,
+                    // the used package's sets) before the overridden sets are
+                    // filtered out below.
+                    for s in &up.overrides.attribute_sets {
+                        if let Some(b) = tail.iter()
+                            .find(|b| qname_key(&b.name) == qname_key(&s.name))
+                        {
+                            let eff = expose_visibility(
+                                &acc.exposes[before_exposes..], "attribute-set", &b.name)
+                                .or_else(|| b.visibility.clone());
+                            if matches!(eff.as_deref(),
+                                Some("final") | Some("private") | Some("hidden"))
+                            {
+                                return Err(XsltError::InvalidStylesheet(format!(
+                                    "xsl:override cannot override attribute-set '{}' \
+                                     whose effective visibility is '{}' (XTSE3060)",
+                                    qname_key(&s.name), eff.as_deref().unwrap_or(""))));
+                            }
+                        }
+                    }
+                    // XSLT 3.0 §3.5.1 — expose a overridden base
+                    // attribute-set under the name xsl:original so an
+                    // override's `use-attribute-sets="xsl:original"` can
+                    // pull in the original's attributes.  Only the sets
+                    // whose override actually references xsl:original are
+                    // cloned, so an unrelated (e.g. abstract) overridden
+                    // set doesn't create an ambiguous xsl:original.
+                    const ORIG_KEY: &str = "{http://www.w3.org/1999/XSL/Transform}original";
+                    let wants_original: std::collections::HashSet<String> =
+                        up.overrides.attribute_sets.iter()
+                            .filter(|a| a.use_attribute_sets.iter()
+                                .any(|q| qname_key(q) == ORIG_KEY))
+                            .map(|a| qname_key(&a.name))
+                            .collect();
+                    let mut originals: Vec<crate::ast::AttributeSet> = tail.iter()
+                        .filter(|a| wants_original.contains(&qname_key(&a.name)))
+                        .map(|a| {
+                            let mut clone = a.clone();
+                            clone.name = QName {
+                                prefix: Some("xsl".into()), local: "original".into(),
+                                uri: "http://www.w3.org/1999/XSL/Transform".into(),
+                            };
+                            clone
+                        })
+                        .collect();
                     acc.attribute_sets.extend(tail.into_iter()
                         .filter(|a| !overridden_sets.contains(&qname_key(&a.name))));
+                    acc.attribute_sets.append(&mut originals);
                 }
                 // The same applies to global variables and parameters, which
                 // (unlike templates/functions) carry no import precedence, so
@@ -3457,10 +3642,90 @@ fn compile_with_imports_inner(
                 // xsl:param or vice versa — so remove the used package's
                 // homonym from BOTH global tables regardless of which kind
                 // the override declares.
+                // XSLT 3.0 §3.5.2 / XTSE3060 — a component whose effective
+                // visibility (declared, or assigned by the used package's
+                // xsl:expose) is "final" may not be overridden.  Computed
+                // here, before the overridden base globals are removed below
+                // and before expose visibility is folded into the component
+                // structs, using expose_visibility for the effective value.
+                let exp_slice = acc.exposes[before_exposes..].to_vec();
+                // Not overridable: a component whose effective visibility is
+                // explicitly final, private, or hidden.  (Only public and
+                // abstract components may be overridden, XSLT 3.0 §3.5.2.)
+                // The default visibility (`None`) is deliberately NOT flagged
+                // — our expose-visibility computation can under-report (e.g.
+                // Q{}* wildcards), so an explicit value is required to avoid
+                // false positives.
+                let is_final_used = |kind: &str, name: &QName, declared: &Option<String>| -> bool {
+                    matches!(expose_visibility(&exp_slice, kind, name)
+                        .or_else(|| declared.clone())
+                        .as_deref(),
+                        Some("final") | Some("private") | Some("hidden"))
+                };
+                for f in &up.overrides.functions {
+                    let base = acc.functions[before_fns..].iter()
+                        .find(|b| qname_key(&b.name) == qname_key(&f.name));
+                    if let Some(b) = base {
+                        if is_final_used("function", &b.name, &b.visibility) {
+                            return Err(XsltError::InvalidStylesheet(format!(
+                                "xsl:override cannot override function '{}' whose effective \
+                                 visibility is final (XTSE3060)", qname_key(&f.name))));
+                        }
+                    }
+                }
+                for v in &up.overrides.global_variables {
+                    let base = acc.global_variables[before_vars..].iter()
+                        .find(|b| qname_key(&b.name) == qname_key(&v.name));
+                    if let Some(b) = base {
+                        if is_final_used("variable", &b.name, &b.visibility) {
+                            return Err(XsltError::InvalidStylesheet(format!(
+                                "xsl:override cannot override variable '{}' whose effective \
+                                 visibility is final (XTSE3060)", qname_key(&v.name))));
+                        }
+                    }
+                }
+                for t in up.overrides.templates.iter().filter(|t| t.name.is_some()) {
+                    let tn = t.name.as_ref().unwrap();
+                    let base = acc.templates[before_templates..].iter()
+                        .find(|b| b.name.as_ref().map(qname_key) == Some(qname_key(tn)));
+                    if let Some(b) = base {
+                        if is_final_used("template", tn, &b.visibility) {
+                            return Err(XsltError::InvalidStylesheet(format!(
+                                "xsl:override cannot override template '{}' whose effective \
+                                 visibility is final (XTSE3060)", qname_key(tn))));
+                        }
+                    }
+                }
                 let overridden_globals: std::collections::HashSet<String> =
                     up.overrides.global_variables.iter().map(|v| qname_key(&v.name))
                         .chain(up.overrides.global_params.iter().map(|p| qname_key(&p.name)))
                         .collect();
+                // XSLT 3.0 §3.5.1 — `xsl:original` inside a variable override
+                // refers to the overridden component's value.  Clone the
+                // overridden base global under the name `xsl:original` BEFORE
+                // it's removed below, but ONLY for overrides whose body
+                // actually references `$xsl:original` — an unconditional clone
+                // would add spurious globals that perturb unrelated overrides.
+                let mut orig_vars: Vec<crate::ast::Variable> = Vec::new();
+                for ov in &up.overrides.global_variables {
+                    let Some(sel) = &ov.select else { continue };
+                    let (mut f, mut v) = (Vec::new(), Vec::new());
+                    collect_expr_refs(sel, &mut f, &mut v);
+                    if !v.iter().any(|r| r == "xsl:original"
+                        || r == "{http://www.w3.org/1999/XSL/Transform}original") { continue; }
+                    let key = qname_key(&ov.name);
+                    if let Some(base) = acc.global_variables[before_vars..].iter()
+                        .find(|bv| qname_key(&bv.name) == key)
+                    {
+                        let mut clone = base.clone();
+                        clone.name = QName {
+                            prefix: Some("xsl".into()), local: "original".into(),
+                            uri: "http://www.w3.org/1999/XSL/Transform".into(),
+                        };
+                        clone.visibility = None;
+                        orig_vars.push(clone);
+                    }
+                }
                 if !overridden_globals.is_empty() {
                     let tail_v = acc.global_variables.split_off(before_vars);
                     acc.global_variables.extend(tail_v.into_iter()
@@ -3531,6 +3796,64 @@ fn compile_with_imports_inner(
                             None    => true,
                         }
                     };
+                    // XSLT 3.0 §3.5.2 / XTSE3040 — a component declared
+                    // visibility="final" may not be re-accepted with a more
+                    // permissive visibility (public).  Narrow to the
+                    // unambiguous final→public case: `final` is always
+                    // explicit (never the default or expose-adjusted), so
+                    // this can't false-positive on a component whose
+                    // effective visibility differs from its declared one.
+                    let accepts_as_public = |kind: &str, name: &QName|
+                        expose_visibility(&up.accepts, kind, name).as_deref() == Some("public");
+                    for f in &acc.functions[before_fns..] {
+                        if f.visibility.as_deref() == Some("final")
+                            && accepts_as_public("function", &f.name) {
+                            return Err(XsltError::InvalidStylesheet(format!(
+                                "xsl:accept cannot accept final function '{}' as public \
+                                 (XTSE3040)", qname_key(&f.name))));
+                        }
+                    }
+                    for v in &acc.global_variables[before_vars..] {
+                        if v.visibility.as_deref() == Some("final")
+                            && accepts_as_public("variable", &v.name) {
+                            return Err(XsltError::InvalidStylesheet(format!(
+                                "xsl:accept cannot accept final variable '{}' as public \
+                                 (XTSE3040)", qname_key(&v.name))));
+                        }
+                    }
+                    // XSLT 3.0 §3.5.2 / XTSE3000 — an xsl:accept naming a
+                    // specific (non-wildcard) component must match a
+                    // component of that kind in the used package.
+                    let used_names = |kind: &str| -> HashSet<String> {
+                        match kind {
+                            "function" => acc.functions[before_fns..].iter()
+                                .map(|f| qname_key(&f.name)).collect(),
+                            "variable" => acc.global_variables[before_vars..].iter()
+                                .map(|v| qname_key(&v.name))
+                                .chain(acc.global_params[before_params..].iter()
+                                    .map(|p| qname_key(&p.name))).collect(),
+                            "template" => acc.templates[before_templates..].iter()
+                                .filter_map(|t| t.name.as_ref().map(qname_key)).collect(),
+                            "attribute-set" => acc.attribute_sets[before_attr_sets..].iter()
+                                .map(|s| qname_key(&s.name)).collect(),
+                            "mode" => acc.modes[before_modes..].iter()
+                                .filter_map(|m| m.name.as_ref().map(qname_key)).collect(),
+                            _ => HashSet::new(),
+                        }
+                    };
+                    for ac in &up.accepts {
+                        if ac.component == "*" { continue; }
+                        let names_set = used_names(&ac.component);
+                        for tok in &ac.names {
+                            if tok.contains('*') { continue; }
+                            let key = expand_component_token(tok, &ac.namespaces);
+                            if !names_set.contains(&key) {
+                                return Err(XsltError::InvalidStylesheet(format!(
+                                    "xsl:accept names component '{tok}' that does not exist \
+                                     in the used package (XTSE3000)")));
+                            }
+                        }
+                    }
                     let exposed_t: HashSet<String> = acc.templates[before_templates..].iter()
                         .filter(|t| t.name.as_ref()
                             .is_some_and(|n| eff_visible("template", n, &t.visibility)))
@@ -3551,6 +3874,24 @@ fn compile_with_imports_inner(
                         .map(|f| format!("{}#{}", qname_key(&f.name), f.params.len())).collect();
                     let ov_v: HashSet<String> = up.overrides.global_variables.iter()
                         .map(|v| qname_key(&v.name)).collect();
+                    // A component declared BOTH at the top level of the using
+                    // package AND inside its xsl:override is a duplicate
+                    // declaration (two declarations of the same component).
+                    if let Some(k) = own_f.iter().find(|k| ov_f.contains(*k)) {
+                        return Err(XsltError::InvalidStylesheet(format!(
+                            "function '{k}' is declared both at the top level and \
+                             in xsl:override (XTSE0770)")));
+                    }
+                    if let Some(k) = own_t.iter().find(|k| ov_t.contains(*k)) {
+                        return Err(XsltError::InvalidStylesheet(format!(
+                            "named template '{k}' is declared both at the top level \
+                             and in xsl:override (XTSE0660)")));
+                    }
+                    if let Some(k) = own_v.iter().find(|k| ov_v.contains(*k)) {
+                        return Err(XsltError::InvalidStylesheet(format!(
+                            "variable '{k}' is declared both at the top level and in \
+                             xsl:override (XTSE0630)")));
+                    }
                     if let Some(k) = own_t.iter().find(|k| exposed_t.contains(*k) && !ov_t.contains(*k)) {
                         return Err(clash("named template", k));
                     }
@@ -3596,6 +3937,10 @@ fn compile_with_imports_inner(
                     }
                 }
                 acc.functions.extend(orig_fns);
+                // Added after the privates check so the synthetic
+                // xsl:original variable isn't mistaken for a private
+                // used-package reference.
+                acc.global_variables.extend(orig_vars);
             }
             None => return Err(XsltError::InvalidStylesheet(format!(
                 "xsl:use-package: no package named '{}' is available (XTSE3000)",
@@ -3676,6 +4021,51 @@ fn collect_expr_refs(e: &Expr, fns: &mut Vec<String>, vars: &mut Vec<String>) {
 
 fn collect_body_refs(body: &[Instr], fns: &mut Vec<String>, vars: &mut Vec<String>) {
     crate::walk::walk_body(body, &mut |e: &Expr| collect_expr_refs(e, fns, vars));
+}
+
+/// Best-effort test for whether an expression is NOT motionless — i.e. it
+/// navigates away from the context node via a downward / sideways / upward
+/// axis (anything other than self / attribute / namespace).  Used for the
+/// XSLT 3.0 §18.2 streamability check on streamable accumulator rules.
+/// Conservative: unhandled shapes contribute `false` (no false error).
+fn expr_navigates(e: &Expr) -> bool {
+    use sup_xml_core::xpath::ast::Expr::*;
+    use sup_xml_core::xpath::ast::{LocationPath, Axis};
+    // Only downward / sideways navigation breaks streamability (it needs
+    // buffering).  Climbing — self / attribute / namespace / parent /
+    // ancestor(-or-self) — is motionless (those nodes are on the open
+    // element stack).
+    let moves = |a: &Axis| matches!(a,
+        Axis::Child | Axis::Descendant | Axis::DescendantOrSelf
+        | Axis::Following | Axis::FollowingSibling
+        | Axis::Preceding | Axis::PrecedingSibling);
+    let steps_move = |steps: &[sup_xml_core::xpath::ast::Step]|
+        steps.iter().any(|s| moves(&s.axis) || s.predicates.iter().any(expr_navigates));
+    match e {
+        FunctionCall(_, args) => args.iter().any(expr_navigates),
+        Or(l, r) | And(l, r) | Eq(l, r) | Ne(l, r) | Lt(l, r) | Gt(l, r)
+        | Le(l, r) | Ge(l, r) | ValueEq(l, r) | ValueNe(l, r) | ValueLt(l, r)
+        | ValueGt(l, r) | ValueLe(l, r) | ValueGe(l, r) | Add(l, r) | Sub(l, r)
+        | Mul(l, r) | Div(l, r) | Mod(l, r) | Union(l, r) | IDiv(l, r)
+        | Intersect(l, r) | Except(l, r) | Range(l, r) | SimpleMap(l, r)
+        | NodeBefore(l, r) | NodeAfter(l, r) | NodeIs(l, r) =>
+            expr_navigates(l) || expr_navigates(r),
+        Neg(x) | InstanceOf(x, _) | CastAs(x, _) | CastableAs(x, _)
+        | TreatAs(x, _) | WithDefaultCollation(_, x) | BackwardsCompat(x) =>
+            expr_navigates(x),
+        IfThenElse { cond, then_branch, else_branch } =>
+            expr_navigates(cond) || expr_navigates(then_branch) || expr_navigates(else_branch),
+        For { bindings, body } | Let { bindings, body }
+        | Quantified { bindings, test: body, .. } =>
+            bindings.iter().any(|(_, ex)| expr_navigates(ex)) || expr_navigates(body),
+        Sequence(items) => items.iter().any(expr_navigates),
+        FilterPath { primary, predicates, steps } =>
+            expr_navigates(primary) || predicates.iter().any(expr_navigates)
+            || steps_move(steps),
+        Path(LocationPath::Absolute(_)) => true,
+        Path(LocationPath::Relative(steps)) => steps_move(steps),
+        _ => false,
+    }
 }
 
 /// The using package's own references and declared names, captured
@@ -3801,11 +4191,104 @@ fn check_override_homonyms(
             }
         }
     }
+    // XSLT 3.0 §3.5.5 / XTSE3070 — an overriding declaration's declared
+    // type signature must match the overridden component's: a template's
+    // result `as=` and each xsl:param `as=`, a function's params + return
+    // `as=`, a variable's `as=`.  Compared whitespace-insensitively; only
+    // a clear both-present mismatch is flagged (an omitted type defers to
+    // the function-conversion rules rather than being treated as a clash).
+    let norm = |t: &Option<String>| t.as_deref().map(|s| s.split_whitespace().collect::<String>());
+    // Only a clash between two BUILT-IN (xs:) types is flagged: a
+    // user-defined / schema type name (e.g. `u2`) may legitimately differ
+    // lexically from the base's yet be a compatible (sub)type, and we
+    // can't decide that without the schema — so those are left alone.
+    let is_builtin = |t: &str| t.trim().trim_end_matches(['?', '*', '+']).trim()
+        .starts_with("xs:");
+    let both_differ = |a: &Option<String>, b: &Option<String>| match (a, b) {
+        (Some(x), Some(y)) => is_builtin(x) && is_builtin(y) && norm(a) != norm(b),
+        _ => false,
+    };
+    let params_differ = |op: &[Param], bp: &[Param]| op.len() == bp.len()
+        && op.iter().zip(bp).any(|(o, b)| both_differ(&o.as_type, &b.as_type));
+    let t_sig: std::collections::HashMap<String, (&Option<String>, &Vec<Param>)> =
+        used_templates.iter().filter_map(|t| t.name.as_ref()
+            .map(|n| (qname_key(n), (&t.as_type, &t.params)))).collect();
+    for t in &overrides.templates {
+        if let Some(n) = &t.name {
+            if let Some((b_as, b_params)) = t_sig.get(&qname_key(n)) {
+                if both_differ(&t.as_type, b_as) || params_differ(&t.params, b_params) {
+                    return Err(XsltError::InvalidStylesheet(format!(
+                        "xsl:override template '{}' declares a type signature \
+                         incompatible with the overridden component (XTSE3070)",
+                        qname_key(n))));
+                }
+            }
+        }
+    }
+    let f_sig: std::collections::HashMap<(String, usize), (&Option<String>, &Vec<Param>)> =
+        used_functions.iter()
+            .map(|f| ((qname_key(&f.name), f.params.len()), (&f.as_type, &f.params)))
+            .collect();
     for f in &overrides.functions {
         if !f_names.contains(&qname_key(&f.name)) { return err("function", qname_key(&f.name)); }
+        if let Some((b_as, b_params)) = f_sig.get(&(qname_key(&f.name), f.params.len())) {
+            if both_differ(&f.as_type, b_as) || params_differ(&f.params, b_params) {
+                return Err(XsltError::InvalidStylesheet(format!(
+                    "xsl:override function '{}' declares a type signature \
+                     incompatible with the overridden component (XTSE3070)",
+                    qname_key(&f.name))));
+            }
+        }
+    }
+    // XSLT 3.0 §3.5.2 / XTSE3060 — a component declared visibility="final"
+    // in the used package may not be overridden.
+    let is_final = |v: &Option<String>| v.as_deref() == Some("final");
+    let fin_err = |kind: &str, name: String| Err(XsltError::InvalidStylesheet(format!(
+        "xsl:override {kind} '{name}' overrides a component declared \
+         visibility=\"final\" in the used package (XTSE3060)")));
+    let t_vis: std::collections::HashMap<String, &Option<String>> = used_templates.iter()
+        .filter_map(|t| t.name.as_ref().map(|n| (qname_key(n), &t.visibility))).collect();
+    let f_vis: std::collections::HashMap<String, &Option<String>> = used_functions.iter()
+        .map(|f| (qname_key(&f.name), &f.visibility)).collect();
+    let a_vis: std::collections::HashMap<String, &Option<String>> = used_attr_sets.iter()
+        .map(|s| (qname_key(&s.name), &s.visibility)).collect();
+    let var_vis: std::collections::HashMap<String, &Option<String>> = used_variables.iter()
+        .map(|v| (qname_key(&v.name), &v.visibility)).collect();
+    for t in &overrides.templates {
+        if let Some(n) = &t.name {
+            if t_vis.get(&qname_key(n)).is_some_and(|v| is_final(v)) {
+                return fin_err("template", qname_key(n));
+            }
+        }
+    }
+    for f in &overrides.functions {
+        if f_vis.get(&qname_key(&f.name)).is_some_and(|v| is_final(v)) {
+            return fin_err("function", qname_key(&f.name));
+        }
+    }
+    for s in &overrides.attribute_sets {
+        if a_vis.get(&qname_key(&s.name)).is_some_and(|v| is_final(v)) {
+            return fin_err("attribute-set", qname_key(&s.name));
+        }
     }
     for v in &overrides.global_variables {
+        if var_vis.get(&qname_key(&v.name)).is_some_and(|v| is_final(v)) {
+            return fin_err("variable", qname_key(&v.name));
+        }
+    }
+    let v_as: std::collections::HashMap<String, &Option<String>> = used_variables.iter()
+        .map(|v| (qname_key(&v.name), &v.as_type))
+        .chain(used_params.iter().map(|p| (qname_key(&p.name), &p.as_type)))
+        .collect();
+    for v in &overrides.global_variables {
         if !v_names.contains(&qname_key(&v.name)) { return err("variable", qname_key(&v.name)); }
+        if let Some(b_as) = v_as.get(&qname_key(&v.name)) {
+            if both_differ(&v.as_type, b_as) {
+                return Err(XsltError::InvalidStylesheet(format!(
+                    "xsl:override variable '{}' declares a type incompatible \
+                     with the overridden component (XTSE3070)", qname_key(&v.name))));
+            }
+        }
     }
     for s in &overrides.attribute_sets {
         if !a_names.contains(&qname_key(&s.name)) { return err("attribute-set", qname_key(&s.name)); }
@@ -4387,7 +4870,14 @@ fn compile_mode(node: &Node) -> Result<ModeDecl, XsltError> {
     // Enumerated / token attribute values are whitespace-collapsed before
     // interpretation (XSLT 3.0 §3.4), so trim before matching.
     let name = match read_attribute(node, "name").map(str::trim) {
-        None | Some("#default") | Some("#unnamed") => None,
+        None => None,
+        // XSLT 3.0 §6.6.1 — xsl:mode/@name must be an EQName; the reserved
+        // mode tokens (#default / #unnamed / #all) are valid only on
+        // apply-templates/@mode and default-mode, not as a mode declaration.
+        Some("#default") | Some("#unnamed") | Some("#all") =>
+            return Err(XsltError::InvalidStylesheet(
+                "xsl:mode name= may not be a reserved token \
+                 (#default / #unnamed / #all) (XTSE0020)".into())),
         Some(qn) => Some(parse_qname_on(node, qn)?),
     };
     let on_no_match = match read_attribute(node, "on-no-match").map(str::trim) {
@@ -4426,12 +4916,13 @@ fn compile_mode(node: &Node) -> Result<ModeDecl, XsltError> {
         }
     }
     let visibility = read_attribute(node, "visibility").map(str::to_string);
-    // XSLT 3.0 §6.6.1 / XTSE0020 — the unnamed mode is never a component,
-    // so it may not carry a visibility.
-    if name.is_none() && visibility.is_some() {
+    // XSLT 3.0 §6.6.1 — the unnamed mode is always private, so a
+    // visibility other than `private` is a static error; an explicit
+    // `private` is redundant but permitted.
+    if name.is_none() && visibility.as_deref().is_some_and(|v| v.trim() != "private") {
         return Err(XsltError::InvalidStylesheet(
             "xsl:mode for the unnamed mode cannot specify a visibility \
-             (XTSE0020)".into()));
+             other than 'private' (XTSE0020)".into()));
     }
     let streamable = read_streamable(node);
     Ok(ModeDecl { name, on_no_match, on_no_match_explicit, visibility,
@@ -4452,7 +4943,10 @@ fn compile_use_package(node: &Node) -> Result<UsePackage, XsltError> {
     // the richer range syntax (`,`, `to`, `*`) is left unchecked.
     if let Some(v) = &version {
         let v = v.trim();
+        // A trailing `+` ("1.5+" = 1.5 or later) is a range form too
+        // (XSLT 3.0 §3.6.2), as are comma lists, `*`, and `… to …`.
         let is_range = v.contains(',') || v.contains('*')
+            || v.ends_with('+')
             || v.split_whitespace().any(|t| t == "to");
         if !is_range && !is_valid_version_number(v) {
             return Err(XsltError::InvalidStylesheet(format!(
@@ -4480,11 +4974,26 @@ fn compile_use_package(node: &Node) -> Result<UsePackage, XsltError> {
                 };
                 let _guard = default_mode.map(DefaultModeGuard::enter);
                 for decl in child.children() {
-                    if !decl.is_element() { continue; }
                     // XSLT 3.0 §3.5.1 — xsl:override may only contain
-                    // declarations of overridable components.  A key,
-                    // accumulator, or mode (among others) is not overridable.
-                    if is_xslt_element(decl) && !matches!(decl.local_name(),
+                    // declarations of overridable components: significant
+                    // text, a literal result element, or a non-overridable
+                    // XSLT declaration (key / accumulator / mode / …) are
+                    // all static errors (XTSE0010).
+                    if decl.is_text() {
+                        if !is_xslt_whitespace_only(decl.content()) {
+                            return Err(XsltError::InvalidStylesheet(
+                                "xsl:override may not contain text (XTSE0010)".into()));
+                        }
+                        continue;
+                    }
+                    if !decl.is_element() { continue; } // comments / PIs are ignored
+                    if !is_xslt_element(decl) {
+                        return Err(XsltError::InvalidStylesheet(format!(
+                            "xsl:override may only contain overridable component \
+                             declarations, not the literal result element '{}' (XTSE0010)",
+                            decl.local_name())));
+                    }
+                    if !matches!(decl.local_name(),
                         "template" | "function" | "variable" | "param" | "attribute-set")
                     {
                         return Err(XsltError::InvalidStylesheet(format!(
@@ -4675,10 +5184,56 @@ pub(crate) fn expose_visibility(
 /// XSLT 3.0 §6.2 / XTSE3087 — a package may contain at most one
 /// `xsl:global-context-item` declaration (counting all its modules).
 pub(crate) fn validate_global_context_item(ast: &StylesheetAst) -> Result<(), XsltError> {
-    if ast.global_context_items.len() > 1 {
-        return Err(XsltError::InvalidStylesheet(
-            "more than one xsl:global-context-item declaration in a package \
-             (XTSE3087)".into()));
+    // XSLT 3.0 §6.2 / XTSE3087 — a package may contain at most one
+    // xsl:global-context-item declaration, but several included modules
+    // may each declare one as long as they are EQUIVALENT (same use= and
+    // same as=, whitespace-insensitive in the type).  Only an
+    // inconsistency is the error.
+    let norm = |t: &Option<String>| t.as_deref()
+        .map(|s| s.split_whitespace().collect::<String>());
+    if let Some(first) = ast.global_context_items.first() {
+        for g in &ast.global_context_items[1..] {
+            if g.use_ != first.use_ || norm(&g.as_type) != norm(&first.as_type) {
+                return Err(XsltError::InvalidStylesheet(
+                    "inconsistent xsl:global-context-item declarations in a \
+                     package (XTSE3087)".into()));
+            }
+        }
+    }
+    // XSLT 3.0 §6.2 — when xsl:global-context-item use="absent", there is no
+    // context item for global variables, so a global variable whose select
+    // is a path expression (which references the context item) is a static
+    // error.
+    if ast.global_context_items.iter().any(|g| g.use_.trim() == "absent") {
+        let is_path = |e: &Expr| matches!(e,
+            Expr::Path(sup_xml_core::xpath::ast::LocationPath::Absolute(_))
+            | Expr::Path(sup_xml_core::xpath::ast::LocationPath::Relative(_)));
+        // xsl:copy copies the context node, so a global variable body
+        // containing it references the context.  Recurse only through
+        // context-PRESERVING containers (literal elements, if, choose) —
+        // not xsl:for-each etc., which rebind the context.
+        fn body_uses_context(body: &[Instr]) -> bool {
+            body.iter().any(|i| match i {
+                Instr::Copy { .. } => true,
+                Instr::LiteralElement { body, .. } | Instr::Element { body, .. }
+                | Instr::If { body, .. } | Instr::Document { body, .. } =>
+                    body_uses_context(body),
+                Instr::Choose { whens, otherwise } =>
+                    whens.iter().any(|(_, b)| body_uses_context(b))
+                    || otherwise.as_ref().is_some_and(|b| body_uses_context(b)),
+                _ => false,
+            })
+        }
+        for v in &ast.global_variables {
+            let refs_ctx = v.select.as_ref().is_some_and(is_path)
+                || (v.select.is_none() && body_uses_context(&v.body));
+            if refs_ctx {
+                return Err(XsltError::InvalidStylesheet(format!(
+                    "global variable '{}' references the context item, but \
+                     xsl:global-context-item use=\"absent\" (XPST0008)",
+                    qname_key(&v.name))));
+            }
+        }
     }
     Ok(())
 }
@@ -4689,6 +5244,8 @@ pub(crate) fn validate_package_exposes(ast: &StylesheetAst) -> Result<(), XsltEr
     let templates: HashSet<String> = ast.templates.iter()
         .filter_map(|t| t.name.as_ref().map(qname_key)).collect();
     let functions: HashSet<String> = ast.functions.iter().map(|f| qname_key(&f.name)).collect();
+    let func_arity: HashSet<(String, usize)> = ast.functions.iter()
+        .map(|f| (qname_key(&f.name), f.params.len())).collect();
     let variables: HashSet<String> = ast.global_variables.iter().map(|v| qname_key(&v.name))
         .chain(ast.global_params.iter().map(|p| qname_key(&p.name))).collect();
     let attr_sets: HashSet<String> = ast.attribute_sets.iter().map(|s| qname_key(&s.name)).collect();
@@ -4731,9 +5288,20 @@ pub(crate) fn validate_package_exposes(ast: &StylesheetAst) -> Result<(), XsltEr
                     }
                 }
             }
+            // Only function tokens may carry an arity (`name#N`); on any
+            // other component kind a `#` makes the token name no component.
+            let arity: Option<usize> = tok.split('#').nth(1).and_then(|a| a.parse().ok());
+            let has_hash = tok.contains('#');
             let found = match ex.component.as_str() {
+                // A function token must carry an arity (`name#N`) or the
+                // any-arity form (`name#*`); a bare name is invalid
+                // (XSLT 3.0 §3.5.2.1).
+                "function" => match arity {
+                    Some(n) => func_arity.contains(&(key.clone(), n)),
+                    None    => has_hash && functions.contains(&key),
+                },
+                _ if has_hash => false,
                 "template"      => templates.contains(&key),
-                "function"      => functions.contains(&key),
                 "variable"      => variables.contains(&key),
                 "attribute-set" => attr_sets.contains(&key),
                 "mode"          => modes.contains(&key),
@@ -4946,6 +5514,25 @@ fn compile_output(node: &Node, allow_avt: bool) -> Result<OutputSpec, XsltError>
         // XSLT 3.0 §27.1 — `item-separator` for build-tree="no" output.
         if let Some(v) = read_attribute(node, "item-separator") {
             out.item_separator = Some(v.to_string());
+        }
+        // Serialization 3.1 §3 — `json-node-output-method` chooses how a
+        // node value is serialized inside method="json" output.
+        if let Some(v) = read_attribute(node, "json-node-output-method") {
+            out.json_node_output_method = Some(v.trim().to_string());
+        }
+        // Serialization 3.1 §3 — `allow-duplicate-names` for the json method.
+        if let Some(v) = read_attribute(node, "allow-duplicate-names") {
+            out.allow_duplicate_names = Some(parse_yesno(v));
+        }
+        // XSLT 3.0 §27.2 — `parameter-document` references an external
+        // serialization-parameters document.  Resolve it against the
+        // declaring module's base now; the loader-driven post-pass
+        // (`apply_parameter_documents`) reads it after the build.
+        if let Some(v) = read_attribute(node, "parameter-document") {
+            out.parameter_document = Some(match current_module_file() {
+                Some(base) => sup_xml_core::xpath::eval::resolve_uri_against(&base, v.trim()),
+                None => v.trim().to_string(),
+            });
         }
         // The omit-xml-declaration / standalone / undeclare-prefixes
         // consistency rules below govern the XML serialization method
@@ -5830,7 +6417,8 @@ fn compile_raw_instr_into(
             let mut serialization_avts: Vec<(String, Avt)> = Vec::new();
             for a in ["omit-xml-declaration", "indent",
                       "include-content-type", "undeclare-prefixes",
-                      "escape-uri-attributes", "byte-order-mark"] {
+                      "escape-uri-attributes", "byte-order-mark",
+                      "allow-duplicate-names"] {
                 if let Some(v) = read_attribute(node, a) {
                     if value_is_avt(&v) {
                         serialization_avts.push((a.to_string(), avt(node, v)?));
@@ -8157,6 +8745,99 @@ pub fn validate_call_template_with_params(ast: &StylesheetAst) -> Result<(), Xsl
 /// undeclared mode is a static error (XTSE3050).  The unnamed/default
 /// mode and `mode="#current"` impose no requirement.  No-op for plain
 /// stylesheets, which never require mode declarations.
+/// XSLT 3.0 §18.2 — an `xsl:accumulator` must contain at least one
+/// `xsl:accumulator-rule`.
+pub(crate) fn validate_accumulators(ast: &StylesheetAst) -> Result<(), XsltError> {
+    for acc in &ast.accumulators {
+        if acc.rules.is_empty() {
+            return Err(XsltError::InvalidStylesheet(format!(
+                "xsl:accumulator '{}' must contain at least one \
+                 xsl:accumulator-rule (XTSE0010)", qname_key(&acc.name))));
+        }
+        // XSLT 3.0 §18.2 — in a streamable accumulator, each rule's match
+        // pattern and select expression must be motionless (must not
+        // navigate away from the matched node except to its attributes).
+        if acc.streamable {
+            for rule in &acc.rules {
+                if rule.select.as_ref().is_some_and(expr_navigates) {
+                    return Err(XsltError::InvalidStylesheet(format!(
+                        "streamable xsl:accumulator '{}' has a rule whose select \
+                         is not motionless (XTSE3430)", qname_key(&acc.name))));
+                }
+                if let Expr::Path(
+                    sup_xml_core::xpath::ast::LocationPath::Relative(steps)
+                    | sup_xml_core::xpath::ast::LocationPath::Absolute(steps),
+                ) = &rule.match_pattern {
+                    if steps.iter().any(|s| s.predicates.iter().any(expr_navigates)) {
+                        return Err(XsltError::InvalidStylesheet(format!(
+                            "streamable xsl:accumulator '{}' has a rule whose match \
+                             pattern is not motionless (XTSE3430)", qname_key(&acc.name))));
+                    }
+                }
+            }
+        }
+    }
+    // XSLT 3.0 §10.1.1 — a template rule's context item is the node it
+    // matches, so a `required` context-item type that is a built-in xs:
+    // atomic type can never be satisfied (no node is an atomic value): a
+    // statically-detectable type error.  Restricted to xs:-prefixed atomic
+    // type names (no `(` kind tests, no user types) so it can't mis-flag a
+    // pattern that matches atomic values via a user/sequence type.
+    for t in &ast.templates {
+        if t.match_pattern.is_none() { continue; }
+        if t.context_item_use.as_deref() != Some("required") { continue; }
+        let Some(as_t) = &t.context_item_as else { continue };
+        let as_t = as_t.trim().trim_end_matches(['?', '*', '+']).trim();
+        if as_t.starts_with("xs:") && !as_t.contains('(') {
+            return Err(XsltError::InvalidStylesheet(format!(
+                "xsl:context-item as='{as_t}' (an atomic type) is incompatible \
+                 with the template's match pattern, which matches nodes (XTTE0590)")));
+        }
+    }
+    // XSLT 3.0 §3.13 / XPST0051 — an xsl:context-item as= naming a
+    // user-namespaced atomic type when no schema is imported references an
+    // undefined type.  Gated on no imported schemas (with a schema the type
+    // may be legitimately defined) and on a prefixed, non-xs, non-kind-test
+    // name.  Without the `xsd` feature no schema types exist at all.
+    #[cfg(feature = "xsd")]
+    let no_schemas = ast.schemas.is_empty();
+    #[cfg(not(feature = "xsd"))]
+    let no_schemas = true;
+    if no_schemas {
+        for t in &ast.templates {
+            let Some(as_t) = &t.context_item_as else { continue };
+            let as_t = as_t.trim().trim_end_matches(['?', '*', '+']).trim();
+            let prefixed_user_type = as_t.contains(':')
+                && !as_t.starts_with("xs:") && !as_t.contains('(') && !as_t.contains('{');
+            if prefixed_user_type {
+                return Err(XsltError::InvalidStylesheet(format!(
+                    "xsl:context-item as='{as_t}' references a type that is not \
+                     defined (no schema imported) (XPST0051)")));
+            }
+        }
+    }
+    // XSLT 3.0 §6.4 — a named `default-mode` must reference a mode that is
+    // declared (xsl:mode) or used (a template's mode=).
+    if let Some(dm) = &ast.default_mode {
+        let key = qname_key(dm);
+        let exists = ast.modes.iter().any(|m| m.name.as_ref().map(qname_key).as_deref() == Some(key.as_str()))
+            || ast.templates.iter().any(|t|
+                t.modes_match_all
+                || t.mode.as_ref().map(qname_key).as_deref() == Some(key.as_str())
+                || t.modes.iter().any(|m| qname_key(m) == key));
+        // Only flag a dangling default-mode when no template could possibly
+        // use it (no templates at all) — a mode is also "used" by an
+        // apply-templates mode=, which isn't enumerated here, so requiring
+        // an empty template set avoids false positives on real stylesheets.
+        if !exists && ast.templates.is_empty() {
+            return Err(XsltError::InvalidStylesheet(format!(
+                "default-mode='{key}' references a mode that is neither \
+                 declared nor used (XTSE0010)")));
+        }
+    }
+    Ok(())
+}
+
 pub fn validate_declared_modes(ast: &StylesheetAst) -> Result<(), XsltError> {
     if !ast.declared_modes {
         return Ok(());

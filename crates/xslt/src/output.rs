@@ -749,11 +749,19 @@ fn with_content_type_meta(children: &[ResultNode], output: &OutputSpec, xhtml: b
 /// replacing any content-type meta among its children with a fresh
 /// one.  Returns whether a head was found.
 fn inject_content_type(nodes: &mut [ResultNode], content: &str, ns: &str) -> bool {
+    const XHTML: &str = "http://www.w3.org/1999/xhtml";
     for node in nodes.iter_mut() {
         if let ResultNode::Element { name, children, .. } = node {
-            if name.local.eq_ignore_ascii_case("head") && name.uri == ns {
+            // The html output method (ns = "") treats XHTML-namespace
+            // content as HTML, so a head in either no namespace or the
+            // XHTML namespace receives the meta; the meta is inserted in
+            // the head's own namespace so it needs no xmlns of its own.
+            let is_head = name.local.eq_ignore_ascii_case("head")
+                && (name.uri == ns || (ns.is_empty() && name.uri == XHTML));
+            if is_head {
+                let head_ns = name.uri.clone();
                 children.retain(|c| !is_content_type_meta(c));
-                children.insert(0, content_type_meta(content, ns));
+                children.insert(0, content_type_meta(content, &head_ns));
                 return true;
             }
             if inject_content_type(children, content, ns) {

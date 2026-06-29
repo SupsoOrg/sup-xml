@@ -48,9 +48,50 @@ pub fn should_strip<I: DocIndexLike>(
     if !matches!(idx.kind(parent), XPathNodeKind::Element) {
         return false;
     }
+    // XSLT 1.0 §3.4 — `xml:space` overrides the strip-space rules: a
+    // whitespace-only text node is preserved when the nearest ancestor
+    // element bearing an `xml:space` attribute has the value `preserve`.
+    if nearest_xml_space(parent, idx) == Some(XmlSpace::Preserve) {
+        return false;
+    }
     let parent_local = idx.local_name(parent);
     let parent_uri   = idx.namespace_uri(parent);
     strips_whitespace_under(style, parent_local, parent_uri)
+}
+
+#[derive(PartialEq, Eq, Clone, Copy)]
+enum XmlSpace { Default, Preserve }
+
+const XML_NAMESPACE: &str = "http://www.w3.org/XML/1998/namespace";
+
+/// The effective `xml:space` value at `elem`: the value declared on the
+/// nearest ancestor-or-self element that carries an `xml:space`
+/// attribute (XML 1.0 §2.10), or `None` when none does.
+fn nearest_xml_space<I: DocIndexLike>(elem: NodeId, idx: &I) -> Option<XmlSpace> {
+    let mut cur = Some(elem);
+    while let Some(e) = cur {
+        if matches!(idx.kind(e), XPathNodeKind::Element) {
+            for a in idx.attr_range(e) {
+                // The `xml` prefix is bound to the XML namespace by
+                // definition (XML Names §3); accept either the resolved
+                // namespace URI or the lexical `xml:space` name so the
+                // check holds whether or not the source was parsed
+                // namespace-aware.
+                let is_xml_space = idx.local_name(a) == "space"
+                    && (idx.namespace_uri(a) == XML_NAMESPACE
+                        || idx.node_name(a) == "xml:space");
+                if is_xml_space {
+                    return Some(if idx.string_value(a).trim() == "preserve" {
+                        XmlSpace::Preserve
+                    } else {
+                        XmlSpace::Default
+                    });
+                }
+            }
+        }
+        cur = idx.parent(e);
+    }
+    None
 }
 
 /// Rule-only variant of [`should_strip`] for callers that already hold
@@ -96,9 +137,14 @@ fn match_specificity(rule: &QName, name: &str, uri: &str) -> Option<i32> {
     if rule.local == "*" && rule.uri.is_empty() && rule.prefix.is_none() {
         return Some(0);
     }
-    // `prefix:*` — namespaced wildcard.
+    // `prefix:*` / `Q{uri}*` — namespaced wildcard.
     if rule.local == "*" {
         return if rule.uri == uri { Some(1) } else { None };
+    }
+    // `*:NCName` — any namespace, specific local name (XSLT 2.0 §5.5.3).
+    // Encoded by the compiler as prefix `*` with a concrete local name.
+    if rule.prefix.as_deref() == Some("*") {
+        return if rule.local == name { Some(1) } else { None };
     }
     // Exact local name; URIs must also match (both empty if no
     // namespace).
@@ -184,6 +230,49 @@ mod tests {
         let doc = parse_doc("<r><keep>  </keep></r>");
         let ctx = XPathContext::new(&doc);
         let t = ws_text(&doc, &ctx, "/r/keep");
+        assert!(!should_strip(&xslt.ast, t, &ctx.index));
+    }
+
+    #[test]
+    fn xml_space_preserve_beats_wildcard_strip() {
+        let xslt = make_style(r#"<xsl:strip-space elements="*"/>"#);
+        let doc = parse_doc(r#"<r><k xml:space="preserve">  </k></r>"#);
+        let ctx = XPathContext::new(&doc);
+        let t = ws_text(&doc, &ctx, "/r/k");
+        assert!(!should_strip(&xslt.ast, t, &ctx.index));
+    }
+
+    #[test]
+    fn xml_space_preserve_inherited_from_ancestor() {
+        let xslt = make_style(r#"<xsl:strip-space elements="*"/>"#);
+        let doc = parse_doc(r#"<r xml:space="preserve"><k>  </k></r>"#);
+        let ctx = XPathContext::new(&doc);
+        let t = ws_text(&doc, &ctx, "/r/k");
+        assert!(!should_strip(&xslt.ast, t, &ctx.index));
+    }
+
+    #[test]
+    fn xml_space_default_under_preserve_ancestor_strips() {
+        // The nearest ancestor with xml:space wins: a `default` child of
+        // a `preserve` parent falls back to the strip-space rules.
+        let xslt = make_style(r#"<xsl:strip-space elements="*"/>"#);
+        let doc = parse_doc(
+            r#"<r xml:space="preserve"><k xml:space="default">  </k></r>"#);
+        let ctx = XPathContext::new(&doc);
+        let t = ws_text(&doc, &ctx, "/r/k");
+        assert!(should_strip(&xslt.ast, t, &ctx.index));
+    }
+
+    #[test]
+    fn any_namespace_wildcard_preserve_beats_strip() {
+        let xslt = make_style(r#"
+            <xsl:strip-space elements="*"/>
+            <xsl:preserve-space elements="*:keep"/>
+        "#);
+        let doc = parse_doc(
+            r#"<r xmlns:n="urn:x"><n:keep>  </n:keep></r>"#);
+        let ctx = XPathContext::new(&doc);
+        let t = ws_text(&doc, &ctx, "/r/*[local-name()='keep']");
         assert!(!should_strip(&xslt.ast, t, &ctx.index));
     }
 }

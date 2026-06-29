@@ -207,6 +207,7 @@ impl Stylesheet {
         compiler::validate_package_exposes(&ast)?;
         compiler::validate_global_context_item(&ast)?;
         compiler::validate_declared_modes(&ast)?;
+        compiler::validate_accumulators(&ast)?;
         // XSLT 3.0 §19 streamability is enforced lazily, scoped to the
         // streamable construct actually executed (see the
         // `Instr::SourceDocument` / streamable-mode entry paths), rather

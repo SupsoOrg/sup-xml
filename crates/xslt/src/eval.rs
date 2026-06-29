@@ -426,6 +426,28 @@ impl<'a, I: DocIndexLike> XsltBindings<'a, I> {
         use sup_xml_core::xsd::{BuiltinType, SimpleType, QName as XQName, TypeRef};
         const XSD_NS: &str = "http://www.w3.org/2001/XMLSchema";
         if ns == XSD_NS {
+            // Built-in list types (XSD §3.3.1) atomize to a sequence of
+            // their item type — `xs:NMTOKENS` over "a b c" is three
+            // xs:NMTOKEN items, not one string.
+            let item_kind = match local {
+                "NMTOKENS" => Some("NMTOKEN"),
+                "IDREFS"   => Some("IDREF"),
+                "ENTITIES" => Some("ENTITY"),
+                _ => None,
+            };
+            if let Some(ik) = item_kind {
+                // Validate the whole lexical first (rejects e.g. empty).
+                SimpleType::of_builtin(BuiltinType::from_name(local)?).validate(lexical).ok()?;
+                let items: Vec<Value> = lexical.split_whitespace()
+                    .map(|tok| Value::Typed(Box::new(
+                        sup_xml_core::xpath::eval::TypedAtomic::builtin(
+                            ik, tok.to_string(), None, None))))
+                    .collect();
+                return Some(match items.len() {
+                    1 => items.into_iter().next().unwrap(),
+                    _ => Value::Sequence(items),
+                });
+            }
             let bt = BuiltinType::from_name(local)?;
             let xv = SimpleType::of_builtin(bt).validate(lexical).ok()?;
             // Tag with the exact built-in name (xsd_value_to_xpath only
@@ -801,6 +823,30 @@ impl<'a, I: DocIndexLike> XPathBindings for XsltBindings<'a, I> {
         } else {
             name.to_string()
         };
+        // XSLT 3.0 §3.5 — a component reference resolves within its own
+        // package first: try the package-qualified slot for the executing
+        // package, then fall back to the plain (principal / visible) slot.
+        // For package 0 the qualified key IS the plain key, so this is a
+        // no-op for non-package stylesheets.
+        if self.key_package_id != 0 {
+            if let Some(v) = self.variables.get(&pkg_var_key(self.key_package_id, &key)) {
+                return Some(v.clone());
+            }
+            // Walk the use-graph: a component may reference a global
+            // declared in a package its home package uses (transitively).
+            let mut stack = self.style.package_uses
+                .get(&self.key_package_id).cloned().unwrap_or_default();
+            let mut seen: std::collections::HashSet<u32> = std::collections::HashSet::new();
+            while let Some(pid) = stack.pop() {
+                if !seen.insert(pid) { continue; }
+                if let Some(v) = self.variables.get(&pkg_var_key(pid, &key)) {
+                    return Some(v.clone());
+                }
+                if let Some(more) = self.style.package_uses.get(&pid) {
+                    stack.extend(more.iter().copied());
+                }
+            }
+        }
         self.variables.get(&key)
             .or_else(|| self.variables.get(name))
             .cloned()
@@ -2224,10 +2270,24 @@ impl<'p> XPathBindings for NamedBinding<'p> {
 /// the value immediately before each node's pre-order event and
 /// immediately after its post-order event (XSLT 3.0 §18.4), plus the
 /// initial value used as the fallback for unvisited nodes.
+#[derive(Clone)]
 pub(crate) struct AccumulatorData {
-    pub before:  HashMap<NodeId, Value>,
-    pub after:   HashMap<NodeId, Value>,
-    pub initial: Value,
+    pub before:  HashMap<NodeId, AccumSlot>,
+    pub after:   HashMap<NodeId, AccumSlot>,
+    pub initial: AccumSlot,
+}
+
+/// One stored accumulator value: either a computed value or a deferred
+/// dynamic error.  XSLT 3.0 §18.2 (spec bug 29813): a dynamic error
+/// raised while evaluating an accumulator's initial value or a rule is
+/// not signaled when the accumulator is built — it is recorded and
+/// re-raised at the point where `accumulator-before()` /
+/// `accumulator-after()` reads the affected node's value, so an
+/// enclosing `xsl:try` can catch it.
+#[derive(Clone)]
+pub(crate) enum AccumSlot {
+    Val(Value),
+    Err { code: String, message: String },
 }
 
 /// A stack of variable maps.  Innermost frame wins on lookup.
@@ -3276,16 +3336,18 @@ pub fn apply_stylesheet_full_with_params_and_initial(
         seen_vars.insert((v.name.prefix.clone(), v.name.local.clone()))
     }).collect();
     // XSLT 1.0 §11.4 — global variables may forward-reference each
-    // other, so source order isn't enough.  Pre-bind every global
-    // name to an empty string so first-pass references resolve to
-    // "" instead of erroring, then iterate to fixpoint: each round
-    // re-binds, and the now-populated values feed later lookups.
-    // A small N bounds the cost; cycles just stall at "".
+    // other, so source order isn't enough.  Pre-bind every global name
+    // to a type-appropriate zero so a first-pass reference from a typed
+    // global (`as="xs:integer"`) survives its `as=` cast instead of
+    // failing on a transient empty string; then iterate to fixpoint:
+    // each round re-binds, and the now-populated values feed later
+    // lookups.  A small N bounds the cost; a genuine cycle still errors
+    // (the eval, not the cast, fails — preserving XTDE0640 detection).
     for p in &dedup_params {
-        state.variables.bind(qname_key(&p.name), Value::String(String::new()));
+        state.variables.bind(qname_key(&p.name), prebind_zero(p.as_type.as_deref()));
     }
     for v in &dedup_vars {
-        state.variables.bind(qname_key(&v.name), Value::String(String::new()));
+        state.variables.bind(qname_key(&v.name), prebind_zero(v.as_type.as_deref()));
     }
     // XSLT 1.0 §11.4 — caller-supplied top-level param overrides
     // run BEFORE the global-variable fixpoint so any `xsl:variable`
@@ -3325,6 +3387,11 @@ pub fn apply_stylesheet_full_with_params_and_initial(
             )));
         }
     }
+    // During the fixpoint, a typed global that forward-references one
+    // not yet computed (still bound to "") would fail its `as=` cast;
+    // such errors are transient, so they are swallowed here and the
+    // variable keeps its prior binding.  A final propagating pass below
+    // surfaces any genuine (non-transient) error.
     for _round in 0..16 {
         for p in &dedup_params {
             // Only re-evaluate params the caller DIDN'T override;
@@ -3337,6 +3404,41 @@ pub fn apply_stylesheet_full_with_params_and_initial(
         }
         for v in &dedup_vars {
             bind_variable(&mut state, &v.name, v.select.as_ref(), &v.body, v.as_type.as_deref(), v.base_uri.as_deref(), 0, 1, 1)?;
+        }
+    }
+
+    // XSLT 3.0 §3.5 — a used package's global components are package-local:
+    // two used packages may each `xsl:override` a same-named variable from a
+    // shared base package, and a template must bind a reference within its
+    // OWN package's component set.  The flat fixpoint above keys package-0
+    // components (principal + imports) under their plain Clark names — the
+    // visible/principal bindings.  Here we additionally bind every
+    // package-local component under a package-qualified slot
+    // (`pkg_var_key`), evaluated in its own package context, so
+    // `fn variable` can resolve a reference package-first.  Deduped per
+    // (package, name); package-0 components are already bound above.
+    let has_packages = style.global_variables.iter().any(|v| v.package_id != 0);
+    if has_packages {
+        let mut seen_pkg_v: std::collections::HashSet<(u32, Option<String>, String)> =
+            std::collections::HashSet::new();
+        let pkg_vars: Vec<&_> = style.global_variables.iter()
+            .filter(|v| v.package_id != 0
+                && seen_pkg_v.insert((v.package_id, v.name.prefix.clone(), v.name.local.clone())))
+            .collect();
+        for v in &pkg_vars {
+            state.variables.bind(
+                pkg_var_key(v.package_id, &qname_key(&v.name)),
+                prebind_zero(v.as_type.as_deref()));
+        }
+        for _round in 0..16 {
+            for v in &pkg_vars {
+                let prev = state.current_package_id;
+                state.current_package_id = v.package_id;
+                let r = bind_variable(&mut state, &v.name, v.select.as_ref(), &v.body,
+                    v.as_type.as_deref(), v.base_uri.as_deref(), 0, 1, 1);
+                state.current_package_id = prev;
+                r?;
+            }
         }
     }
 
@@ -3397,8 +3499,14 @@ pub fn apply_stylesheet_full_with_params_and_initial(
     let implicit_initial_template: Option<&str> =
         if initial_template.is_none() && initial_mode.is_none() {
             const XSL_INITIAL: &str = "{http://www.w3.org/1999/XSL/Transform}initial-template";
+            // A template named xsl:initial-template that *also* has match=
+            // is a template rule: under source-driven default invocation it
+            // fires via apply-templates (establishing the current template
+            // rule, so xsl:next-match works), so it is not used as the
+            // implicit by-name entry.  A pure named template is.
             if state.style.templates.iter().any(|t|
-                t.name.as_ref().map(qname_key).as_deref() == Some(XSL_INITIAL))
+                t.name.as_ref().map(qname_key).as_deref() == Some(XSL_INITIAL)
+                && t.match_pattern.is_none())
             {
                 Some(XSL_INITIAL)
             } else { None }
@@ -3434,6 +3542,13 @@ pub fn apply_stylesheet_full_with_params_and_initial(
     // same shape `run_result_document_body` uses for a json
     // xsl:result-document.
     let primary_is_json = merge_principal_output(style).method.as_deref() == Some("json");
+    // XSLT 3.0 §26.1 — the adaptive method serializes the principal
+    // result as an XDM sequence (build-tree defaults to no).  Captured
+    // per top-level instruction of the initial template so constructed
+    // nodes and maps interleave in document order (see below); a JSON
+    // principal uses the simpler whole-result sink capture.
+    let primary_is_adaptive = !primary_is_json
+        && merge_principal_output(style).method.as_deref() == Some("adaptive");
     if primary_is_json { state.sequence_sinks.push(Vec::new()); }
     if let Some(name) = initial_template {
         // The harness may pass either an already-expanded Clark-form
@@ -3471,7 +3586,32 @@ pub fn apply_stylesheet_full_with_params_and_initial(
                      not declared visibility=\"public\" (XTDE0040)"))
                 .with_xpath_code("XTDE0040")));
         }
-        run_template_body(&mut state, tmpl, initial_ctx, 1, 1, &[])?;
+        if primary_is_adaptive && tmpl.params.is_empty()
+            && body_constructs_function_item(&tmpl.body)
+        {
+            // build-tree="no": capture the initial template's body as an
+            // XDM sequence and serialize it adaptively, replicating
+            // run_template_body's minimal focus/package setup.  Only the
+            // map/function case needs this — a pure node/atomic body
+            // serializes correctly through the ordinary result tree.
+            state.variables.enter();
+            let prev_current = state.xslt_current;
+            state.xslt_current = initial_ctx;
+            let prev_pkg = state.current_package_id;
+            state.current_package_id = tmpl.package_id;
+            let items = collect_sequence_output(&mut state, &tmpl.body, initial_ctx, 1, 1);
+            state.current_package_id = prev_pkg;
+            state.xslt_current = prev_current;
+            state.variables.leave();
+            let sep = merge_principal_output(style).item_separator.clone()
+                .unwrap_or_else(|| "\n".to_string());
+            let mut out = String::new();
+            sup_xml_core::xpath::eval::value_to_adaptive(
+                &Value::Sequence(items?), state.idx, &sep, &mut out);
+            state.builder.push_text(out, true);
+        } else {
+            run_template_body(&mut state, tmpl, initial_ctx, 1, 1, &[])?;
+        }
     } else {
         // `<initial-mode name="X"/>` (XSLT 3.0 §2.4) — dispatch
         // the document node with the named mode active.  Mode
@@ -3525,9 +3665,15 @@ pub fn apply_stylesheet_full_with_params_and_initial(
             1 => items.into_iter().next().unwrap(),
             _ => Value::Sequence(items),
         };
+        let node_method = merge_principal_output(style).json_node_output_method
+            .clone().unwrap_or_else(|| "xml".to_string());
+        let mut cmap = flatten_character_maps(
+            &merge_principal_output(style).use_character_maps,
+            pkg_character_maps(style, 0));
+        cmap.extend(merge_principal_output(style).inline_character_map);
+        let allow_dup = merge_principal_output(style).allow_duplicate_names.unwrap_or(false);
         let mut out = String::new();
-        sup_xml_core::xpath::eval::value_to_json(&value, state.idx, &mut out)
-            .map_err(XsltError::from)?;
+        json_serialize(&state, &value, &node_method, &cmap, allow_dup, &mut out)?;
         state.builder.push_text(out, true);
     }
     state.variables.leave();
@@ -3548,14 +3694,16 @@ pub fn apply_stylesheet_full_with_params_and_initial(
         Some((ov, pkg)) => (overlay_output(&merged, &ov), pkg),
         None => (merged, 0),
     };
-    let character_map = flatten_character_maps(
+    let mut character_map = flatten_character_maps(
         &output.use_character_maps, pkg_character_maps(style, output_pkg));
+    character_map.extend(output.inline_character_map.iter().cloned());
     // Each captured secondary document (xsl:result-document) carries its
     // own effective output (principal/format base + inline overrides).
     let secondary = take_secondary_docs().into_iter()
         .map(|(uri, nodes, doc_output)| {
-            let cmap = flatten_character_maps(
+            let mut cmap = flatten_character_maps(
                 &doc_output.use_character_maps, &style.character_maps);
+            cmap.extend(doc_output.inline_character_map.iter().cloned());
             (uri, ResultTree {
                 children: nodes,
                 output: doc_output,
@@ -3828,7 +3976,7 @@ fn copy_result_node(state: &mut EvalState, n: &crate::result_tree::ResultNode) {
         ResultNode::ProcessingInstruction { target, data } => {
             state.builder.push_pi(target.clone(), data.clone());
         }
-        ResultNode::Attribute { name, value } => {
+        ResultNode::Attribute { name, value, .. } => {
             state.builder.push_attribute(name.clone(), value.clone());
         }
         ResultNode::Namespace { prefix, uri } => {
@@ -4045,7 +4193,7 @@ thread_local! {
     /// rather than restarting from `initial-value` per record.  `None`
     /// outside a streamed run, in which case the ordinary per-document
     /// precompute applies unchanged.
-    static STREAM_ACCUM: std::cell::RefCell<Option<HashMap<String, Value>>> =
+    static STREAM_ACCUM: std::cell::RefCell<Option<HashMap<String, AccumSlot>>> =
         const { std::cell::RefCell::new(None) };
     /// XPath 2.0 §2.1.2 / XSLT 2.0 §10.3 — true while evaluating an
     /// `xsl:function` body, where the focus is *undefined* (no context
@@ -4313,10 +4461,15 @@ fn overlay_output_into(base: &mut crate::ast::OutputSpec, ov: &crate::ast::Outpu
     if ov.version.is_some() { base.version = ov.version.clone(); }
     if ov.normalization_form.is_some() { base.normalization_form = ov.normalization_form.clone(); }
     if ov.item_separator.is_some() { base.item_separator = ov.item_separator.clone(); }
+    if ov.json_node_output_method.is_some() {
+        base.json_node_output_method = ov.json_node_output_method.clone();
+    }
     // cdata-section-elements accumulate across xsl:output and
     // xsl:result-document (XSLT 2.0 §20) — union, don't replace.
     base.cdata_section_elements.extend(ov.cdata_section_elements.iter().cloned());
     base.use_character_maps.extend(ov.use_character_maps.iter().cloned());
+    base.inline_character_map.extend(ov.inline_character_map.iter().cloned());
+    if ov.allow_duplicate_names.is_some() { base.allow_duplicate_names = ov.allow_duplicate_names; }
 }
 
 /// Return a fresh output spec = `base` overlaid with `ov`.
@@ -4423,25 +4576,77 @@ const ON_COND_NS: &str = "https://sup-xml.internal/on-conditional";
 /// the body's value (a map / array / atomic) is captured through a
 /// sequence sink and serialized as JSON (F&O §17.5), emitted as raw text;
 /// otherwise the body builds the result tree normally.
-fn run_result_document_body(
-    state: &mut EvalState, body: &Body, ctx_node: NodeId, pos: usize, size: usize, json: bool,
+/// How an xsl:result-document (or the principal output) serializes its
+/// body: as an ordinary result tree, or — for the `json` / `adaptive`
+/// methods, which default to `build-tree="no"` — as an XDM sequence
+/// serialized accordingly (XSLT 3.0 §26).
+#[derive(Clone)]
+enum ResultSeq { Tree, Json(String, Vec<(char, String)>, bool), Adaptive(String) }
+
+/// Serialize `value` as JSON (method="json"), honoring `node_method`
+/// (`json-node-output-method`).  A node value is rendered as markup: the
+/// html / xhtml methods deep-copy it and run the full result-tree
+/// serializer (so `<head>` gets its content-type `<meta>`), while
+/// xml / text are handled in core.
+fn json_serialize(
+    state: &EvalState, value: &Value, node_method: &str,
+    cmap: &[(char, String)], allow_dup: bool, out: &mut String,
 ) -> Result<()> {
-    if !json {
-        return eval_body(state, body, ctx_node, pos, size);
+    use sup_xml_core::xpath::eval::{value_to_json_cb, value_to_json_with_cmap};
+    if matches!(node_method, "html" | "xhtml") {
+        let idx = state.idx;
+        let nm = node_method.to_string();
+        let mut ser = |ns: &[NodeId]| -> String {
+            let mut b = crate::result_tree::ResultBuilder::new();
+            for &id in ns { deep_copy_into_builder(&mut b, idx, id); }
+            let output = crate::ast::OutputSpec {
+                method: Some(nm.clone()), indent: Some(false),
+                ..crate::ast::OutputSpec::default()
+            };
+            let tree = crate::result_tree::ResultTree {
+                children: b.finish(), output,
+                character_map: Vec::new(), secondary: Vec::new(),
+            };
+            tree.to_string().unwrap_or_default()
+        };
+        value_to_json_cb(value, idx, &mut ser, cmap, allow_dup, out).map_err(XsltError::from)
+    } else {
+        value_to_json_with_cmap(value, state.idx, node_method, cmap, allow_dup, out)
+            .map_err(XsltError::from)
     }
-    state.sequence_sinks.push(Vec::new());
-    let r = eval_body(state, body, ctx_node, pos, size);
-    let items = state.sequence_sinks.pop().unwrap_or_default();
-    r?;
-    let value = match items.len() {
-        1 => items.into_iter().next().unwrap(),
-        _ => Value::Sequence(items),
-    };
-    let mut out = String::new();
-    sup_xml_core::xpath::eval::value_to_json(&value, state.idx, &mut out)
-        .map_err(XsltError::from)?;
-    state.builder.push_text(out, true);
-    Ok(())
+}
+
+fn run_result_document_body(
+    state: &mut EvalState, body: &Body, ctx_node: NodeId, pos: usize, size: usize,
+    seq: ResultSeq,
+) -> Result<()> {
+    match seq {
+        ResultSeq::Tree => eval_body(state, body, ctx_node, pos, size),
+        ResultSeq::Json(node_method, cmap, allow_dup) => {
+            // JSON requires a single map/array/atomic; capture the body's
+            // sequence value through a sink and serialize it.
+            state.sequence_sinks.push(Vec::new());
+            let r = eval_body(state, body, ctx_node, pos, size);
+            let items = state.sequence_sinks.pop().unwrap_or_default();
+            r?;
+            let value = match items.len() {
+                1 => items.into_iter().next().unwrap(),
+                _ => Value::Sequence(items),
+            };
+            let mut out = String::new();
+            json_serialize(state, &value, &node_method, &cmap, allow_dup, &mut out)?;
+            state.builder.push_text(out, true);
+            Ok(())
+        }
+        ResultSeq::Adaptive(sep) => {
+            let items = collect_sequence_output(state, body, ctx_node, pos, size)?;
+            let value = Value::Sequence(items);
+            let mut out = String::new();
+            sup_xml_core::xpath::eval::value_to_adaptive(&value, state.idx, &sep, &mut out);
+            state.builder.push_text(out, true);
+            Ok(())
+        }
+    }
 }
 
 fn eval_body(
@@ -5198,6 +5403,7 @@ fn eval_instr(
                         _                    => crate::ast::Standalone::No,
                     }),
                     "indent"                => doc_output.indent = Some(yes),
+                    "allow-duplicate-names" => doc_output.allow_duplicate_names = Some(yes),
                     "omit-xml-declaration"  => doc_output.omit_xml_declaration = Some(yes),
                     "byte-order-mark"       => doc_output.byte_order_mark = Some(yes),
                     "include-content-type"  => doc_output.include_content_type = Some(yes),
@@ -5234,10 +5440,26 @@ fn eval_instr(
             // rather than building a result tree; the serialized JSON is
             // emitted as a disable-output-escaping text node with no XML
             // declaration in front of it.
-            let is_json = doc_output.method.as_deref() == Some("json");
-            if is_json {
-                doc_output.omit_xml_declaration = Some(true);
-            }
+            let seq_mode = match doc_output.method.as_deref() {
+                Some("json") => {
+                    doc_output.omit_xml_declaration = Some(true);
+                    let mut cmap = flatten_character_maps(
+                        &doc_output.use_character_maps, &state.style.character_maps);
+                    cmap.extend(doc_output.inline_character_map.iter().cloned());
+                    let allow_dup = doc_output.allow_duplicate_names.unwrap_or(false);
+                    ResultSeq::Json(doc_output.json_node_output_method.clone()
+                        .unwrap_or_else(|| "xml".to_string()), cmap, allow_dup)
+                }
+                // Only a map/function body needs the build-tree="no"
+                // sequence path; a pure node/atomic body serializes
+                // correctly through the ordinary result tree.
+                Some("adaptive") if body_constructs_function_item(body) => {
+                    doc_output.omit_xml_declaration = Some(true);
+                    ResultSeq::Adaptive(doc_output.item_separator.clone()
+                        .unwrap_or_else(|| "\n".to_string()))
+                }
+                _ => ResultSeq::Tree,
+            };
             // XTDE1480: an xsl:result-document is illegal while the current
             // output state is *temporary* — inside a variable/function
             // body, or an attribute/comment/PI value.  Being nested inside
@@ -5274,7 +5496,7 @@ fn eval_instr(
                             "xsl:result-document targets the principal output URI, \
                              which already has content (XTRE1495)".into()));
                     }
-                    let r = run_result_document_body(state, body, ctx_node, pos, size, is_json);
+                    let r = run_result_document_body(state, body, ctx_node, pos, size, seq_mode.clone());
                     state.principal_buf =
                         Some(std::mem::replace(&mut state.builder, secondary));
                     return r;
@@ -5284,7 +5506,7 @@ fn eval_instr(
                         "xsl:result-document targets the principal output URI, \
                          which already has content (XTRE1495)".into()));
                 }
-                run_result_document_body(state, body, ctx_node, pos, size, is_json)?;
+                run_result_document_body(state, body, ctx_node, pos, size, seq_mode.clone())?;
                 return Ok(());
             }
             // XTRE1495: two result documents must not share a URI.
@@ -5314,7 +5536,7 @@ fn eval_instr(
                 // `current-output-uri()` inside the body returns this
                 // document's URI (XSLT 3.0 §18.2.1).
                 let _out_uri = OutputUriGuard::enter(Some(uri.clone()));
-                run_result_document_body(state, body, ctx_node, pos, size, is_json)
+                run_result_document_body(state, body, ctx_node, pos, size, seq_mode.clone())
             };
             let restored = outer_secondary
                 .unwrap_or_else(|| state.principal_buf.take().expect("principal stashed"));
@@ -6950,11 +7172,12 @@ fn eval_instr(
             let key_val = sup_xml_core::xpath::eval::first_atomic_key(&k, state.idx);
             let val = match select {
                 Some(sel) => state.xpath_eval(sel, ctx_node, pos, size)?,
+                // The value is the sequence the body constructs (XSLT 3.0
+                // §17.4): capture constructed nodes as node items (not as
+                // leaked result-tree output) alongside any xsl:sequence
+                // items, in document order.
                 None => {
-                    state.sequence_sinks.push(Vec::new());
-                    let r = eval_body(state, body, ctx_node, pos, size);
-                    let mut items = state.sequence_sinks.pop().unwrap_or_default();
-                    r?;
+                    let mut items = collect_sequence_output(state, body, ctx_node, pos, size)?;
                     if items.len() == 1 { items.pop().unwrap() }
                     else { Value::Sequence(items) }
                 }
@@ -7109,7 +7332,7 @@ fn bind_variable(
     base_uri: Option<&str>,
     ctx_node: NodeId, pos: usize, size: usize,
 ) -> Result<()> {
-    let key = qname_key(name);
+    let key = pkg_var_key(state.current_package_id, &qname_key(name));
     // XSLT 2.0 §9.3 — a body-form variable declared with any
     // sequence-typed `as=` (`xs:T*`, `item()*`, `node()*`, …) and a
     // body that contributes items via `xsl:sequence` /
@@ -7315,6 +7538,36 @@ fn bind_variable(
 /// — for the narrow purpose of `as=` coercion.  Returns `None` for
 /// non-atomic targets (`node()`, `element()`, `document-node(...)`)
 /// since those aren't representable through `cast_value_to_atomic`.
+/// A type-appropriate zero used to pre-bind a global before the
+/// forward-reference fixpoint: numeric → 0, boolean → false, anything
+/// else (incl. no `as=`) → the empty string.  Lets a typed global that
+/// forward-references another survive its `as=` cast on the first round.
+/// Variable-scope key for a global component, qualified by its home
+/// package (XSLT 3.0 §3.5: components are package-local).  Package 0
+/// (the principal module + its imports) keys under the plain Clark name,
+/// so non-package stylesheets bind and resolve exactly as before; a used
+/// package's components key under a private slot so same-named overrides
+/// from different packages don't collide.
+fn pkg_var_key(package_id: u32, clark: &str) -> String {
+    if package_id == 0 { clark.to_string() }
+    else { format!("\u{1}{package_id}\u{1}{clark}") }
+}
+
+fn prebind_zero(as_type: Option<&str>) -> Value {
+    let Some(t) = as_type else { return Value::String(String::new()) };
+    let local = t.trim().trim_end_matches(['?', '*', '+'])
+        .trim().rsplit(':').next().unwrap_or("");
+    match local {
+        "integer" | "int" | "long" | "short" | "byte" | "decimal" | "double"
+        | "float" | "numeric" | "nonNegativeInteger" | "positiveInteger"
+        | "nonPositiveInteger" | "negativeInteger" | "unsignedLong"
+        | "unsignedInt" | "unsignedShort" | "unsignedByte" =>
+            Value::Number(sup_xml_core::xpath::eval::Numeric::Integer(0)),
+        "boolean" => Value::Boolean(false),
+        _ => Value::String(String::new()),
+    }
+}
+
 pub(crate) fn parse_as_atomic_type(
     src: &str,
 ) -> Option<sup_xml_core::xpath::ast::SequenceType> {
@@ -9360,22 +9613,74 @@ fn precompute_accumulators(state: &mut EvalState, root: NodeId) -> Result<()> {
             .or_insert(d.import_precedence);
     }
     let mut applied: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut pending: Vec<(String, &crate::ast::AccumulatorDecl)> = Vec::new();
     for decl in &decls {
         let key = qname_key(&decl.name);
         if decl.import_precedence != best_prec[&key] { continue; }
         if !applied.insert(key.clone()) { continue; } // precedence tie — first wins
-        let initial = state.xpath_eval(&decl.initial_value, root, 1, 1)?;
-        let initial = fn_coerce_as(initial, decl.as_type.as_deref(), state.idx)?;
-        // Merge into any data already accumulated for earlier documents
-        // — the before/after maps are keyed by globally-unique NodeId.
-        let mut data = state.accumulators.remove(&key).unwrap_or_else(|| AccumulatorData {
-            before: HashMap::new(), after: HashMap::new(), initial: initial.clone(),
-        });
-        let mut value = data.initial.clone();
-        accumulate_walk(state, decl, root, &mut value, &mut data)?;
-        state.accumulators.insert(key, data);
+        pending.push((key, decl));
+    }
+    // An accumulator rule may read another accumulator via
+    // accumulator-before()/after() (XSLT 3.0 §18.4), so the referenced
+    // one must already be computed for this document.  Compute in
+    // dependency order: defer any declaration whose rule reads an
+    // accumulator not yet available (XTDE3340) and retry it once its
+    // dependencies have landed.  No progress in a full pass means the
+    // outstanding references are genuinely undeclared or cyclic.
+    while !pending.is_empty() {
+        let mut deferred: Vec<(String, &crate::ast::AccumulatorDecl)> = Vec::new();
+        let mut last_unresolved: Option<XsltError> = None;
+        let mut progressed = false;
+        for (key, decl) in pending {
+            // A dynamic error evaluating the initial value is deferred to
+            // the point of access (§18.2); only the dependency-ordering
+            // signal (XTDE3340) defers the whole declaration.
+            let initial = match state.xpath_eval(&decl.initial_value, root, 1, 1)
+                .and_then(|v| fn_coerce_as(v, decl.as_type.as_deref(), state.idx)
+                    .map_err(XsltError::from))
+            {
+                Ok(v) => AccumSlot::Val(v),
+                Err(e) if is_unresolved_accumulator(&e) => {
+                    last_unresolved = Some(e);
+                    deferred.push((key, decl));
+                    continue;
+                }
+                Err(e) => capture_deferred_error(&e),
+            };
+            // Merge into any data already accumulated for earlier
+            // documents — the before/after maps are keyed by
+            // globally-unique NodeId.  Clone (rather than remove) so a
+            // deferred-and-retried walk doesn't drop prior-document data.
+            let mut data = state.accumulators.get(&key).cloned()
+                .unwrap_or_else(|| AccumulatorData {
+                    before: HashMap::new(), after: HashMap::new(), initial: initial.clone(),
+                });
+            let mut value = data.initial.clone();
+            match accumulate_walk(state, decl, root, &mut value, &mut data) {
+                Ok(()) => { state.accumulators.insert(key, data); progressed = true; }
+                Err(e) if is_unresolved_accumulator(&e) => {
+                    last_unresolved = Some(e);
+                    deferred.push((key, decl));
+                }
+                Err(e) => return Err(e),
+            }
+        }
+        if deferred.is_empty() { break; }
+        if !progressed { return Err(last_unresolved.unwrap()); }
+        pending = deferred;
     }
     Ok(())
+}
+
+/// Whether an error is the deferred-dependency signal raised by
+/// `accumulator-before()`/`accumulator-after()` for an accumulator not
+/// yet computed for the current document (XTDE3340).
+fn is_unresolved_accumulator(e: &XsltError) -> bool {
+    match e {
+        XsltError::Xpath(xe) => xe.xpath_code.as_deref() == Some("XTDE3340")
+            || xe.message.contains("is not declared (or not applicable here)"),
+        _ => false,
+    }
 }
 
 /// Ensure accumulator values are precomputed for the document(s)
@@ -9406,7 +9711,7 @@ fn accumulate_walk(
     state: &mut EvalState,
     decl:  &crate::ast::AccumulatorDecl,
     node:  NodeId,
-    value: &mut Value,
+    value: &mut AccumSlot,
     data:  &mut AccumulatorData,
 ) -> Result<()> {
     use crate::ast::AccumulatorPhase::{Start, End};
@@ -9442,34 +9747,101 @@ fn apply_accum_rule(
     decl:  &crate::ast::AccumulatorDecl,
     node:  NodeId,
     phase: crate::ast::AccumulatorPhase,
-    value: &mut Value,
+    value: &mut AccumSlot,
 ) -> Result<()> {
+    // XSLT 3.0 §18.2 (spec bug 29813) — once a dynamic error has occurred
+    // during the fold, the accumulator value stays in error for the rest
+    // of the document: every later `accumulator-before/after` raises it.
+    if matches!(value, AccumSlot::Err { .. }) { return Ok(()); }
     let matched = {
         let b = state.bindings();
         let mut found = None;
+        // When several rules of this phase match the node, the last in
+        // declaration order wins (XSLT 3.0 §18.2 — equal default
+        // priority, so document order decides); keep scanning rather
+        // than stopping at the first.
         for (i, rule) in decl.rules.iter().enumerate() {
             if rule.phase != phase { continue; }
             if pattern::matches(&rule.match_pattern, node, state.idx, &b)
                 .map_err(XsltError::from)?
             {
                 found = Some(i);
-                break;
             }
         }
         found
     };
     let Some(i) = matched else { return Ok(()) };
     let rule = &decl.rules[i];
-    state.variables.enter();
-    state.variables.bind("value".to_string(), value.clone());
-    let nv = match &rule.select {
-        Some(e) => state.xpath_eval(e, node, 1, 1),
-        None => build_rtf_nodes(state, &rule.body, node, 1, 1)
-            .map(|ns| Value::NodeSet(rtf_children_into_index(state.idx, &ns))),
+    let cur = match value {
+        AccumSlot::Val(v)    => v.clone(),
+        AccumSlot::Err { .. } => Value::Sequence(Vec::new()),
     };
+    state.variables.enter();
+    state.variables.bind("value".to_string(), cur);
+    let nv: Result<Value> = match &rule.select {
+        Some(e) => state.xpath_eval(e, node, 1, 1),
+        None => eval_accum_rule_body(state, decl.as_type.as_deref(), &rule.body, node),
+    };
+    let nv = nv.and_then(|v|
+        fn_coerce_as(v, decl.as_type.as_deref(), state.idx).map_err(XsltError::from));
     state.variables.leave();
-    *value = fn_coerce_as(nv?, decl.as_type.as_deref(), state.idx)?;
+    *value = match nv {
+        Ok(v) => AccumSlot::Val(v),
+        // The accumulator-dependency-ordering signal must reach the
+        // precompute fixpoint, not be swallowed as a deferred value.
+        Err(e) if is_unresolved_accumulator(&e) => return Err(e),
+        Err(e) => capture_deferred_error(&e),
+    };
     Ok(())
+}
+
+/// Record a dynamic error raised while building an accumulator value as
+/// a deferred [`AccumSlot::Err`], preserving the spec error code so the
+/// re-raised error matches `xsl:catch errors="err:…"` (XSLT 3.0 §18.2).
+fn capture_deferred_error(e: &XsltError) -> AccumSlot {
+    let (qn, _) = error_to_qname(e);
+    let message = match e {
+        XsltError::Xpath(xe)            => xe.message.clone(),
+        XsltError::Dynamic { message, .. } => message.clone(),
+        other                           => other.to_string(),
+    };
+    AccumSlot::Err { code: qn.local, message }
+}
+
+/// Evaluate an accumulator rule's sequence-constructor body (the form
+/// without `select=`) to its new value.  An accumulator whose declared
+/// `as=` type is a map / array / function item — or whose body
+/// constructs one — has its value captured through the sequence sink so
+/// the function item survives; routing it through a result tree would
+/// raise XTDE0450 (XSLT 3.0 §5.7.1).  Any other body builds a temporary
+/// tree, matching the body form of xsl:variable (§9.3).
+fn eval_accum_rule_body(
+    state:   &mut EvalState,
+    as_type: Option<&str>,
+    body:    &crate::ast::Body,
+    node:    NodeId,
+) -> Result<Value> {
+    let want_item_seq = as_type.map(as_is_sequence_typed).unwrap_or(false)
+        || body_constructs_function_item(body);
+    if want_item_seq && body_uses_sequence_or_call(body) {
+        state.sequence_sinks.push(Vec::new());
+        let res = eval_body(state, body, node, 1, 1);
+        let captured = state.sequence_sinks.pop().unwrap_or_default();
+        res?;
+        let mut flat: Vec<Value> = Vec::new();
+        for item in captured {
+            match item {
+                Value::Sequence(items) => flat.extend(items),
+                Value::NodeSet(ns) => flat.extend(
+                    ns.into_iter().map(|id| Value::NodeSet(vec![id]))),
+                other => flat.push(other),
+            }
+        }
+        return Ok(if flat.len() == 1 { flat.pop().unwrap() }
+                  else                { Value::Sequence(flat) });
+    }
+    build_rtf_nodes(state, body, node, 1, 1)
+        .map(|ns| Value::NodeSet(rtf_children_into_index(state.idx, &ns)))
 }
 
 fn rtf_scope_enter(state: &mut EvalState) {
@@ -9755,7 +10127,7 @@ fn copy_result_node_into(state: &mut EvalState, node: &ResultNode) {
         ResultNode::ProcessingInstruction { target, data } => {
             state.builder.push_pi(target.clone(), data.clone());
         }
-        ResultNode::Attribute { name, value } => {
+        ResultNode::Attribute { name, value, .. } => {
             state.builder.push_attribute(name.clone(), value.clone());
         }
         ResultNode::Namespace { prefix, uri } => {
@@ -9841,6 +10213,37 @@ fn stringify(nodes: &[ResultNode]) -> String {
 /// instruction in turn preserves that order — capturing all sequence
 /// items at the end (the old single-pass shape) sorts them after every
 /// constructed text node and gets the order wrong.
+/// Evaluate a sequence-constructor body as an XDM sequence for the
+/// `build-tree="no"` output methods (json / adaptive, XSLT 3.0 §26.1):
+/// each top-level instruction contributes its items in document order —
+/// constructed nodes (top-level attributes are legal here, not XTDE0420)
+/// become node items, while xsl:sequence / xsl:map contribute their
+/// atomic / map / function values directly (so a map never reaches a
+/// result tree, sidestepping XTDE0450).  Mirrors the per-instruction
+/// capture of [`collect_value_of_body_pieces`].
+fn collect_sequence_output(
+    state: &mut EvalState, body: &Body, ctx_node: NodeId, pos: usize, size: usize,
+) -> Result<Vec<Value>> {
+    let mut items: Vec<Value> = Vec::new();
+    for instr in body.iter() {
+        state.sequence_sinks.push(Vec::new());
+        let nodes = build_rtf_nodes(state, &Body::from(vec![instr.clone()]),
+                                    ctx_node, pos, size);
+        let captured = state.sequence_sinks.pop().unwrap_or_default();
+        let nodes = nodes?;
+        for id in rtf_children_into_index(state.idx, &nodes) {
+            items.push(Value::NodeSet(vec![id]));
+        }
+        for v in captured {
+            match v {
+                Value::Sequence(vs) => items.extend(vs),
+                other => items.push(other),
+            }
+        }
+    }
+    Ok(items)
+}
+
 fn collect_value_of_body_pieces(
     state: &mut EvalState, body: &[Instr], ctx_node: NodeId,
     pos: usize, size: usize,

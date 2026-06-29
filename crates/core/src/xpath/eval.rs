@@ -6231,8 +6231,10 @@ fn eval_json_function<I: DocIndexLike>(
         "serialize" if (1..=2).contains(&args.len()) => (|| {
             let method = opt_str(args.get(1), "method").unwrap_or_default();
             if method == "json" {
+                let node_method = opt_str(args.get(1), "json-node-output-method")
+                    .unwrap_or_else(|| "xml".to_string());
                 let mut out = String::new();
-                value_to_json(&args[0], idx, &mut out)?;
+                value_to_json_with(&args[0], idx, &node_method, &mut out)?;
                 return Ok(Value::String(out));
             }
             let ids = collect_node_ids(&args[0]);
@@ -6263,15 +6265,85 @@ fn eval_json_function<I: DocIndexLike>(
 /// numeric/boolean atomics become JSON literals, and everything else its
 /// quoted string value.
 pub fn value_to_json<I: DocIndexLike>(v: &Value, idx: &I, out: &mut String) -> Result<()> {
+    value_to_json_with(v, idx, "xml", out)
+}
+
+/// As [`value_to_json`], but `node_method` is the `json-node-output-method`
+/// serialization parameter (Serialization 3.1 §3): a node appearing as a
+/// value in the JSON structure is serialized with that method and emitted
+/// as a JSON string.  `text` uses the node's string value; every other
+/// method serializes its markup (this core entry point covers the XML
+/// vocabulary — the XSLT layer supplies html/xhtml serialization).
+pub fn value_to_json_with<I: DocIndexLike>(
+    v: &Value, idx: &I, node_method: &str, out: &mut String,
+) -> Result<()> {
+    // Lenient by default (allow_dup = true) so internal callers that
+    // don't model `allow-duplicate-names` never spuriously error.
+    value_to_json_with_cmap(v, idx, node_method, &[], true, out)
+}
+
+/// As [`value_to_json_with`], with a `use-character-maps` table applied
+/// during string escaping and `allow_dup` controlling the
+/// `allow-duplicate-names` check.  Node values are serialized via the XML
+/// vocabulary (or their string value for `text`); html / xhtml are
+/// handled by the XSLT layer through [`value_to_json_cb`].
+pub fn value_to_json_with_cmap<I: DocIndexLike>(
+    v: &Value, idx: &I, node_method: &str, cmap: &[(char, String)],
+    allow_dup: bool, out: &mut String,
+) -> Result<()> {
+    let text = node_method == "text";
+    let mut node_ser = |ns: &[NodeId]| -> String {
+        if text {
+            ns.iter().map(|&id| idx.string_value(id)).collect()
+        } else {
+            let mut scope: Vec<(String, String)> = Vec::new();
+            let mut m = String::new();
+            for &id in ns { serialize_node_xml(idx, id, &mut scope, &mut m); }
+            m
+        }
+    };
+    value_to_json_cb(v, idx, &mut node_ser, cmap, allow_dup, out)
+}
+
+/// As [`value_to_json_with`], but `node_ser` serializes a node value to
+/// its markup string — letting the XSLT layer supply html / xhtml
+/// serialization (which lives outside this crate) for
+/// `json-node-output-method` — and `cmap` is the resolved
+/// `use-character-maps` table.  A mapped character is emitted as its
+/// replacement verbatim rather than being JSON-escaped (Serialization
+/// 3.1 §3), which is how the solidus's default `\/` escaping is
+/// suppressed.
+pub fn value_to_json_cb<I: DocIndexLike>(
+    v: &Value, idx: &I,
+    node_ser: &mut dyn FnMut(&[NodeId]) -> String,
+    cmap: &[(char, String)],
+    allow_dup: bool,
+    out: &mut String,
+) -> Result<()> {
     match v {
         Value::Map(m) => {
             out.push('{');
+            // Serialization 3.1 §3 — distinct XDM keys can serialize to the
+            // same JSON string; unless allow-duplicate-names is yes that is
+            // err:SERE0022.
+            let mut seen: Vec<String> = Vec::new();
             for (i, (k, val)) in m.iter().enumerate() {
                 if i > 0 { out.push(','); }
+                let mut key_str = String::new();
+                json_escape_cmap(&value_to_string(k, idx), cmap, &mut key_str);
+                if !allow_dup {
+                    if seen.iter().any(|s| *s == key_str) {
+                        return Err(xpath_err(format!(
+                            "json serialization: duplicate key \"{key_str}\" with \
+                             allow-duplicate-names=no (SERE0022)"))
+                            .with_xpath_code("SERE0022"));
+                    }
+                    seen.push(key_str.clone());
+                }
                 out.push('"');
-                json_escape_into(&value_to_string(k, idx), out);
+                out.push_str(&key_str);
                 out.push_str("\":");
-                value_to_json(val, idx, out)?;
+                value_to_json_cb(val, idx, node_ser, cmap, allow_dup, out)?;
             }
             out.push('}');
         }
@@ -6279,7 +6351,7 @@ pub fn value_to_json<I: DocIndexLike>(v: &Value, idx: &I, out: &mut String) -> R
             out.push('[');
             for (i, val) in a.iter().enumerate() {
                 if i > 0 { out.push(','); }
-                value_to_json(val, idx, out)?;
+                value_to_json_cb(val, idx, node_ser, cmap, allow_dup, out)?;
             }
             out.push(']');
         }
@@ -6288,13 +6360,152 @@ pub fn value_to_json<I: DocIndexLike>(v: &Value, idx: &I, out: &mut String) -> R
         Value::Typed(t) if t.numeric.is_some() => out.push_str(&value_to_string(v, idx)),
         Value::NodeSet(ns) if ns.is_empty() => out.push_str("null"),
         Value::Sequence(items) if items.is_empty() => out.push_str("null"),
+        // A node value is serialized as markup per json-node-output-method
+        // and emitted as a JSON string (Serialization 3.1 §3).
+        Value::NodeSet(ns) => {
+            out.push('"');
+            json_escape_cmap(&node_ser(ns), cmap, out);
+            out.push('"');
+        }
         other => {
             out.push('"');
-            json_escape_into(&value_to_string(other, idx), out);
+            json_escape_cmap(&value_to_string(other, idx), cmap, out);
             out.push('"');
         }
     }
     Ok(())
+}
+
+/// JSON-escape `s`, but a character present in the `use-character-maps`
+/// table `cmap` is replaced by its mapped string verbatim and not
+/// escaped (Serialization 3.1 §3).
+fn json_escape_cmap(s: &str, cmap: &[(char, String)], out: &mut String) {
+    if cmap.is_empty() { json_escape_into(s, out); return; }
+    for c in s.chars() {
+        match cmap.iter().find(|(ch, _)| *ch == c) {
+            Some((_, rep)) => out.push_str(rep),
+            None           => json_escape_char(c, out),
+        }
+    }
+}
+
+/// Serialize an XDM value with the Adaptive output method (XSLT/XQuery
+/// Serialization 3.1 §10): each item is rendered in a round-trippable
+/// form — maps as `map{"k":v,…}`, arrays as `[v,…]`, nodes via the XML
+/// method (an attribute as `name="value"`), string-like atomics
+/// double-quoted with internal `"` doubled, booleans as
+/// `true()`/`false()`, numerics in lexical form — with `sep` inserted
+/// between the top-level items of the sequence.
+pub fn value_to_adaptive<I: DocIndexLike>(v: &Value, idx: &I, sep: &str, out: &mut String) {
+    for (i, item) in items_of(v).iter().enumerate() {
+        if i > 0 { out.push_str(sep); }
+        adaptive_item(item, idx, out);
+    }
+}
+
+/// Serialize one already-flattened item (never a sequence/range) per the
+/// adaptive rules.  A bare node-set item renders its nodes space-joined.
+fn adaptive_item<I: DocIndexLike>(v: &Value, idx: &I, out: &mut String) {
+    match v {
+        Value::Map(m) => {
+            out.push_str("map{");
+            for (i, (k, val)) in m.iter().enumerate() {
+                if i > 0 { out.push(','); }
+                adaptive_item(k, idx, out);
+                out.push(':');
+                adaptive_value(val, idx, out);
+            }
+            out.push('}');
+        }
+        Value::Array(a) => {
+            out.push('[');
+            for (i, val) in a.iter().enumerate() {
+                if i > 0 { out.push(','); }
+                adaptive_value(val, idx, out);
+            }
+            out.push(']');
+        }
+        Value::Boolean(b) => out.push_str(if *b { "true()" } else { "false()" }),
+        Value::String(s) => adaptive_quote(s, out),
+        // A typed atomic: booleans render as `true()`/`false()`, numerics
+        // keep their lexical form, string-family types are double-quoted,
+        // and everything else falls back to its lexical value.
+        Value::Typed(t) if t.boolean.is_some() =>
+            out.push_str(if t.boolean == Some(true) { "true()" } else { "false()" }),
+        Value::Typed(t) if t.numeric.is_some() => out.push_str(&value_to_string(v, idx)),
+        Value::Typed(t) if adaptive_is_string_type(t.kind) =>
+            adaptive_quote(&value_to_string(v, idx), out),
+        Value::Function(f) => adaptive_function(f, out),
+        Value::NodeSet(ids) => {
+            let mut scope: Vec<(String, String)> = Vec::new();
+            for (i, &id) in ids.iter().enumerate() {
+                if i > 0 { out.push(' '); }
+                adaptive_node(idx, id, &mut scope, out);
+            }
+        }
+        // Numbers and any remaining atomic — lexical string value.
+        _ => out.push_str(&value_to_string(v, idx)),
+    }
+}
+
+/// A map entry's value or an array member: a multi-item sequence is
+/// wrapped in parentheses; a singleton renders bare.
+fn adaptive_value<I: DocIndexLike>(v: &Value, idx: &I, out: &mut String) {
+    let items = items_of(v);
+    if items.len() == 1 {
+        adaptive_item(&items[0], idx, out);
+    } else {
+        out.push('(');
+        for (i, it) in items.iter().enumerate() {
+            if i > 0 { out.push(','); }
+            adaptive_item(it, idx, out);
+        }
+        out.push(')');
+    }
+}
+
+fn adaptive_quote(s: &str, out: &mut String) {
+    out.push('"');
+    for c in s.chars() {
+        if c == '"' { out.push('"'); }
+        out.push(c);
+    }
+    out.push('"');
+}
+
+fn adaptive_is_string_type(kind: &str) -> bool {
+    matches!(kind, "string" | "untypedAtomic" | "anyURI"
+        | "normalizedString" | "token" | "language" | "NMTOKEN"
+        | "Name" | "NCName" | "ID" | "IDREF" | "ENTITY")
+}
+
+fn adaptive_function(f: &FunctionItem, out: &mut String) {
+    match f {
+        FunctionItem::Named { name, arity, .. } => {
+            out.push_str(name);
+            out.push('#');
+            out.push_str(&arity.to_string());
+        }
+        _ => out.push_str("(anonymous-function)"),
+    }
+}
+
+/// An attribute node has no standalone XML serialization, so adaptive
+/// renders it as `name="value"`; every other node kind uses the XML
+/// output method.
+fn adaptive_node<I: DocIndexLike>(
+    idx: &I, id: NodeId, scope: &mut Vec<(String, String)>, out: &mut String,
+) {
+    if matches!(idx.kind(id), XPathNodeKind::Attribute) {
+        out.push_str(idx.node_name(id));
+        out.push_str("=\"");
+        for c in idx.string_value(id).chars() {
+            if c == '"' { out.push_str("&quot;"); } else { out.push(c); }
+        }
+        out.push('"');
+    } else {
+        serialize_node_xml(idx, id, scope, out);
+    }
 }
 
 /// A structural event emitted by [`parse_json_events`].  Lets a
@@ -6857,6 +7068,7 @@ fn json_escape_char(c: char, out: &mut String) {
     match c {
         '"' => out.push_str("\\\""),
         '\\' => out.push_str("\\\\"),
+        '/' => out.push_str("\\/"),
         '\u{0008}' => out.push_str("\\b"),
         '\u{000C}' => out.push_str("\\f"),
         '\n' => out.push_str("\\n"),
@@ -11669,8 +11881,32 @@ fn key_number(v: &Value) -> Option<f64> {
 pub fn map_key_eq<I: DocIndexLike>(a: &Value, b: &Value, idx: &I) -> bool {
     match (key_number(a), key_number(b)) {
         (Some(x), Some(y)) => (x.is_nan() && y.is_nan()) || x == y,
-        (None, None)       => value_to_string(a, idx) == value_to_string(b, idx),
-        _                  => false,
+        // Two non-numeric keys are the same key only when their atomic
+        // type families match (XDM `op:same-key`): a comparison across
+        // families — e.g. xs:time vs xs:string — would raise a type error
+        // under `eq`, so the keys are distinct even with equal lexical
+        // forms.  Within a family, codepoint-collation string equality.
+        (None, None) => key_type_family(a) == key_type_family(b)
+            && value_to_string(a, idx) == value_to_string(b, idx),
+        _            => false,
+    }
+}
+
+/// The `op:same-key` comparison family of a non-numeric atomic key:
+/// keys in different families are never the same key.  String-like types
+/// (incl. xs:untypedAtomic / xs:anyURI) share one family; every other
+/// primitive (date, time, dateTime, durations, QName, …) is its own.
+fn key_type_family(v: &Value) -> &'static str {
+    match v {
+        Value::Boolean(_) => "boolean",
+        Value::String(_)  => "string",
+        Value::Typed(t) => match t.kind {
+            "string" | "normalizedString" | "token" | "language" | "NMTOKEN"
+            | "Name" | "NCName" | "ID" | "IDREF" | "ENTITY" | "anyURI"
+            | "untypedAtomic" => "string",
+            other => other,
+        },
+        _ => "string",
     }
 }
 

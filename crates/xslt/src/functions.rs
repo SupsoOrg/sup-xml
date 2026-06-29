@@ -968,10 +968,19 @@ fn accumulator_fn<I: DocIndexLike>(
     };
     let Some(data) = accumulators.and_then(|m| m.get(&key)) else {
         return Err(err(format!(
-            "accumulator '{raw}' is not declared (or not applicable here) (XTDE3340)")));
+            "accumulator '{raw}' is not declared (or not applicable here) (XTDE3340)"))
+            .with_xpath_code("XTDE3340"));
     };
     let map = if before { &data.before } else { &data.after };
-    Ok(map.get(&context_node).cloned().unwrap_or_else(|| data.initial.clone()))
+    let slot = map.get(&context_node).cloned().unwrap_or_else(|| data.initial.clone());
+    match slot {
+        crate::eval::AccumSlot::Val(v) => Ok(v),
+        // XSLT 3.0 §18.2 — a dynamic error deferred when the accumulator
+        // was built is raised here, carrying its spec code so an enclosing
+        // xsl:try can catch it.
+        crate::eval::AccumSlot::Err { code, message } =>
+            Err(err(message).with_xpath_code(code)),
+    }
 }
 
 fn current_fn(args: &[Value], xslt_context: NodeId) -> Result<Value> {
